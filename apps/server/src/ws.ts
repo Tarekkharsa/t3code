@@ -298,6 +298,10 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [WS_METHODS.serverGetConfig, AuthOrchestrationReadScope],
   [WS_METHODS.agentstackStatus, AuthOrchestrationReadScope],
   [WS_METHODS.agentstackActivity, AuthOrchestrationReadScope],
+  [WS_METHODS.agentstackWorkflow, AuthOrchestrationReadScope],
+  // Governed actions mutate CLI config on disk (within the machine ceiling) —
+  // operate scope, same tier as vcs.pull / server.signalProcess.
+  [WS_METHODS.agentstackAction, AuthOrchestrationOperateScope],
   [WS_METHODS.serverRefreshProviders, AuthOrchestrationOperateScope],
   [WS_METHODS.serverUpdateProvider, AuthOrchestrationOperateScope],
   [WS_METHODS.serverUpsertKeybinding, AuthOrchestrationOperateScope],
@@ -1516,6 +1520,24 @@ const makeWsRpcLayer = (
                   workspaceRoot,
                   limit: input.limit ?? AgentstackCli.ACTIVITY_LIMIT_DEFAULT,
                 }),
+              ),
+            ),
+            { "rpc.aggregate": "agentstack" },
+          ),
+        [WS_METHODS.agentstackWorkflow]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.agentstackWorkflow,
+            resolveAgentstackWorkspaceRoot(input).pipe(
+              Effect.flatMap((workspaceRoot) => agentstackCli.workflow({ workspaceRoot })),
+            ),
+            { "rpc.aggregate": "agentstack" },
+          ),
+        [WS_METHODS.agentstackAction]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.agentstackAction,
+            resolveAgentstackWorkspaceRoot(input).pipe(
+              Effect.flatMap((workspaceRoot) =>
+                agentstackCli.action({ workspaceRoot, action: input.action }),
               ),
             ),
             { "rpc.aggregate": "agentstack" },

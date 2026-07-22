@@ -3,8 +3,14 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   deriveAgentstackActivityRows,
   deriveAgentstackOverviewRows,
+  deriveAgentstackPolicyRows,
+  deriveAgentstackTrustBadge,
+  deriveWorkflowCounts,
+  deriveWorkflowStages,
   matchAgentstackDenial,
+  shortDigest,
   type AgentstackDoctorReport,
+  type AgentstackWorkflowStepLike,
 } from "./agentstack-logic";
 
 const report: AgentstackDoctorReport = {
@@ -40,26 +46,101 @@ const report: AgentstackDoctorReport = {
 };
 
 describe("deriveAgentstackOverviewRows", () => {
-  it("maps doctor sections to curated rows and skips absent sections", () => {
+  it("maps real doctor sections to the design's rows and offers a fix action on drift", () => {
     const rows = deriveAgentstackOverviewRows(report);
     const byKey = Object.fromEntries(rows.map((r) => [r.key, r]));
 
-    expect(byKey["manifest"]).toMatchObject({ level: "warn", summary: "1 change(s) pending" });
+    // Drift present → Manifest warns and offers the apply action.
+    expect(byKey["manifest"]).toMatchObject({
+      level: "warn",
+      summary: "changes pending on disk",
+      action: "apply",
+    });
     expect(byKey["doctor"]).toMatchObject({ level: "warn" });
     expect(byKey["doctor"]!.summary).toContain("2 warning(s)");
-    expect(byKey["gateway"]).toMatchObject({
-      level: "ok",
-      summary: "registered for 2 CLI(s) · project trusted",
-    });
+    expect(byKey["gateway"]).toMatchObject({ level: "ok" });
+    expect(byKey["gateway"]!.summary).toContain("trusted");
     expect(byKey["secrets"]).toMatchObject({ level: "ok", summary: "no secrets referenced" });
-    // No "Skills" section in the fixture → no row invented for it.
-    expect(byKey["skills"]).toBeUndefined();
+    // Sandbox is a standing muted capability row, always present.
+    expect(byKey["sandbox"]).toMatchObject({ level: "muted" });
   });
 
-  it("degrades to no rows (plus the always-on doctor row) on empty input", () => {
-    const rows = deriveAgentstackOverviewRows({ errors: 0, warnings: 0, sections: [] });
-    expect(rows).toHaveLength(1);
+  it("appends a caller-supplied workflow row and degrades to the doctor + sandbox rows", () => {
+    const rows = deriveAgentstackOverviewRows(
+      { errors: 0, warnings: 0, sections: [] },
+      { key: "workflows", label: "Workflows", summary: "1 declared", level: "ok" },
+    );
+    const keys = rows.map((r) => r.key);
+    expect(keys).toEqual(["doctor", "sandbox", "workflows"]);
     expect(rows[0]).toMatchObject({ key: "doctor", level: "ok", summary: "all checks pass" });
+  });
+});
+
+describe("deriveAgentstackTrustBadge", () => {
+  it("reads trusted / inert / unknown from the gateway section", () => {
+    expect(deriveAgentstackTrustBadge(report).state).toBe("trusted");
+    const inert: AgentstackDoctorReport = {
+      errors: 0,
+      warnings: 0,
+      sections: [
+        {
+          title: "Zero-files gateway",
+          lines: [{ level: "warn", msg: "not trusted for auto mode" }],
+        },
+      ],
+    };
+    expect(deriveAgentstackTrustBadge(inert).state).toBe("inert");
+    expect(deriveAgentstackTrustBadge({ errors: 0, warnings: 0, sections: [] }).state).toBe(
+      "unknown",
+    );
+  });
+});
+
+describe("deriveAgentstackPolicyRows", () => {
+  it("emits machine-policy lines with the fix tail stripped", () => {
+    const rows = deriveAgentstackPolicyRows(report);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ title: "Machine policy", level: "ok" });
+    expect(rows[0]!.msg).toContain("rename-proof");
+  });
+});
+
+describe("workflow derivations", () => {
+  const steps: AgentstackWorkflowStepLike[] = [
+    {
+      step: 1,
+      role: "reader",
+      label: "map:a.ts",
+      state: "completed",
+      tool_calls: 12,
+      duration_ms: 34000,
+    },
+    { step: 2, role: "reader", label: "map:b.ts", state: "running" },
+    { step: 3, role: "writer", label: "reduce:synth", state: "spawned" },
+  ];
+
+  it("groups steps into labelled stages in MAP/REDUCE/VERIFY order", () => {
+    const { stages, labelled } = deriveWorkflowStages(steps);
+    expect(labelled).toBe(true);
+    expect(stages.map((s) => s.title)).toEqual(["MAP", "REDUCE"]);
+    expect(stages[0]!.steps).toHaveLength(2);
+  });
+
+  it("falls back to a single STEPS stage when labels lack a known prefix", () => {
+    const { stages, labelled } = deriveWorkflowStages([
+      { step: 1, role: "reader", state: "running" },
+    ]);
+    expect(labelled).toBe(false);
+    expect(stages.map((s) => s.title)).toEqual(["STEPS"]);
+  });
+
+  it("counts done vs running and never guesses queued", () => {
+    expect(deriveWorkflowCounts(steps)).toEqual({ done: 1, running: 2, total: 3 });
+  });
+
+  it("shortens a pinned digest", () => {
+    expect(shortDigest("sha256:9f2cabcdef0011e1")).toBe("sha256:9f2c…e1");
+    expect(shortDigest(undefined)).toBeUndefined();
   });
 });
 

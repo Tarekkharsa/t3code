@@ -1,8 +1,13 @@
 import {
   AgentstackCallEvent,
   AgentstackDoctorReport,
+  AgentstackWorkflowRun,
+  AgentstackWorkflowSummary,
+  type AgentstackActionKind,
+  type AgentstackActionResult,
   type AgentstackActivity,
   type AgentstackStatus,
+  type AgentstackWorkflowData,
 } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
 import * as Clock from "effect/Clock";
@@ -36,9 +41,23 @@ export interface AgentstackActivityRequest {
   readonly limit: number;
 }
 
+/** Server-internal request naming a resolved workspace root; same path rule. */
+export interface AgentstackWorkspaceRequest {
+  readonly workspaceRoot: string;
+}
+
+/** A governed action against a resolved workspace root. */
+export interface AgentstackActionRequest {
+  readonly workspaceRoot: string;
+  readonly action: AgentstackActionKind;
+}
+
 /** Bounds for the `--tail` the CLI is asked for, whatever the client sent. */
 export const ACTIVITY_LIMIT_MAX = 50;
 export const ACTIVITY_LIMIT_DEFAULT = 8;
+
+/** Governed actions can touch many CLI configs; give them room over the read TTL. */
+const ACTION_TIMEOUT = "90 seconds";
 
 const decodeDoctorReport = Schema.decodeUnknownOption(
   Schema.fromJsonString(AgentstackDoctorReport),
@@ -61,6 +80,64 @@ export function parseCallEvents(stdout: string): ReadonlyArray<AgentstackCallEve
   });
 }
 
+const decodeWorkflowList = Schema.decodeUnknownOption(
+  Schema.fromJsonString(Schema.Struct({ workflows: Schema.Array(AgentstackWorkflowSummary) })),
+);
+
+export function parseWorkflowList(stdout: string): ReadonlyArray<AgentstackWorkflowSummary> {
+  return Option.match(decodeWorkflowList(stdout), {
+    onNone: () => [],
+    onSome: (r) => r.workflows,
+  });
+}
+
+const decodeWorkflowRun = Schema.decodeUnknownOption(Schema.fromJsonString(AgentstackWorkflowRun));
+
+export function parseWorkflowRun(stdout: string): AgentstackWorkflowRun | null {
+  return Option.getOrNull(decodeWorkflowRun(stdout));
+}
+
+// The live-runs registry: only the fields needed to find the newest workflow
+// envelope (`w-…`). Anything else in the record is ignored.
+const decodeRunsRegistry = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Array(
+      Schema.Struct({
+        id: Schema.String,
+        started_unix: Schema.optionalKey(Schema.Number),
+      }),
+    ),
+  ),
+);
+
+/** The id of the most recently started live workflow run, or null. */
+export function newestWorkflowRunId(stdout: string): string | null {
+  return Option.match(decodeRunsRegistry(stdout), {
+    onNone: () => null,
+    onSome: (rows) => {
+      const workflowRuns = rows.filter((r) => r.id.startsWith("w-"));
+      if (workflowRuns.length === 0) return null;
+      const newest = workflowRuns.reduce((a, b) =>
+        (b.started_unix ?? 0) > (a.started_unix ?? 0) ? b : a,
+      );
+      return newest.id;
+    },
+  });
+}
+
+/** The fixed argv for each vetted action — the client never supplies one. */
+function actionArgv(action: AgentstackActionKind, workspaceRoot: string): ReadonlyArray<string> {
+  switch (action) {
+    case "apply":
+      // Re-render configs from the manifest, capped by the machine ceiling;
+      // reversible via `agentstack restore`. Never --prune-foreign from here.
+      return ["--manifest-dir", workspaceRoot, "apply", "--write"];
+    case "guard-install":
+      // Machine-global; only adds pre-tool-use protection (cannot loosen).
+      return ["guard", "install"];
+  }
+}
+
 function isBinaryNotFound(error: ProcessRunner.ProcessRunError): boolean {
   return (
     error._tag === "ProcessSpawnError" &&
@@ -76,6 +153,8 @@ export class AgentstackCli extends Context.Service<
   {
     readonly status: (input: AgentstackStatusRequest) => Effect.Effect<AgentstackStatus>;
     readonly activity: (input: AgentstackActivityRequest) => Effect.Effect<AgentstackActivity>;
+    readonly workflow: (input: AgentstackWorkspaceRequest) => Effect.Effect<AgentstackWorkflowData>;
+    readonly action: (input: AgentstackActionRequest) => Effect.Effect<AgentstackActionResult>;
   }
 >()("t3/agentstack/AgentstackCli") {}
 
@@ -172,7 +251,102 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
     },
   );
 
-  return AgentstackCli.of({ status, activity });
+  const workflow: AgentstackCli["Service"]["workflow"] = Effect.fn("AgentstackCli.workflow")(
+    function* (input) {
+      const root = input.workspaceRoot;
+      const listResult = yield* run(["--manifest-dir", root, "workflow", "list", "--json"]).pipe(
+        Effect.match({
+          onFailure: (error) =>
+            isBinaryNotFound(error)
+              ? ({ _tag: "NotFound" } as const)
+              : ({ _tag: "Failed" } as const),
+          onSuccess: (result) => ({ _tag: "Success", result }) as const,
+        }),
+      );
+      if (listResult._tag === "NotFound") {
+        return {
+          installed: false,
+          workflows: [],
+          activeRun: null,
+          checkedAt: yield* Clock.currentTimeMillis,
+        };
+      }
+      const workflows =
+        listResult._tag === "Success" ? parseWorkflowList(listResult.result.stdout) : [];
+
+      // Find the newest live workflow envelope from the runs registry, then
+      // read its evidence tree. A failure at any step degrades to "no run".
+      const runsResult = yield* run(["report", "runs", "--json"]).pipe(
+        Effect.orElseSucceed(() => null),
+      );
+      const runId =
+        runsResult && !runsResult.timedOut ? newestWorkflowRunId(runsResult.stdout) : null;
+      let activeRun: AgentstackWorkflowRun | null = null;
+      if (runId) {
+        const reportResult = yield* run([
+          "--manifest-dir",
+          root,
+          "workflow",
+          "report",
+          runId,
+          "--json",
+        ]).pipe(Effect.orElseSucceed(() => null));
+        activeRun =
+          reportResult && !reportResult.timedOut ? parseWorkflowRun(reportResult.stdout) : null;
+      }
+
+      return {
+        installed: true,
+        workflows,
+        activeRun,
+        checkedAt: yield* Clock.currentTimeMillis,
+      };
+    },
+  );
+
+  const action: AgentstackCli["Service"]["action"] = Effect.fn("AgentstackCli.action")(
+    function* (input) {
+      const result = yield* processRunner
+        .run({
+          command: binary,
+          args: actionArgv(input.action, input.workspaceRoot),
+          timeout: ACTION_TIMEOUT,
+          timeoutBehavior: "timedOutResult",
+          maxOutputBytes: MAX_STDOUT_BYTES,
+          outputMode: "truncate",
+        })
+        .pipe(
+          Effect.match({
+            onFailure: (error) =>
+              isBinaryNotFound(error)
+                ? ({ _tag: "NotFound" } as const)
+                : ({ _tag: "Failed" } as const),
+            onSuccess: (r) => ({ _tag: "Success", result: r }) as const,
+          }),
+        );
+      if (result._tag === "NotFound") {
+        return { ok: false, message: "agentstack CLI not found" };
+      }
+      if (result._tag === "Failed") {
+        return { ok: false, message: "agentstack command could not be run" };
+      }
+      const r = result.result;
+      if (r.timedOut) {
+        return { ok: false, message: "timed out" };
+      }
+      // Last non-empty line of stdout (or stderr) is the human outcome.
+      const lastLine = (text: string): string =>
+        text
+          .split("\n")
+          .findLast((l) => l.trim().length > 0)
+          ?.trim() ?? "";
+      const ok = r.code === 0;
+      const message = lastLine(r.stdout) || lastLine(r.stderr) || (ok ? "done" : "failed");
+      return { ok, message: message.slice(0, 200) };
+    },
+  );
+
+  return AgentstackCli.of({ status, activity, workflow, action });
 });
 
 export const layer = Layer.effect(AgentstackCli, make()).pipe(Layer.provide(ProcessRunner.layer));

@@ -690,6 +690,14 @@ const buildAppUnderTest = (options?: {
                 events: [],
                 checkedAt: 0,
               }),
+            workflow: () =>
+              Effect.succeed({
+                installed: false,
+                workflows: [],
+                activeRun: null,
+                checkedAt: 0,
+              }),
+            action: () => Effect.succeed({ ok: false, message: "not installed" }),
           }),
         ),
       ),

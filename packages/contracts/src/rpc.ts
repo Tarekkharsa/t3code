@@ -15,10 +15,14 @@ import {
 } from "./filesystem.ts";
 import { AssetAccessError, AssetCreateUrlInput, AssetCreateUrlResult } from "./assets.ts";
 import {
+  AgentstackActionInput,
+  AgentstackActionResult,
   AgentstackActivity,
   AgentstackActivityInput,
   AgentstackStatus,
   AgentstackStatusInput,
+  AgentstackWorkflowData,
+  AgentstackWorkflowInput,
   AgentstackWorkspaceContextError,
 } from "./agentstack.ts";
 import {
@@ -181,6 +185,8 @@ export const WS_METHODS = {
   // AgentStack methods
   agentstackStatus: "agentstack.status",
   agentstackActivity: "agentstack.activity",
+  agentstackWorkflow: "agentstack.workflow",
+  agentstackAction: "agentstack.action",
 
   // Git workflow methods
   gitRunStackedAction: "git.runStackedAction",
@@ -279,6 +285,18 @@ export const WsAgentstackStatusRpc = Rpc.make(WS_METHODS.agentstackStatus, {
 export const WsAgentstackActivityRpc = Rpc.make(WS_METHODS.agentstackActivity, {
   payload: AgentstackActivityInput,
   success: AgentstackActivity,
+  error: Schema.Union([AgentstackWorkspaceContextError, EnvironmentAuthorizationError]),
+});
+
+export const WsAgentstackWorkflowRpc = Rpc.make(WS_METHODS.agentstackWorkflow, {
+  payload: AgentstackWorkflowInput,
+  success: AgentstackWorkflowData,
+  error: Schema.Union([AgentstackWorkspaceContextError, EnvironmentAuthorizationError]),
+});
+
+export const WsAgentstackActionRpc = Rpc.make(WS_METHODS.agentstackAction, {
+  payload: AgentstackActionInput,
+  success: AgentstackActionResult,
   error: Schema.Union([AgentstackWorkspaceContextError, EnvironmentAuthorizationError]),
 });
 
@@ -716,6 +734,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetConfigRpc,
   WsAgentstackStatusRpc,
   WsAgentstackActivityRpc,
+  WsAgentstackWorkflowRpc,
+  WsAgentstackActionRpc,
   WsServerRefreshProvidersRpc,
   WsServerUpdateProviderRpc,
   WsServerUpsertKeybindingRpc,

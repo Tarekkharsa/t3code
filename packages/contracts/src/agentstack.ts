@@ -7,8 +7,13 @@ import { ProjectId, ThreadId } from "./baseSchemas.ts";
  *
  * AgentStack (https://github.com/Tarekkharsa/agentstack) is an external local
  * CLI that trust-gates and audits what agent CLIs may do on a machine. The
- * integration is strictly read-only and degrades to "not installed" when the
- * CLI is absent; T3 Code never writes AgentStack state.
+ * integration is read-only by default and degrades to "not installed" when the
+ * CLI is absent. The one exception is `AgentstackActionInput`: a small, closed
+ * set of vetted governed commands the panel may trigger (fix drift, install the
+ * guard). Actions are named by an enum the server maps to fixed argv — the
+ * client never supplies a command line — and, by construction, none can loosen
+ * effective policy (re-rendering is capped by the machine ceiling; guard install
+ * only tightens). Bypassing a guard denial has no safe shape and is not offered.
  */
 
 export const AgentstackDoctorLine = Schema.Struct({
@@ -86,6 +91,90 @@ export const AgentstackActivity = Schema.Struct({
   checkedAt: Schema.Number,
 });
 export type AgentstackActivity = typeof AgentstackActivity.Type;
+
+// ── workflow feed (read) ─────────────────────────────────────────────────────
+// Field names mirror `agentstack workflow …--json` verbatim (snake_case).
+
+export const AgentstackWorkflowSummary = Schema.Struct({
+  name: Schema.String,
+  declared: Schema.Boolean,
+  trusted: Schema.Boolean,
+  // matches | drifted | missing | unavailable | resolve_failed — kept as a
+  // free string so the CLI can report new lock states without breaking decode.
+  lock_status: Schema.String,
+  roles: Schema.Array(Schema.String),
+  max_agents: Schema.Number,
+  max_wall_seconds: Schema.Number,
+});
+export type AgentstackWorkflowSummary = typeof AgentstackWorkflowSummary.Type;
+
+export const AgentstackWorkflowStep = Schema.Struct({
+  step: Schema.Number,
+  role: Schema.String,
+  label: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  child_run_id: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  state: Schema.Literals(["completed", "failed", "running", "spawned"]),
+  outcome: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  tool_calls: Schema.optionalKey(Schema.Number),
+  duration_ms: Schema.optionalKey(Schema.NullOr(Schema.Number)),
+});
+export type AgentstackWorkflowStep = typeof AgentstackWorkflowStep.Type;
+
+export const AgentstackWorkflowRun = Schema.Struct({
+  run: Schema.String,
+  workflow: Schema.String,
+  workflow_digest: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  outcome: Schema.NullOr(Schema.Literals(["completed", "failed", "running"])),
+  exhausted: Schema.Boolean,
+  duration_ms: Schema.optionalKey(Schema.NullOr(Schema.Number)),
+  max_agents: Schema.Number,
+  max_wall_seconds: Schema.Number,
+  steps: Schema.Array(AgentstackWorkflowStep),
+});
+export type AgentstackWorkflowRun = typeof AgentstackWorkflowRun.Type;
+
+export const AgentstackWorkflowData = Schema.Struct({
+  installed: Schema.Boolean,
+  /** Every declared `[workflows.*]` entry with its admission status. */
+  workflows: Schema.Array(AgentstackWorkflowSummary),
+  /** The most recent workflow run's evidence, if one exists. */
+  activeRun: Schema.NullOr(AgentstackWorkflowRun),
+  checkedAt: Schema.Number,
+});
+export type AgentstackWorkflowData = typeof AgentstackWorkflowData.Type;
+
+export const AgentstackWorkflowInput = Schema.Struct({
+  projectId: ProjectId,
+  threadId: Schema.optionalKey(ThreadId),
+});
+export type AgentstackWorkflowInput = typeof AgentstackWorkflowInput.Type;
+
+// ── governed actions (write) ─────────────────────────────────────────────────
+
+/**
+ * The closed set of governed commands the panel may trigger. The server maps
+ * each to fixed argv — the client never supplies a command line. `apply`
+ * re-renders configs (capped by the machine ceiling, reversible via
+ * `agentstack restore`); `guard-install` only adds pre-tool-use protection.
+ * Neither can loosen effective policy.
+ */
+export const AgentstackActionKind = Schema.Literals(["apply", "guard-install"]);
+export type AgentstackActionKind = typeof AgentstackActionKind.Type;
+
+export const AgentstackActionInput = Schema.Struct({
+  projectId: ProjectId,
+  threadId: Schema.optionalKey(ThreadId),
+  action: AgentstackActionKind,
+});
+export type AgentstackActionInput = typeof AgentstackActionInput.Type;
+
+export const AgentstackActionResult = Schema.Struct({
+  /** True when the command exited 0. */
+  ok: Schema.Boolean,
+  /** A short, human-readable outcome line (last line of CLI output). */
+  message: Schema.String,
+});
+export type AgentstackActionResult = typeof AgentstackActionResult.Type;
 
 export class AgentstackWorkspaceContextError extends Schema.TaggedErrorClass<AgentstackWorkspaceContextError>()(
   "AgentstackWorkspaceContextError",
