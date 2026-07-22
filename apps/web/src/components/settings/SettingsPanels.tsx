@@ -81,6 +81,8 @@ import {
   formatDiagnosticsDescription,
   isProjectGroupingEnabled,
   projectGroupingModeFromToggle,
+  readLastEnabledProjectGroupingMode,
+  rememberEnabledProjectGroupingMode,
 } from "./SettingsPanels.logic";
 import {
   SettingResetButton,
@@ -501,7 +503,7 @@ export function GeneralSettingsPanel() {
   const updateSettings = useUpdatePrimarySettings();
   const lastEnabledProjectGroupingMode = useRef<SidebarProjectGroupingMode>(
     settings.sidebarProjectGroupingMode === "separate"
-      ? DEFAULT_UNIFIED_SETTINGS.sidebarProjectGroupingMode
+      ? readLastEnabledProjectGroupingMode()
       : settings.sidebarProjectGroupingMode,
   );
   const observability = useAtomValue(primaryServerObservabilityAtom);
@@ -595,6 +597,7 @@ export function GeneralSettingsPanel() {
               onCheckedChange={(checked) => {
                 if (!checked && settings.sidebarProjectGroupingMode !== "separate") {
                   lastEnabledProjectGroupingMode.current = settings.sidebarProjectGroupingMode;
+                  rememberEnabledProjectGroupingMode(settings.sidebarProjectGroupingMode);
                 }
                 updateSettings({
                   sidebarProjectGroupingMode: projectGroupingModeFromToggle(
