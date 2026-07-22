@@ -148,6 +148,57 @@ function firstMessage(section: AgentstackDoctorSection): string | undefined {
   return fact.length > SUMMARY_MAX ? `${fact.slice(0, SUMMARY_MAX - 1)}…` : fact;
 }
 
+// ── recent-calls activity feed ───────────────────────────────────────────────
+
+export interface AgentstackActivityEventLike {
+  readonly ts: number;
+  readonly server: string;
+  readonly tool: string;
+  readonly outcome: "ok" | "error" | "denied";
+  readonly run?: string;
+}
+
+export interface AgentstackActivityRow {
+  key: string;
+  outcome: "ok" | "error" | "denied";
+  /** `server__tool`, truncated — guard entries embed the whole command. */
+  label: string;
+  age: string;
+  run?: string;
+}
+
+const ACTIVITY_LABEL_MAX = 48;
+
+function formatAge(seconds: number): string {
+  if (seconds < 60) return "now";
+  if (seconds < 3_600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86_400) return `${Math.floor(seconds / 3_600)}h ago`;
+  return `${Math.floor(seconds / 86_400)}d ago`;
+}
+
+/**
+ * Feed events arrive oldest-first (audit-log append order, `ts` in epoch
+ * seconds); the panel shows newest first.
+ */
+export function deriveAgentstackActivityRows(
+  events: ReadonlyArray<AgentstackActivityEventLike>,
+  nowEpochSeconds: number,
+): AgentstackActivityRow[] {
+  return events.toReversed().map((e, i) => {
+    let label = `${e.server}__${e.tool}`;
+    if (label.length > ACTIVITY_LABEL_MAX) {
+      label = `${label.slice(0, ACTIVITY_LABEL_MAX - 1)}…`;
+    }
+    return {
+      key: `${e.ts}-${i}`,
+      outcome: e.outcome,
+      label,
+      age: formatAge(Math.max(0, nowEpochSeconds - e.ts)),
+      ...(e.run ? { run: e.run } : {}),
+    };
+  });
+}
+
 // ── guard denials in the timeline ────────────────────────────────────────────
 
 /** The marker every AgentStack guard denial carries, on every provider. */

@@ -1,4 +1,10 @@
-import type { AgentstackStatus, EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
+import type {
+  AgentstackActivity,
+  AgentstackStatus,
+  EnvironmentId,
+  ProjectId,
+  ThreadId,
+} from "@t3tools/contracts";
 import { useCallback, useEffect, useState } from "react";
 
 import { agentstackEnvironment } from "~/state/agentstack";
@@ -7,11 +13,21 @@ import { cn } from "~/lib/utils";
 import { Button } from "../ui/button";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { AgentstackMark } from "./AgentstackMark";
-import { deriveAgentstackOverviewRows, type AgentstackRowLevel } from "./agentstack-logic";
+import {
+  deriveAgentstackActivityRows,
+  deriveAgentstackOverviewRows,
+  type AgentstackRowLevel,
+} from "./agentstack-logic";
 
 const LEVEL_DOT: Record<AgentstackRowLevel, string> = {
   ok: "bg-success",
   warn: "bg-warning",
+  error: "bg-destructive",
+};
+
+const OUTCOME_DOT: Record<"ok" | "error" | "denied", string> = {
+  ok: "bg-success",
+  denied: "bg-warning",
   error: "bg-destructive",
 };
 
@@ -37,21 +53,27 @@ export function AgentstackControl({
 }) {
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState<AgentstackStatus | null>(null);
+  const [activity, setActivity] = useState<AgentstackActivity | null>(null);
   const [unreachable, setUnreachable] = useState(false);
   const fetchStatus = useAtomCommand(agentstackEnvironment.status, { reportFailure: false });
+  const fetchActivity = useAtomCommand(agentstackEnvironment.activity, { reportFailure: false });
 
   const refresh = useCallback(async () => {
-    const result = await fetchStatus({
-      environmentId,
-      input: { projectId, ...(threadId !== undefined ? { threadId } : {}) },
-    });
-    if (result._tag === "Success") {
-      setStatus(result.value);
+    const input = { projectId, ...(threadId !== undefined ? { threadId } : {}) };
+    const [statusResult, activityResult] = await Promise.all([
+      fetchStatus({ environmentId, input }),
+      fetchActivity({ environmentId, input }),
+    ]);
+    if (statusResult._tag === "Success") {
+      setStatus(statusResult.value);
       setUnreachable(false);
     } else {
       setUnreachable(true);
     }
-  }, [environmentId, fetchStatus, projectId, threadId]);
+    // Activity is progressive enhancement — its failure never blanks the
+    // overview.
+    setActivity(activityResult._tag === "Success" ? activityResult.value : null);
+  }, [environmentId, fetchActivity, fetchStatus, projectId, threadId]);
 
   useEffect(() => {
     if (!open) return;
@@ -119,6 +141,33 @@ export function AgentstackControl({
             </ul>
           )}
         </div>
+        {status?.installed && activity !== null && activity.events.length > 0 ? (
+          <div className="mt-3 border-t pt-2">
+            <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">Recent calls</p>
+            <ul className="space-y-1">
+              {deriveAgentstackActivityRows(activity.events, Date.now() / 1_000).map((row) => (
+                <li className="flex items-center gap-2 text-[11px]" key={row.key}>
+                  <span
+                    aria-hidden
+                    className={cn("size-1.5 shrink-0 rounded-full", OUTCOME_DOT[row.outcome])}
+                  />
+                  <span
+                    className={cn(
+                      "min-w-0 flex-1 truncate font-mono",
+                      row.outcome === "denied"
+                        ? "text-warning-foreground"
+                        : "text-muted-foreground",
+                    )}
+                    title={row.label}
+                  >
+                    {row.label}
+                  </span>
+                  <span className="shrink-0 text-muted-foreground/60">{row.age}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
         {status?.installed && status.doctor !== null ? (
           <p className="mt-3 border-t pt-2 text-[11px] text-muted-foreground/80">
             <code className="font-mono">agentstack doctor</code> — every warning names its fix

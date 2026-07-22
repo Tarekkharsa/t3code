@@ -15,6 +15,8 @@ import {
 } from "./filesystem.ts";
 import { AssetAccessError, AssetCreateUrlInput, AssetCreateUrlResult } from "./assets.ts";
 import {
+  AgentstackActivity,
+  AgentstackActivityInput,
   AgentstackStatus,
   AgentstackStatusInput,
   AgentstackWorkspaceContextError,
@@ -178,6 +180,7 @@ export const WS_METHODS = {
 
   // AgentStack methods
   agentstackStatus: "agentstack.status",
+  agentstackActivity: "agentstack.activity",
 
   // Git workflow methods
   gitRunStackedAction: "git.runStackedAction",
@@ -270,6 +273,12 @@ export const WsServerGetConfigRpc = Rpc.make(WS_METHODS.serverGetConfig, {
 export const WsAgentstackStatusRpc = Rpc.make(WS_METHODS.agentstackStatus, {
   payload: AgentstackStatusInput,
   success: AgentstackStatus,
+  error: Schema.Union([AgentstackWorkspaceContextError, EnvironmentAuthorizationError]),
+});
+
+export const WsAgentstackActivityRpc = Rpc.make(WS_METHODS.agentstackActivity, {
+  payload: AgentstackActivityInput,
+  success: AgentstackActivity,
   error: Schema.Union([AgentstackWorkspaceContextError, EnvironmentAuthorizationError]),
 });
 
@@ -706,6 +715,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerProbeRpc,
   WsServerGetConfigRpc,
   WsAgentstackStatusRpc,
+  WsAgentstackActivityRpc,
   WsServerRefreshProvidersRpc,
   WsServerUpdateProviderRpc,
   WsServerUpsertKeybindingRpc,

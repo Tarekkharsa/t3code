@@ -51,6 +51,42 @@ export const AgentstackStatus = Schema.Struct({
 });
 export type AgentstackStatus = typeof AgentstackStatus.Type;
 
+/**
+ * One brokered call from the AgentStack audit feed (`report calls --json
+ * --tail`). Field names are AgentStack's wire format, kept verbatim; values
+ * are privacy-safe by construction (keyed argument digests, never argument
+ * values; denial details are policy rule names, failures a fixed error
+ * class).
+ */
+export const AgentstackCallEvent = Schema.Struct({
+  ts: Schema.Number,
+  server: Schema.String,
+  tool: Schema.String,
+  outcome: Schema.Literals(["ok", "error", "denied"]),
+  ms: Schema.Number,
+  run: Schema.optionalKey(Schema.String),
+  args_digest: Schema.optionalKey(Schema.String),
+  detail: Schema.optionalKey(Schema.String),
+});
+export type AgentstackCallEvent = typeof AgentstackCallEvent.Type;
+
+export const AgentstackActivityInput = Schema.Struct({
+  projectId: ProjectId,
+  /** Refines the check to the thread's worktree when the thread has one. */
+  threadId: Schema.optionalKey(ThreadId),
+  /** Maximum events to return; the server clamps this. */
+  limit: Schema.optionalKey(Schema.Number),
+});
+export type AgentstackActivityInput = typeof AgentstackActivityInput.Type;
+
+export const AgentstackActivity = Schema.Struct({
+  installed: Schema.Boolean,
+  /** Newest last, matching audit-log append order. */
+  events: Schema.Array(AgentstackCallEvent),
+  checkedAt: Schema.Number,
+});
+export type AgentstackActivity = typeof AgentstackActivity.Type;
+
 export class AgentstackWorkspaceContextError extends Schema.TaggedErrorClass<AgentstackWorkspaceContextError>()(
   "AgentstackWorkspaceContextError",
   {

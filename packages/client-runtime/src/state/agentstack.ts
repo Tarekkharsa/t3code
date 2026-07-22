@@ -12,5 +12,9 @@ export function createAgentstackEnvironmentAtoms<R, E>(
       tag: WS_METHODS.agentstackStatus,
       label: "agentstack.status",
     }),
+    activity: createEnvironmentRpcCommand(runtime, {
+      tag: WS_METHODS.agentstackActivity,
+      label: "agentstack.activity",
+    }),
   };
 }

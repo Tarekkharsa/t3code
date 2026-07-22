@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  deriveAgentstackActivityRows,
   deriveAgentstackOverviewRows,
   matchAgentstackDenial,
   type AgentstackDoctorReport,
@@ -103,5 +104,29 @@ describe("matchAgentstackDenial", () => {
     // Marker present but unrecognized phrasing → still a card, raw target.
     const partial = matchAgentstackDenial({ detail: "AGENTSTACK GUARD BLOCKED something odd" });
     expect(partial).not.toBeNull();
+  });
+});
+
+describe("deriveAgentstackActivityRows", () => {
+  it("shows newest first, truncates guard labels, and formats age", () => {
+    const now = 10_000;
+    const rows = deriveAgentstackActivityRows(
+      [
+        { ts: now - 7_200, server: "figma", tool: "get_file", outcome: "ok" },
+        {
+          ts: now - 90,
+          server: "host-guard",
+          tool: `bash: ${"x".repeat(80)}`,
+          outcome: "denied",
+          run: "r-abc",
+        },
+      ],
+      now,
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ outcome: "denied", age: "1m ago", run: "r-abc" });
+    expect(rows[0]!.label.length).toBeLessThanOrEqual(48);
+    expect(rows[0]!.label.endsWith("\u2026")).toBe(true);
+    expect(rows[1]).toMatchObject({ outcome: "ok", label: "figma__get_file", age: "2h ago" });
   });
 });

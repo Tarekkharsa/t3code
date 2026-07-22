@@ -684,6 +684,12 @@ const buildAppUnderTest = (options?: {
                 doctor: null,
                 checkedAt: 0,
               }),
+            activity: () =>
+              Effect.succeed({
+                installed: false,
+                events: [],
+                checkedAt: 0,
+              }),
           }),
         ),
       ),

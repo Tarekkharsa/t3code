@@ -297,6 +297,7 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [WS_METHODS.serverProbe, AuthOrchestrationReadScope],
   [WS_METHODS.serverGetConfig, AuthOrchestrationReadScope],
   [WS_METHODS.agentstackStatus, AuthOrchestrationReadScope],
+  [WS_METHODS.agentstackActivity, AuthOrchestrationReadScope],
   [WS_METHODS.serverRefreshProviders, AuthOrchestrationOperateScope],
   [WS_METHODS.serverUpdateProvider, AuthOrchestrationOperateScope],
   [WS_METHODS.serverUpsertKeybinding, AuthOrchestrationOperateScope],
@@ -425,6 +426,41 @@ const makeWsRpcLayer = (
       const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
       const agentstackCli = yield* AgentstackCli.AgentstackCli;
+      // Resolve the workspace root from server-owned projections — the
+      // client names entities, never a filesystem path, so it cannot point
+      // the AgentStack CLI at an arbitrary directory.
+      const resolveAgentstackWorkspaceRoot = Effect.fnUntraced(function* (input: {
+        readonly projectId: ProjectId;
+        readonly threadId?: ThreadId;
+      }) {
+        const context = {
+          projectId: input.projectId,
+          ...(input.threadId !== undefined ? { threadId: input.threadId } : {}),
+        };
+        const project = yield* projectionSnapshotQuery
+          .getProjectShellById(input.projectId)
+          .pipe(
+            Effect.mapError((cause) => new AgentstackWorkspaceContextError({ ...context, cause })),
+          );
+        if (Option.isNone(project)) {
+          return yield* new AgentstackWorkspaceContextError(context);
+        }
+        let workspaceRoot = project.value.workspaceRoot;
+        if (input.threadId !== undefined) {
+          const thread = yield* projectionSnapshotQuery
+            .getThreadShellById(input.threadId)
+            .pipe(
+              Effect.mapError(
+                (cause) => new AgentstackWorkspaceContextError({ ...context, cause }),
+              ),
+            );
+          if (Option.isNone(thread) || thread.value.projectId !== input.projectId) {
+            return yield* new AgentstackWorkspaceContextError(context);
+          }
+          workspaceRoot = thread.value.worktreePath ?? workspaceRoot;
+        }
+        return workspaceRoot;
+      });
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
       const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
       const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
@@ -1466,36 +1502,22 @@ const makeWsRpcLayer = (
         [WS_METHODS.agentstackStatus]: (input) =>
           observeRpcEffect(
             WS_METHODS.agentstackStatus,
-            Effect.gen(function* () {
-              // Resolve the workspace root from server-owned projections —
-              // the client names entities, never a filesystem path, so it
-              // cannot point the AgentStack CLI at an arbitrary directory.
-              const project = yield* projectionSnapshotQuery
-                .getProjectShellById(input.projectId)
-                .pipe(
-                  Effect.mapError(
-                    (cause) => new AgentstackWorkspaceContextError({ ...input, cause }),
-                  ),
-                );
-              if (Option.isNone(project)) {
-                return yield* new AgentstackWorkspaceContextError({ ...input });
-              }
-              let workspaceRoot = project.value.workspaceRoot;
-              if (input.threadId !== undefined) {
-                const thread = yield* projectionSnapshotQuery
-                  .getThreadShellById(input.threadId)
-                  .pipe(
-                    Effect.mapError(
-                      (cause) => new AgentstackWorkspaceContextError({ ...input, cause }),
-                    ),
-                  );
-                if (Option.isNone(thread) || thread.value.projectId !== input.projectId) {
-                  return yield* new AgentstackWorkspaceContextError({ ...input });
-                }
-                workspaceRoot = thread.value.worktreePath ?? workspaceRoot;
-              }
-              return yield* agentstackCli.status({ workspaceRoot });
-            }),
+            resolveAgentstackWorkspaceRoot(input).pipe(
+              Effect.flatMap((workspaceRoot) => agentstackCli.status({ workspaceRoot })),
+            ),
+            { "rpc.aggregate": "agentstack" },
+          ),
+        [WS_METHODS.agentstackActivity]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.agentstackActivity,
+            resolveAgentstackWorkspaceRoot(input).pipe(
+              Effect.flatMap((workspaceRoot) =>
+                agentstackCli.activity({
+                  workspaceRoot,
+                  limit: input.limit ?? AgentstackCli.ACTIVITY_LIMIT_DEFAULT,
+                }),
+              ),
+            ),
             { "rpc.aggregate": "agentstack" },
           ),
         [WS_METHODS.serverRefreshProviders]: (input) =>
