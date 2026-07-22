@@ -73,6 +73,7 @@ const TEST_EPOCH = DateTime.makeUnsafe("1970-01-01T00:00:00.000Z");
 
 import * as ServerConfig from "./config.ts";
 import { makeRoutesLayer } from "./server.ts";
+import * as AgentstackCli from "./agentstack/AgentstackCli.ts";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as GitManager from "./git/GitManager.ts";
 import * as Keybindings from "./keybindings.ts";
@@ -674,6 +675,15 @@ const buildAppUnderTest = (options?: {
             retain: Effect.void,
             registerTerminalProcesses: () => Effect.void,
             unregisterTerminal: () => Effect.void,
+          }),
+          Layer.mock(AgentstackCli.AgentstackCli)({
+            status: () =>
+              Effect.succeed({
+                installed: false,
+                version: null,
+                doctor: null,
+                checkedAt: 0,
+              }),
           }),
         ),
       ),

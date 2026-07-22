@@ -49,6 +49,7 @@ import {
   OrchestrationReplayEventsError,
   type FilesystemBrowseFailure,
   FilesystemBrowseError,
+  AgentstackWorkspaceContextError,
   AssetWorkspaceContextNotFoundError,
   AssetWorkspaceContextResolutionError,
   EnvironmentAuthorizationError,
@@ -107,6 +108,7 @@ import * as BitbucketApi from "./sourceControl/BitbucketApi.ts";
 import * as GitHubCli from "./sourceControl/GitHubCli.ts";
 import * as GitLabCli from "./sourceControl/GitLabCli.ts";
 import * as SourceControlProviderRegistry from "./sourceControl/SourceControlProviderRegistry.ts";
+import * as AgentstackCli from "./agentstack/AgentstackCli.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "./vcs/VcsDriverRegistry.ts";
 import * as VcsProjectConfig from "./vcs/VcsProjectConfig.ts";
@@ -294,6 +296,7 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [ORCHESTRATION_WS_METHODS.subscribeThread, AuthOrchestrationReadScope],
   [WS_METHODS.serverProbe, AuthOrchestrationReadScope],
   [WS_METHODS.serverGetConfig, AuthOrchestrationReadScope],
+  [WS_METHODS.agentstackStatus, AuthOrchestrationReadScope],
   [WS_METHODS.serverRefreshProviders, AuthOrchestrationOperateScope],
   [WS_METHODS.serverUpdateProvider, AuthOrchestrationOperateScope],
   [WS_METHODS.serverUpsertKeybinding, AuthOrchestrationOperateScope],
@@ -421,6 +424,7 @@ const makeWsRpcLayer = (
       const config = yield* ServerConfig.ServerConfig;
       const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
+      const agentstackCli = yield* AgentstackCli.AgentstackCli;
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
       const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
       const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
@@ -1459,6 +1463,41 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.serverGetConfig, loadServerConfig, {
             "rpc.aggregate": "server",
           }),
+        [WS_METHODS.agentstackStatus]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.agentstackStatus,
+            Effect.gen(function* () {
+              // Resolve the workspace root from server-owned projections —
+              // the client names entities, never a filesystem path, so it
+              // cannot point the AgentStack CLI at an arbitrary directory.
+              const project = yield* projectionSnapshotQuery
+                .getProjectShellById(input.projectId)
+                .pipe(
+                  Effect.mapError(
+                    (cause) => new AgentstackWorkspaceContextError({ ...input, cause }),
+                  ),
+                );
+              if (Option.isNone(project)) {
+                return yield* new AgentstackWorkspaceContextError({ ...input });
+              }
+              let workspaceRoot = project.value.workspaceRoot;
+              if (input.threadId !== undefined) {
+                const thread = yield* projectionSnapshotQuery
+                  .getThreadShellById(input.threadId)
+                  .pipe(
+                    Effect.mapError(
+                      (cause) => new AgentstackWorkspaceContextError({ ...input, cause }),
+                    ),
+                  );
+                if (Option.isNone(thread) || thread.value.projectId !== input.projectId) {
+                  return yield* new AgentstackWorkspaceContextError({ ...input });
+                }
+                workspaceRoot = thread.value.worktreePath ?? workspaceRoot;
+              }
+              return yield* agentstackCli.status({ workspaceRoot });
+            }),
+            { "rpc.aggregate": "agentstack" },
+          ),
         [WS_METHODS.serverRefreshProviders]: (input) =>
           observeRpcEffect(
             WS_METHODS.serverRefreshProviders,

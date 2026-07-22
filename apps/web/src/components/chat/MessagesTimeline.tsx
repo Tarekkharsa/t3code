@@ -39,6 +39,8 @@ import {
   resolveFileDiffPath,
 } from "../../lib/diffRendering";
 import ChatMarkdown from "../ChatMarkdown";
+import { AgentstackDenialCard } from "../agentstack/AgentstackDenialCard";
+import { matchAgentstackDenial } from "../agentstack/agentstack-logic";
 import {
   BotIcon,
   CheckIcon,
@@ -1171,13 +1173,24 @@ const WorkGroupSection = memo(function WorkGroupSection({
         </p>
       )}
       <div className="space-y-px">
-        {nonEmptyEntries.map((workEntry) => (
-          <SimpleWorkEntryRow
-            key={workEntry.id}
-            workEntry={workEntry}
-            workspaceRoot={workspaceRoot}
-          />
-        ))}
+        {nonEmptyEntries.map((workEntry) => {
+          // An AgentStack guard denial reads as protection, not failure —
+          // it gets its own card instead of the generic tool/error row.
+          // Depending on the provider and permission mode a denial surfaces
+          // as a tool.denied error, a failed call, or (in bypass mode) a
+          // "completed" call whose result text carries the guard message —
+          // so we always run the matcher, which is a cheap marker check.
+          const denial = matchAgentstackDenial(workEntry);
+          return denial ? (
+            <AgentstackDenialCard denial={denial} key={workEntry.id} workEntry={workEntry} />
+          ) : (
+            <SimpleWorkEntryRow
+              key={workEntry.id}
+              workEntry={workEntry}
+              workspaceRoot={workspaceRoot}
+            />
+          );
+        })}
       </div>
     </section>
   );

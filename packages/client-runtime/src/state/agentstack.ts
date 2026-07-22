@@ -1,0 +1,16 @@
+import { WS_METHODS } from "@t3tools/contracts";
+import { Atom } from "effect/unstable/reactivity";
+
+import type { EnvironmentRegistry } from "../connection/registry.ts";
+import { createEnvironmentRpcCommand } from "./runtime.ts";
+
+export function createAgentstackEnvironmentAtoms<R, E>(
+  runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>,
+) {
+  return {
+    status: createEnvironmentRpcCommand(runtime, {
+      tag: WS_METHODS.agentstackStatus,
+      label: "agentstack.status",
+    }),
+  };
+}

@@ -76,6 +76,12 @@ export interface WorkLogEntry {
   requestKind?: PendingApproval["requestKind"];
   /** From runtime item / task payload `status` when present (e.g. tool.updated). */
   toolLifecycleStatus?: WorkLogToolLifecycleStatus;
+  /**
+   * The tool result text of a FAILED tool call (bounded). Hook/policy denials
+   * (e.g. AgentStack guard) surface only here, so row renderers that classify
+   * failures need it — `detail` only carries the tool's input preview.
+   */
+  failureText?: string;
   /** Originating orchestration activity kind (e.g. `user-input.requested`) for row chrome. */
   sourceActivityKind?: OrchestrationThreadActivity["kind"];
 }
@@ -674,6 +680,42 @@ function extractWorkLogToolLifecycleStatus(
   return undefined;
 }
 
+const FAILURE_TEXT_MAX = 2_000;
+
+/**
+ * Tool result text of a failed tool call. Content is either a plain string
+ * or an array of `{ type: "text", text }` blocks depending on the provider.
+ * A failure is signalled by the lifecycle `status` OR by the result's own
+ * `is_error` flag — hook/policy denials in bypass mode can arrive as a
+ * "completed" call whose result still carries the error.
+ */
+function extractToolFailureText(payload: Record<string, unknown> | null): string | undefined {
+  if (!payload) {
+    return undefined;
+  }
+  const data = asRecord(payload.data);
+  const result = asRecord(data?.result);
+  if (payload.status !== "failed" && result?.is_error !== true) {
+    return undefined;
+  }
+  const content = result?.content;
+  if (typeof content === "string" && content.length > 0) {
+    return content.slice(0, FAILURE_TEXT_MAX);
+  }
+  if (Array.isArray(content)) {
+    const texts = content
+      .map((block) => {
+        const record = asRecord(block);
+        return typeof record?.text === "string" ? record.text : "";
+      })
+      .filter((text) => text.length > 0);
+    if (texts.length > 0) {
+      return texts.join("\n").slice(0, FAILURE_TEXT_MAX);
+    }
+  }
+  return undefined;
+}
+
 function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWorkLogEntry {
   const payload =
     activity.payload && typeof activity.payload === "object"
@@ -755,6 +797,10 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   }
   if (toolLifecycleStatus) {
     entry.toolLifecycleStatus = toolLifecycleStatus;
+  }
+  const failureText = extractToolFailureText(payload);
+  if (failureText) {
+    entry.failureText = failureText;
   }
   const collapseKey = deriveToolLifecycleCollapseKey(entry);
   if (collapseKey) {
