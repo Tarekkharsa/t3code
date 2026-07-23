@@ -374,6 +374,63 @@ export function selectAgentstackUndoEntry(
 
 // ── policy tab ───────────────────────────────────────────────────────────────
 
+// ── toolsets (Slice 2) ───────────────────────────────────────────────────────
+
+export interface AgentstackToolsetLike {
+  name: string;
+  servers: ReadonlyArray<string>;
+  skills: ReadonlyArray<string>;
+  harness?: string | null | undefined;
+  pinned: boolean;
+  active?: boolean | undefined;
+  blockers: ReadonlyArray<{ name: string; reason: string }>;
+}
+
+export interface AgentstackToolsetRow {
+  name: string;
+  /** e.g. `2 servers · 1 skill · for codex` */
+  summary: string;
+  /** One click from a session: pinned, and the project is trusted. */
+  ready: boolean;
+  active: boolean;
+  /** Why it cannot start right now; null when ready. */
+  blockedBecause: string | null;
+}
+
+/**
+ * Rows for the toolset picker. Readiness here is advisory display — the CLI's
+ * `session start` gate is the enforcement (it refuses untrusted projects and
+ * unpinned/drifted surfaces regardless of what this renders). An untrusted or
+ * drifted project blocks every row with the review pointer; otherwise the
+ * first blocker's own actionable reason is surfaced.
+ */
+export function deriveToolsetRows(
+  toolsets: ReadonlyArray<AgentstackToolsetLike>,
+  trust: string,
+): AgentstackToolsetRow[] {
+  return toolsets.map((t) => {
+    const parts = [
+      `${t.servers.length} server${t.servers.length === 1 ? "" : "s"}`,
+      `${t.skills.length} skill${t.skills.length === 1 ? "" : "s"}`,
+    ];
+    if (t.harness) parts.push(`for ${t.harness}`);
+    const untrusted = trust !== "trusted";
+    const ready = t.pinned && !untrusted;
+    const blockedBecause = ready
+      ? null
+      : untrusted
+        ? "review this project first — unreviewed content stays inert"
+        : (t.blockers[0]?.reason ?? "not pinned — run agentstack lock");
+    return {
+      name: t.name,
+      summary: parts.join(" · "),
+      ready,
+      active: t.active === true,
+      blockedBecause,
+    };
+  });
+}
+
 export interface AgentstackPolicyRow {
   key: string;
   title: string;

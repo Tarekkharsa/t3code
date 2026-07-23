@@ -349,6 +349,125 @@ describe("AgentstackCli", () => {
     }).pipe(Effect.provide(ProcessRunnerTest));
   });
 
+  it.effect(
+    "session-start binds the profile name and refuses a malformed one before spawning",
+    () =>
+      Effect.gen(function* () {
+        const run = vi.fn<ProcessRunner.ProcessRunner["Service"]["run"]>(() =>
+          Effect.succeed(okOutput("\u2713 session 'dev' started (project)")),
+        );
+        const ProcessRunnerTest = Layer.succeed(
+          ProcessRunner.ProcessRunner,
+          ProcessRunner.ProcessRunner.of({ run }),
+        );
+        const agentstack = yield* AgentstackCli.make().pipe(Effect.provide(ProcessRunnerTest));
+
+        const started = yield* agentstack.action({
+          workspaceRoot: "/proj",
+          action: "session-start",
+          profile: "dev",
+        });
+        expect(started.ok).toBe(true);
+        // Fixed argv: name in, no scope, no overrides.
+        expect(run).toHaveBeenCalledWith(
+          expect.objectContaining({
+            args: ["--manifest-dir", "/proj", "session", "start", "dev"],
+          }),
+        );
+
+        run.mockClear();
+        // Absent or malformed names are refused before anything spawns; the
+        // CLI's own fail-closed gate (trust, pins) is the real enforcement.
+        const missing = yield* agentstack.action({
+          workspaceRoot: "/proj",
+          action: "session-start",
+        });
+        expect(missing.ok).toBe(false);
+        for (const bad of ["../evil", "a b", "--scope", ""]) {
+          const refused = yield* agentstack.action({
+            workspaceRoot: "/proj",
+            action: "session-start",
+            profile: bad,
+          });
+          expect(refused.ok).toBe(false);
+        }
+        expect(run).not.toHaveBeenCalled();
+      }),
+  );
+
+  it.effect("session-end maps to the fixed revert argv", () =>
+    Effect.gen(function* () {
+      const run = vi.fn<ProcessRunner.ProcessRunner["Service"]["run"]>(() =>
+        Effect.succeed(
+          okOutput("\u001b[32m\u2713\u001b[39m session ended \u2014 your tools are back to before"),
+        ),
+      );
+      const ProcessRunnerTest = Layer.succeed(
+        ProcessRunner.ProcessRunner,
+        ProcessRunner.ProcessRunner.of({ run }),
+      );
+      const agentstack = yield* AgentstackCli.make().pipe(Effect.provide(ProcessRunnerTest));
+
+      const ended = yield* agentstack.action({ workspaceRoot: "/proj", action: "session-end" });
+      expect(ended.ok).toBe(true);
+      // The CLI's colored output reaches the panel stripped of ANSI codes.
+      expect(ended.message).toBe("\u2713 session ended \u2014 your tools are back to before");
+      expect(run).toHaveBeenCalledWith(
+        expect.objectContaining({ args: ["--manifest-dir", "/proj", "session", "end"] }),
+      );
+      // Never `--all`: the panel only ever ends its own project's session.
+      expect(run.mock.calls[0]?.[0].args).not.toContain("--all");
+    }),
+  );
+
+  it.effect("toolsets runs use --list --json and surfaces profiles, session, and features", () =>
+    Effect.gen(function* () {
+      const wire = JSON.stringify({
+        path: "/proj",
+        trust: "trusted",
+        profiles: [
+          {
+            name: "dev",
+            skills: ["review"],
+            servers: ["github"],
+            harness: "codex",
+            pinned: true,
+            active: true,
+            blockers: [],
+          },
+        ],
+        session: { profile: "dev", scope: "project", started_unix: 1_753_000_000 },
+        schema_version: 1,
+        features: ["profiles-v1", "sessions-v1"],
+      });
+      const run = vi.fn<ProcessRunner.ProcessRunner["Service"]["run"]>(() =>
+        Effect.succeed(okOutput(wire)),
+      );
+      const ProcessRunnerTest = Layer.succeed(
+        ProcessRunner.ProcessRunner,
+        ProcessRunner.ProcessRunner.of({ run }),
+      );
+      const agentstack = yield* AgentstackCli.make().pipe(Effect.provide(ProcessRunnerTest));
+
+      const result = yield* agentstack.toolsets({ workspaceRoot: "/proj" });
+      expect(run).toHaveBeenCalledWith(
+        expect.objectContaining({ args: ["--manifest-dir", "/proj", "use", "--list", "--json"] }),
+      );
+      expect(result.installed).toBe(true);
+      expect(result.features).toContain("sessions-v1");
+      expect(result.toolsets?.profiles[0]).toMatchObject({ name: "dev", active: true });
+      expect(result.toolsets?.session?.profile).toBe("dev");
+
+      // An older CLI without the session fields still decodes (fields absent).
+      const older = AgentstackCli.parseToolsets(
+        JSON.stringify({ path: "/p", trust: "untrusted", profiles: [] }),
+      );
+      expect(older?.profiles).toEqual([]);
+      expect(older?.session).toBeUndefined();
+      expect(AgentstackCli.parseToolsets("not json")).toBeNull();
+    }),
+  );
+
   it("parses the setup plan with and without the envelope", () => {
     const base = {
       path: "/proj",

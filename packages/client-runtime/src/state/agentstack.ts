@@ -36,6 +36,10 @@ export function createAgentstackEnvironmentAtoms<R, E>(
       tag: WS_METHODS.agentstackSetupPlan,
       label: "agentstack.setupPlan",
     }),
+    toolsets: createEnvironmentRpcCommand(runtime, {
+      tag: WS_METHODS.agentstackToolsets,
+      label: "agentstack.toolsets",
+    }),
     restoreInventory: createEnvironmentRpcCommand(runtime, {
       tag: WS_METHODS.agentstackRestoreInventory,
       label: "agentstack.restoreInventory",

@@ -7,6 +7,7 @@ import type {
   AgentstackSetupPlan,
   AgentstackSetupPlanResult,
   AgentstackStatus,
+  AgentstackToolsetsResult,
   AgentstackTrustPreviewResult,
   AgentstackWorkflowData,
   AgentstackWorkflowRun,
@@ -39,6 +40,7 @@ import {
   deriveAgentstackPolicyRows,
   deriveAgentstackStatusChip,
   deriveAgentstackTrustBadge,
+  deriveToolsetRows,
   deriveWorkflowCounts,
   deriveWorkflowStages,
   hasAgentstackFeature,
@@ -54,6 +56,7 @@ import {
 const FEATURE_APPLY_SETUP = "apply-setup";
 const FEATURE_RESTORE_LAST = "restore-last";
 const FEATURE_TRUST_CONSENT = "trust-consent";
+const FEATURE_SESSIONS = "sessions-v1";
 
 const LEVEL_DOT: Record<AgentstackRowLevel, string> = {
   ok: "bg-success",
@@ -163,6 +166,7 @@ export function AgentstackControl({
   const [status, setStatus] = useState<AgentstackStatus | null>(null);
   const [activity, setActivity] = useState<AgentstackActivity | null>(null);
   const [workflow, setWorkflow] = useState<AgentstackWorkflowData | null>(null);
+  const [toolsets, setToolsets] = useState<AgentstackToolsetsResult | null>(null);
   const [unreachable, setUnreachable] = useState(false);
   const [actionState, setActionState] = useState<ActionState>({ phase: "idle" });
   const [reviewing, setReviewing] = useState(false);
@@ -189,6 +193,7 @@ export function AgentstackControl({
   const fetchRestoreInventory = useAtomCommand(agentstackEnvironment.restoreInventory, {
     reportFailure: false,
   });
+  const fetchToolsets = useAtomCommand(agentstackEnvironment.toolsets, { reportFailure: false });
   const runAction = useAtomCommand(agentstackEnvironment.action, { reportFailure: false });
 
   const input = useMemo(
@@ -197,10 +202,11 @@ export function AgentstackControl({
   );
 
   const refresh = useCallback(async () => {
-    const [statusResult, activityResult, workflowResult] = await Promise.all([
+    const [statusResult, activityResult, workflowResult, toolsetsResult] = await Promise.all([
       fetchStatus({ environmentId, input }),
       fetchActivity({ environmentId, input }),
       fetchWorkflow({ environmentId, input }),
+      fetchToolsets({ environmentId, input }),
     ]);
     if (statusResult._tag === "Success") {
       setStatus(statusResult.value);
@@ -210,7 +216,8 @@ export function AgentstackControl({
     }
     setActivity(activityResult._tag === "Success" ? activityResult.value : null);
     setWorkflow(workflowResult._tag === "Success" ? workflowResult.value : null);
-  }, [environmentId, fetchStatus, fetchActivity, fetchWorkflow, input]);
+    setToolsets(toolsetsResult._tag === "Success" ? toolsetsResult.value : null);
+  }, [environmentId, fetchStatus, fetchActivity, fetchWorkflow, fetchToolsets, input]);
 
   useEffect(() => {
     // The monitor dialog keeps polling alive after the popover closes, so a
@@ -316,6 +323,31 @@ export function AgentstackControl({
     [environmentId, runAction, input, refresh],
   );
 
+  // Temporary activation of one toolset. The name comes from the toolsets
+  // read; the server refuses a malformed one before spawning and the CLI's
+  // fail-closed gate is the enforcement.
+  const onSessionStart = useCallback(
+    async (profile: string) => {
+      const r = await runAction({
+        environmentId,
+        input: { ...input, action: "session-start", profile },
+      });
+      void refresh();
+      return r._tag === "Success"
+        ? r.value
+        : { ok: false, message: "The toolset could not be started." };
+    },
+    [environmentId, runAction, input, refresh],
+  );
+
+  const onSessionEnd = useCallback(async () => {
+    const r = await runAction({ environmentId, input: { ...input, action: "session-end" } });
+    void refresh();
+    return r._tag === "Success"
+      ? r.value
+      : { ok: false, message: "The session could not be ended." };
+  }, [environmentId, runAction, input, refresh]);
+
   const runDriftAction = useCallback(
     async (action: ActionKind) => {
       const r = await runAction({ environmentId, input: { ...input, action } });
@@ -368,6 +400,8 @@ export function AgentstackControl({
   // Trust-grant keeps its digest-presence gate regardless; the feature gate is
   // only additive when the CLI actually advertises its features.
   const trustConsentMissing = agentstackFeatureKnownMissing(features, FEATURE_TRUST_CONSENT);
+  const canSessions = hasAgentstackFeature(features, FEATURE_SESSIONS);
+  const sessionsKnownMissing = agentstackFeatureKnownMissing(features, FEATURE_SESSIONS);
 
   const overviewRows: AgentstackOverviewRow[] = useMemo(() => {
     if (!status?.doctor) return [];
@@ -534,6 +568,11 @@ export function AgentstackControl({
                     loadRestoreInventory={loadRestoreInventory}
                     onUndo={onUndo}
                     canRestore={canRestore}
+                    toolsets={toolsets}
+                    canSessions={canSessions}
+                    sessionsKnownMissing={sessionsKnownMissing}
+                    onSessionStart={onSessionStart}
+                    onSessionEnd={onSessionEnd}
                     actionState={actionState}
                     onRequestAction={(a) => setActionState({ phase: "confirm", action: a })}
                     onReviewDrift={() => setReviewingDrift(true)}
@@ -1213,6 +1252,11 @@ function OverviewPanel({
   loadRestoreInventory,
   onUndo,
   canRestore,
+  toolsets,
+  canSessions,
+  sessionsKnownMissing,
+  onSessionStart,
+  onSessionEnd,
   actionState,
   onRequestAction,
   onReviewDrift,
@@ -1226,6 +1270,11 @@ function OverviewPanel({
   loadRestoreInventory: () => Promise<AgentstackRestoreInventoryResult | null>;
   onUndo: (restoreId: string) => Promise<{ ok: boolean; message: string }>;
   canRestore: boolean;
+  toolsets: AgentstackToolsetsResult | null;
+  canSessions: boolean;
+  sessionsKnownMissing: boolean;
+  onSessionStart: (profile: string) => Promise<{ ok: boolean; message: string }>;
+  onSessionEnd: () => Promise<{ ok: boolean; message: string }>;
   actionState: ActionState;
   onRequestAction: (a: ActionKind) => void;
   onReviewDrift: () => void;
@@ -1277,6 +1326,13 @@ function OverviewPanel({
       {actionState.phase !== "idle" ? (
         <ActionConfirm state={actionState} onConfirm={onConfirm} onCancel={onCancel} />
       ) : null}
+      <ToolsetsCard
+        toolsets={toolsets}
+        canSessions={canSessions}
+        sessionsKnownMissing={sessionsKnownMissing}
+        onStart={onSessionStart}
+        onEnd={onSessionEnd}
+      />
       <UndoAffordance
         loadInventory={loadRestoreInventory}
         onUndo={onUndo}
@@ -1344,6 +1400,137 @@ type UndoAct =
   | { phase: "done"; ok: boolean; message: string };
 
 /** Compact relative age from unix seconds. */
+/**
+ * The toolset picker (Slice 2): every declared profile as a "toolset" row —
+ * readiness, what it selects, whether it is in use — plus the temporary
+ * activation verbs. "Use temporarily" starts a session (the CLI's fail-closed
+ * gate enforces trust/pins); "Stop using" reverts it. The active-session line
+ * renders from the CLI's own store on every read, so a session an interrupted
+ * panel left behind reappears here with its safe recovery action.
+ */
+function ToolsetsCard({
+  toolsets,
+  canSessions,
+  sessionsKnownMissing,
+  onStart,
+  onEnd,
+}: {
+  toolsets: AgentstackToolsetsResult | null;
+  canSessions: boolean;
+  sessionsKnownMissing: boolean;
+  onStart: (profile: string) => Promise<{ ok: boolean; message: string }>;
+  onEnd: () => Promise<{ ok: boolean; message: string }>;
+}) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [done, setDone] = useState<{ ok: boolean; message: string } | null>(null);
+
+  const data = toolsets?.toolsets ?? null;
+  const rows = useMemo(() => (data ? deriveToolsetRows(data.profiles, data.trust) : []), [data]);
+  const session = data?.session ?? null;
+
+  const start = useCallback(
+    async (profile: string) => {
+      setBusy(profile);
+      setDone(null);
+      const r = await onStart(profile);
+      setBusy(null);
+      setDone(r);
+    },
+    [onStart],
+  );
+  const end = useCallback(async () => {
+    setBusy("__end__");
+    setDone(null);
+    const r = await onEnd();
+    setBusy(null);
+    setDone(r);
+  }, [onEnd]);
+
+  // Nothing to show: no declared profiles and nothing to recover.
+  if (!data || (rows.length === 0 && !session)) return null;
+
+  return (
+    <div className="mx-1 mt-1.5 border-t border-border/40 px-1.5 pt-2">
+      <div className="flex items-center gap-2 px-1 pb-1">
+        <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+          Toolsets
+        </span>
+        {sessionsKnownMissing ? (
+          <span className="text-[10px] text-muted-foreground/70">
+            update agentstack to start one from here
+          </span>
+        ) : null}
+      </div>
+
+      {session ? (
+        <div className="mb-1 flex items-center gap-2 rounded-lg border border-success/25 bg-success/[0.07] px-2.5 py-2">
+          <span className="size-[7px] shrink-0 rounded-full bg-success" />
+          <span className="min-w-0 flex-1 truncate text-xs text-foreground">
+            <span className="font-semibold">{session.profile}</span> in use ·{" "}
+            {fmtAgo(session.started_unix)} — ends with your files back as they were
+          </span>
+          <Button
+            disabled={busy !== null || !canSessions}
+            onClick={() => void end()}
+            size="xs"
+            title={
+              canSessions
+                ? "Revert this temporary activation"
+                : "This agentstack CLI predates session control from the panel — run `agentstack session end` in a terminal"
+            }
+            variant="outline"
+          >
+            {busy === "__end__" ? "Stopping…" : "Stop using"}
+          </Button>
+        </div>
+      ) : null}
+
+      {rows.map((row) => (
+        <div key={row.name} className="flex items-center gap-2.5 rounded-lg px-2.5 py-[7px]">
+          <span
+            className={cn(
+              "size-1.5 shrink-0 rounded-full",
+              row.active ? "bg-success" : row.ready ? "bg-success/60" : "bg-warning",
+            )}
+          />
+          <span className="min-w-0 shrink-0 max-w-[96px] truncate text-[12.5px] font-semibold text-foreground">
+            {row.name}
+          </span>
+          <span
+            className="min-w-0 flex-1 truncate text-xs text-muted-foreground"
+            title={row.blockedBecause ?? row.summary}
+          >
+            {row.blockedBecause ?? row.summary}
+          </span>
+          {row.active ? (
+            <span className="shrink-0 text-[10px] font-semibold text-success">in use</span>
+          ) : row.ready && !session && canSessions ? (
+            <button
+              type="button"
+              disabled={busy !== null}
+              onClick={() => void start(row.name)}
+              className="shrink-0 rounded-md border border-border bg-background px-2 py-0.5 text-[10px] font-semibold text-foreground transition-colors hover:bg-accent disabled:opacity-50"
+            >
+              {busy === row.name ? "Starting…" : "Use temporarily"}
+            </button>
+          ) : null}
+        </div>
+      ))}
+
+      {done ? (
+        <p
+          className={cn(
+            "px-2.5 pb-1 text-[11px]",
+            done.ok ? "text-muted-foreground" : "text-destructive",
+          )}
+        >
+          {done.message}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 function undoAge(unixSeconds: number): string {
   const secs = Math.max(0, Math.floor(Date.now() / 1000) - unixSeconds);
   if (secs < 60) return "just now";

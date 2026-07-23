@@ -304,6 +304,7 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [WS_METHODS.agentstackTrustPreview, AuthOrchestrationReadScope],
   [WS_METHODS.agentstackDiff, AuthOrchestrationReadScope],
   [WS_METHODS.agentstackSetupPlan, AuthOrchestrationReadScope],
+  [WS_METHODS.agentstackToolsets, AuthOrchestrationReadScope],
   [WS_METHODS.agentstackRestoreInventory, AuthOrchestrationReadScope],
   // Governed actions touch the AgentStack security control plane — trust
   // grant/revoke, machine guard, config writes. That decides what code a
@@ -1577,6 +1578,14 @@ const makeWsRpcLayer = (
             ),
             { "rpc.aggregate": "agentstack" },
           ),
+        [WS_METHODS.agentstackToolsets]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.agentstackToolsets,
+            resolveAgentstackWorkspaceRoot(input).pipe(
+              Effect.flatMap((workspaceRoot) => agentstackCli.toolsets({ workspaceRoot })),
+            ),
+            { "rpc.aggregate": "agentstack" },
+          ),
         [WS_METHODS.agentstackRestoreInventory]: (input) =>
           observeRpcEffect(
             WS_METHODS.agentstackRestoreInventory,
@@ -1598,6 +1607,7 @@ const makeWsRpcLayer = (
                     : {}),
                   ...(input.planDigest !== undefined ? { planDigest: input.planDigest } : {}),
                   ...(input.restoreId !== undefined ? { restoreId: input.restoreId } : {}),
+                  ...(input.profile !== undefined ? { profile: input.profile } : {}),
                 }),
               ),
             ),

@@ -511,6 +511,65 @@ export const AgentstackRestoreInventoryInput = Schema.Struct({
 });
 export type AgentstackRestoreInventoryInput = typeof AgentstackRestoreInventoryInput.Type;
 
+// ── toolsets (read) ──────────────────────────────────────────────────────────
+// `agentstack use --list --json` — every declared profile ("toolset" in the
+// UI) with its resolved selection, readiness, and — under `sessions-v1` —
+// whether it is temporarily active here. The session state comes from the
+// CLI's own store on every read, which is what makes interrupted-session
+// recovery honest: a reopened panel renders the truth, not its own memory.
+
+export const AgentstackToolsetBlocker = Schema.Struct({
+  name: Schema.String,
+  /** One actionable reason (e.g. "unpinned — run `agentstack lock`"). */
+  reason: Schema.String,
+});
+export type AgentstackToolsetBlocker = typeof AgentstackToolsetBlocker.Type;
+
+export const AgentstackToolset = Schema.Struct({
+  name: Schema.String,
+  skills: Schema.Array(Schema.String),
+  servers: Schema.Array(Schema.String),
+  harness: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  /** Everything the profile references is pinned and matching. */
+  pinned: Schema.Boolean,
+  /** Active session here uses this profile. Absent on an older CLI. */
+  active: Schema.optionalKey(Schema.Boolean),
+  blockers: Schema.Array(AgentstackToolsetBlocker),
+});
+export type AgentstackToolset = typeof AgentstackToolset.Type;
+
+export const AgentstackActiveSession = Schema.Struct({
+  profile: Schema.String,
+  scope: Schema.String,
+  started_unix: Schema.Number,
+});
+export type AgentstackActiveSession = typeof AgentstackActiveSession.Type;
+
+export const AgentstackToolsets = Schema.Struct({
+  path: Schema.String,
+  /** Project trust state: `trusted`, `drifted`, or `untrusted`. */
+  trust: Schema.String,
+  profiles: Schema.Array(AgentstackToolset),
+  /** The active session here, or null/absent when none (or an older CLI). */
+  session: Schema.optionalKey(Schema.NullOr(AgentstackActiveSession)),
+  ...AgentstackEnvelopeFields,
+});
+export type AgentstackToolsets = typeof AgentstackToolsets.Type;
+
+export const AgentstackToolsetsResult = Schema.Struct({
+  installed: Schema.Boolean,
+  toolsets: Schema.NullOr(AgentstackToolsets),
+  checkedAt: Schema.Number,
+  ...AgentstackNegotiationFields,
+});
+export type AgentstackToolsetsResult = typeof AgentstackToolsetsResult.Type;
+
+export const AgentstackToolsetsInput = Schema.Struct({
+  projectId: ProjectId,
+  threadId: Schema.optionalKey(ThreadId),
+});
+export type AgentstackToolsetsInput = typeof AgentstackToolsetsInput.Type;
+
 // ── governed actions (write) ─────────────────────────────────────────────────
 
 /**
@@ -554,6 +613,15 @@ export const AgentstackActionKind = Schema.Literals([
   // is digest-bound: the server refuses before spawning without a valid value.
   "setup-apply",
   "restore-write",
+  // `session-start` runs `agentstack session start <profile>` — temporary
+  // activation of one declared toolset, fail-closed in the CLI (refuses an
+  // untrusted project or an unpinned/drifted surface regardless of what any
+  // UI displayed). The profile name must come from the toolsets read; the
+  // server refuses a malformed name before anything spawns. `session-end`
+  // runs `agentstack session end`, reverting the session — including one an
+  // interrupted panel left behind.
+  "session-start",
+  "session-end",
 ]);
 export type AgentstackActionKind = typeof AgentstackActionKind.Type;
 
@@ -581,6 +649,13 @@ export const AgentstackActionInput = Schema.Struct({
    * every other action.
    */
   restoreId: Schema.optionalKey(Schema.String),
+  /**
+   * `session-start` only: the toolset (profile) name to activate, taken from
+   * the toolsets read. The server refuses before spawning unless it matches
+   * the profile-name shape; the CLI independently refuses unknown profiles
+   * and unready surfaces. Ignored for every other action.
+   */
+  profile: Schema.optionalKey(Schema.String),
 });
 export type AgentstackActionInput = typeof AgentstackActionInput.Type;
 

@@ -126,4 +126,91 @@ describe.skipIf(!available)("AgentstackCli against the real binary", () => {
       }).pipe(Effect.provide(ProcessRunner.layer.pipe(Layer.provide(NodeServices.layer)))),
     20_000,
   );
+
+  it.effect(
+    "toolset sessions end-to-end: fail-closed until trusted+pinned, then start → active → end",
+    () =>
+      Effect.gen(function* () {
+        const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "agentstack-e2e-home-"));
+        const project = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "agentstack-e2e-proj-"));
+        const savedHome = process.env.AGENTSTACK_HOME;
+        process.env.AGENTSTACK_HOME = home;
+        try {
+          NodeFS.mkdirSync(NodePath.join(project, ".agentstack"));
+          NodeFS.writeFileSync(
+            NodePath.join(project, ".agentstack", "agentstack.toml"),
+            `${MANIFEST_V1}
+[profiles.docs-only]
+servers = ["docs"]
+`,
+          );
+
+          const cli = yield* AgentstackCli.make();
+          const runner = yield* ProcessRunner.ProcessRunner;
+
+          // Untrusted: the listing renders (a picker must), and starting is
+          // refused by the CLI's own gate — not by anything in this server.
+          const before = yield* cli.toolsets({ workspaceRoot: project });
+          expect(before.installed).toBe(true);
+          expect(before.features).toContain("sessions-v1");
+          expect(before.toolsets?.profiles[0]?.name).toBe("docs-only");
+          expect(before.toolsets?.session ?? null).toBeNull();
+          const refused = yield* cli.action({
+            workspaceRoot: project,
+            action: "session-start",
+            profile: "docs-only",
+          });
+          expect(refused.ok).toBe(false);
+
+          // Pin FIRST, then review + grant: the trust digest covers the
+          // lockfile, so new pins after a grant would re-gate it ("new pins
+          // are new consent"). Lock, then the preview digest binds the pinned
+          // state the human reviews.
+          const locked = yield* runner.run({
+            command: binary as string,
+            args: ["--manifest-dir", project, "lock"],
+            timeout: "15 seconds",
+            timeoutBehavior: "timedOutResult",
+            maxOutputBytes: 2 * 1024 * 1024,
+            outputMode: "truncate",
+          });
+          expect(locked.code).toBe(0);
+          const preview = yield* cli.trustPreview({ workspaceRoot: project });
+          const grant = yield* cli.action({
+            workspaceRoot: project,
+            action: "trust-grant",
+            consentedDigest: preview.preview?.surface_digest as string,
+          });
+          expect(grant.ok).toBe(true);
+
+          // Start → the listing's row goes active and the session appears…
+          const started = yield* cli.action({
+            workspaceRoot: project,
+            action: "session-start",
+            profile: "docs-only",
+          });
+          expect(started.ok).toBe(true);
+          const during = yield* cli.toolsets({ workspaceRoot: project });
+          expect(during.toolsets?.profiles[0]?.active).toBe(true);
+          expect(during.toolsets?.session?.profile).toBe("docs-only");
+
+          // …and end reverts it (the same action a reopened panel offers for
+          // a session an interrupted supervisor left behind).
+          const ended = yield* cli.action({ workspaceRoot: project, action: "session-end" });
+          expect(ended.ok).toBe(true);
+          const after = yield* cli.toolsets({ workspaceRoot: project });
+          expect(after.toolsets?.profiles[0]?.active).toBe(false);
+          expect(after.toolsets?.session ?? null).toBeNull();
+        } finally {
+          if (savedHome === undefined) {
+            delete process.env.AGENTSTACK_HOME;
+          } else {
+            process.env.AGENTSTACK_HOME = savedHome;
+          }
+          NodeFS.rmSync(home, { recursive: true, force: true });
+          NodeFS.rmSync(project, { recursive: true, force: true });
+        }
+      }).pipe(Effect.provide(ProcessRunner.layer.pipe(Layer.provide(NodeServices.layer)))),
+    30_000,
+  );
 });

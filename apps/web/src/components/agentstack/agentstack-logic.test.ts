@@ -7,6 +7,7 @@ import {
   deriveAgentstackPolicyRows,
   deriveAgentstackStatusChip,
   deriveAgentstackTrustBadge,
+  deriveToolsetRows,
   deriveWorkflowCounts,
   deriveWorkflowStages,
   hasAgentstackFeature,
@@ -363,5 +364,52 @@ describe("deriveAgentstackActivityRows", () => {
     expect(rows[0]!.label.length).toBeLessThanOrEqual(48);
     expect(rows[0]!.label.endsWith("\u2026")).toBe(true);
     expect(rows[1]).toMatchObject({ outcome: "ok", label: "figma__get_file", age: "2h ago" });
+  });
+});
+
+describe("deriveToolsetRows", () => {
+  const dev = {
+    name: "dev",
+    servers: ["github", "tldraw"],
+    skills: ["review"],
+    harness: "codex",
+    pinned: true,
+    active: false,
+    blockers: [],
+  };
+  const stale = {
+    name: "stale",
+    servers: ["github"],
+    skills: [],
+    pinned: false,
+    blockers: [{ name: "github", reason: "unpinned — run `agentstack lock`" }],
+  };
+
+  it("summarizes counts and harness, and marks pinned+trusted rows ready", () => {
+    const rows = deriveToolsetRows([dev, stale], "trusted");
+    expect(rows[0]).toMatchObject({
+      name: "dev",
+      summary: "2 servers · 1 skill · for codex",
+      ready: true,
+      active: false,
+      blockedBecause: null,
+    });
+    // A blocked row surfaces its first blocker's actionable reason.
+    expect(rows[1]).toMatchObject({ name: "stale", ready: false });
+    expect(rows[1]!.blockedBecause).toContain("agentstack lock");
+  });
+
+  it("blocks every row on an untrusted or drifted project with the review pointer", () => {
+    for (const trust of ["untrusted", "drifted"]) {
+      const rows = deriveToolsetRows([dev], trust);
+      expect(rows[0]!.ready).toBe(false);
+      expect(rows[0]!.blockedBecause).toContain("review this project");
+    }
+  });
+
+  it("marks the in-use row active (absent field on an older CLI reads inactive)", () => {
+    const rows = deriveToolsetRows([{ ...dev, active: true }, stale], "trusted");
+    expect(rows[0]!.active).toBe(true);
+    expect(rows[1]!.active).toBe(false);
   });
 });

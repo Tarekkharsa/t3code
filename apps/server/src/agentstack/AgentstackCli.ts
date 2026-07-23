@@ -4,6 +4,7 @@ import {
   AgentstackDoctorReport,
   AgentstackRestoreInventory,
   AgentstackSetupPlan,
+  AgentstackToolsets,
   AgentstackTrustPreview,
   AgentstackWorkflowRun,
   AgentstackWorkflowRunSummary,
@@ -16,6 +17,7 @@ import {
   type AgentstackRestoreInventoryResult,
   type AgentstackSetupPlanResult,
   type AgentstackStatus,
+  type AgentstackToolsetsResult,
   type AgentstackTrustPreviewResult,
   type AgentstackWorkflowData,
 } from "@t3tools/contracts";
@@ -96,6 +98,13 @@ export interface AgentstackActionRequest {
    * absent or malformed id is refused before anything spawns.
    */
   readonly restoreId?: string;
+  /**
+   * `session-start` only: the toolset (profile) name from the toolsets read.
+   * A start with an absent or malformed name is refused before anything
+   * spawns; the CLI independently refuses unknown profiles and unready
+   * (untrusted / unpinned / drifted) surfaces.
+   */
+  readonly profile?: string;
 }
 
 /**
@@ -108,6 +117,14 @@ export const CONSENT_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
 
 /** The restore ledger id shape (full or short hex). Same fail-closed hygiene. */
 export const RESTORE_ID_RE = /^[0-9a-f]{8,64}$/;
+
+/**
+ * The toolset (profile) name shape allowed to reach `session start` argv.
+ * Names come from the toolsets read, but re-validate at the boundary — same
+ * fail-closed hygiene as the digest and ledger-id shapes (spawning is
+ * args-array, so this is shape hygiene, not injection defense).
+ */
+export const PROFILE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 /**
  * The envelope `schema_version` this build understands. A read whose payload
@@ -225,6 +242,12 @@ export function parseSetupPlan(stdout: string) {
   return Option.getOrNull(decodeSetupPlan(stdout));
 }
 
+const decodeToolsets = Schema.decodeUnknownOption(Schema.fromJsonString(AgentstackToolsets));
+
+export function parseToolsets(stdout: string) {
+  return Option.getOrNull(decodeToolsets(stdout));
+}
+
 const decodeRestoreInventory = Schema.decodeUnknownOption(
   Schema.fromJsonString(AgentstackRestoreInventory),
 );
@@ -246,6 +269,7 @@ export function actionArgv(
     readonly consentedDigest?: string | undefined;
     readonly planDigest?: string | undefined;
     readonly restoreId?: string | undefined;
+    readonly profile?: string | undefined;
   },
 ): ReadonlyArray<string> {
   switch (action) {
@@ -313,6 +337,17 @@ export function actionArgv(
         "--write",
         "--json",
       ];
+    case "session-start":
+      // Temporary activation of one declared toolset. The CLI's session gate
+      // is fail-closed (refuses untrusted projects and unpinned/drifted
+      // surfaces), so this argv can be fixed: name in, no scope, no
+      // overrides. The caller refuses before spawn when the name is absent
+      // or malformed, so the "" fallback never reaches a process.
+      return ["--manifest-dir", workspaceRoot, "session", "start", bound?.profile ?? ""];
+    case "session-end":
+      // Revert the active session here — including one an interrupted panel
+      // left behind (the CLI's session store survives the supervisor).
+      return ["--manifest-dir", workspaceRoot, "session", "end"];
   }
 }
 
@@ -342,6 +377,9 @@ export class AgentstackCli extends Context.Service<
     readonly setupPlan: (
       input: AgentstackWorkspaceRequest,
     ) => Effect.Effect<AgentstackSetupPlanResult>;
+    readonly toolsets: (
+      input: AgentstackWorkspaceRequest,
+    ) => Effect.Effect<AgentstackToolsetsResult>;
     readonly restoreInventory: (
       input: AgentstackWorkspaceRequest,
     ) => Effect.Effect<AgentstackRestoreInventoryResult>;
@@ -590,6 +628,33 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
     },
   );
 
+  const toolsets: AgentstackCli["Service"]["toolsets"] = Effect.fn("AgentstackCli.toolsets")(
+    function* (input) {
+      const result = yield* run([
+        "--manifest-dir",
+        input.workspaceRoot,
+        "use",
+        "--list",
+        "--json",
+      ]).pipe(
+        Effect.match({
+          onFailure: (error) =>
+            isBinaryNotFound(error)
+              ? ({ _tag: "NotFound" } as const)
+              : ({ _tag: "Failed" } as const),
+          onSuccess: (r) => ({ _tag: "Success", result: r }) as const,
+        }),
+      );
+      const decoded = result._tag === "Success" ? parseToolsets(result.result.stdout) : null;
+      return {
+        installed: result._tag !== "NotFound",
+        toolsets: decoded,
+        ...negotiate(decoded),
+        checkedAt: yield* Clock.currentTimeMillis,
+      };
+    },
+  );
+
   const restoreInventory: AgentstackCli["Service"]["restoreInventory"] = Effect.fn(
     "AgentstackCli.restoreInventory",
   )(function* (input) {
@@ -658,6 +723,21 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
           };
         }
       }
+      // Session-start is name-bound: refuse anything that isn't a plausible
+      // profile name before it reaches argv. The name must come from the
+      // toolsets read; the CLI still refuses unknown or unready profiles.
+      if (input.action === "session-start") {
+        const profile = input.profile;
+        if (profile === undefined || !PROFILE_NAME_RE.test(profile)) {
+          return {
+            ok: false,
+            message:
+              profile === undefined
+                ? "starting a toolset needs its name — pick one from the list"
+                : "toolset name looks malformed — refresh the list and try again",
+          };
+        }
+      }
       const result = yield* processRunner
         .run({
           command: binary,
@@ -665,6 +745,7 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
             consentedDigest: input.consentedDigest,
             planDigest: input.planDigest,
             restoreId: input.restoreId,
+            profile: input.profile,
           }),
           timeout: ACTION_TIMEOUT,
           timeoutBehavior: "timedOutResult",
@@ -690,9 +771,12 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
       if (r.timedOut) {
         return { ok: false, message: "timed out" };
       }
-      // Last non-empty line of stdout (or stderr) is the human outcome.
+      // Last non-empty line of stdout (or stderr) is the human outcome. The
+      // CLI colors its terminal output; strip ANSI SGR sequences so the panel
+      // never renders raw escape codes.
       const lastLine = (text: string): string =>
         text
+          .replaceAll(/\u001b\[[0-9;]*m/g, "")
           .split("\n")
           .findLast((l) => l.trim().length > 0)
           ?.trim() ?? "";
@@ -710,6 +794,7 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
     trustPreview,
     diff,
     setupPlan,
+    toolsets,
     restoreInventory,
     action,
   });

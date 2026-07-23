@@ -25,6 +25,8 @@ import {
   AgentstackRestoreInventoryResult,
   AgentstackSetupPlanInput,
   AgentstackSetupPlanResult,
+  AgentstackToolsetsInput,
+  AgentstackToolsetsResult,
   AgentstackStatus,
   AgentstackStatusInput,
   AgentstackTrustInput,
@@ -200,6 +202,7 @@ export const WS_METHODS = {
   agentstackTrustPreview: "agentstack.trustPreview",
   agentstackDiff: "agentstack.diff",
   agentstackSetupPlan: "agentstack.setupPlan",
+  agentstackToolsets: "agentstack.toolsets",
   agentstackRestoreInventory: "agentstack.restoreInventory",
   agentstackAction: "agentstack.action",
 
@@ -332,6 +335,12 @@ export const WsAgentstackDiffRpc = Rpc.make(WS_METHODS.agentstackDiff, {
 export const WsAgentstackSetupPlanRpc = Rpc.make(WS_METHODS.agentstackSetupPlan, {
   payload: AgentstackSetupPlanInput,
   success: AgentstackSetupPlanResult,
+  error: Schema.Union([AgentstackWorkspaceContextError, EnvironmentAuthorizationError]),
+});
+
+export const WsAgentstackToolsetsRpc = Rpc.make(WS_METHODS.agentstackToolsets, {
+  payload: AgentstackToolsetsInput,
+  success: AgentstackToolsetsResult,
   error: Schema.Union([AgentstackWorkspaceContextError, EnvironmentAuthorizationError]),
 });
 
@@ -786,6 +795,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsAgentstackTrustPreviewRpc,
   WsAgentstackDiffRpc,
   WsAgentstackSetupPlanRpc,
+  WsAgentstackToolsetsRpc,
   WsAgentstackRestoreInventoryRpc,
   WsAgentstackActionRpc,
   WsServerRefreshProvidersRpc,
