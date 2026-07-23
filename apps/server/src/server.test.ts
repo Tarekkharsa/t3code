@@ -697,6 +697,7 @@ const buildAppUnderTest = (options?: {
                 activeRun: null,
                 checkedAt: 0,
               }),
+            trustPreview: () => Effect.succeed({ installed: false, preview: null, checkedAt: 0 }),
             action: () => Effect.succeed({ ok: false, message: "not installed" }),
           }),
         ),

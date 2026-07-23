@@ -152,16 +152,68 @@ export const AgentstackWorkflowInput = Schema.Struct({
 });
 export type AgentstackWorkflowInput = typeof AgentstackWorkflowInput.Type;
 
+// ── trust preview (read) ─────────────────────────────────────────────────────
+// `agentstack trust <path> --preview` — the runtime surface a human consents
+// to, as data. Read-only; grants nothing. snake_case verbatim from the CLI.
+
+export const AgentstackTrustServer = Schema.Struct({
+  name: Schema.String,
+  /** stdio | http | unresolvable */
+  kind: Schema.String,
+  /** what it runs (stdio) or contacts (http), or the resolve error. */
+  target: Schema.String,
+});
+export type AgentstackTrustServer = typeof AgentstackTrustServer.Type;
+
+export const AgentstackTrustPreview = Schema.Struct({
+  path: Schema.String,
+  /** trusted | drifted | untrusted */
+  state: Schema.String,
+  /** true when this repo was trusted before (a re-trust review). */
+  re_trust: Schema.Boolean,
+  servers: Schema.Array(AgentstackTrustServer),
+  secrets: Schema.Array(Schema.String),
+  counts: Schema.Struct({
+    skills: Schema.Number,
+    workflows: Schema.Number,
+    extensions: Schema.Number,
+    instructions: Schema.Number,
+  }),
+});
+export type AgentstackTrustPreview = typeof AgentstackTrustPreview.Type;
+
+export const AgentstackTrustPreviewResult = Schema.Struct({
+  installed: Schema.Boolean,
+  preview: Schema.NullOr(AgentstackTrustPreview),
+  checkedAt: Schema.Number,
+});
+export type AgentstackTrustPreviewResult = typeof AgentstackTrustPreviewResult.Type;
+
+export const AgentstackTrustInput = Schema.Struct({
+  projectId: ProjectId,
+  threadId: Schema.optionalKey(ThreadId),
+});
+export type AgentstackTrustInput = typeof AgentstackTrustInput.Type;
+
 // ── governed actions (write) ─────────────────────────────────────────────────
 
 /**
  * The closed set of governed commands the panel may trigger. The server maps
  * each to fixed argv — the client never supplies a command line. `apply`
  * re-renders configs (capped by the machine ceiling, reversible via
- * `agentstack restore`); `guard-install` only adds pre-tool-use protection.
- * Neither can loosen effective policy.
+ * `agentstack restore`); `guard-install` only adds pre-tool-use protection;
+ * `trust-grant` / `trust-revoke` grant or withdraw trust for this project.
+ * None can loosen effective policy. `trust-grant` runs `agentstack trust --yes`
+ * — the UI only reaches it after the review dialog rendered the actual surface
+ * (from `trust --preview`), so the click is the consent that replaces the
+ * terminal keystroke; the CLI still self-refuses an unpinned surface.
  */
-export const AgentstackActionKind = Schema.Literals(["apply", "guard-install"]);
+export const AgentstackActionKind = Schema.Literals([
+  "apply",
+  "guard-install",
+  "trust-grant",
+  "trust-revoke",
+]);
 export type AgentstackActionKind = typeof AgentstackActionKind.Type;
 
 export const AgentstackActionInput = Schema.Struct({

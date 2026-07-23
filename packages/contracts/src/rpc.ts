@@ -21,6 +21,8 @@ import {
   AgentstackActivityInput,
   AgentstackStatus,
   AgentstackStatusInput,
+  AgentstackTrustInput,
+  AgentstackTrustPreviewResult,
   AgentstackWorkflowData,
   AgentstackWorkflowInput,
   AgentstackWorkspaceContextError,
@@ -186,6 +188,7 @@ export const WS_METHODS = {
   agentstackStatus: "agentstack.status",
   agentstackActivity: "agentstack.activity",
   agentstackWorkflow: "agentstack.workflow",
+  agentstackTrustPreview: "agentstack.trustPreview",
   agentstackAction: "agentstack.action",
 
   // Git workflow methods
@@ -291,6 +294,12 @@ export const WsAgentstackActivityRpc = Rpc.make(WS_METHODS.agentstackActivity, {
 export const WsAgentstackWorkflowRpc = Rpc.make(WS_METHODS.agentstackWorkflow, {
   payload: AgentstackWorkflowInput,
   success: AgentstackWorkflowData,
+  error: Schema.Union([AgentstackWorkspaceContextError, EnvironmentAuthorizationError]),
+});
+
+export const WsAgentstackTrustPreviewRpc = Rpc.make(WS_METHODS.agentstackTrustPreview, {
+  payload: AgentstackTrustInput,
+  success: AgentstackTrustPreviewResult,
   error: Schema.Union([AgentstackWorkspaceContextError, EnvironmentAuthorizationError]),
 });
 
@@ -735,6 +744,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsAgentstackStatusRpc,
   WsAgentstackActivityRpc,
   WsAgentstackWorkflowRpc,
+  WsAgentstackTrustPreviewRpc,
   WsAgentstackActionRpc,
   WsServerRefreshProvidersRpc,
   WsServerUpdateProviderRpc,

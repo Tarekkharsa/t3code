@@ -1,12 +1,14 @@
 import {
   AgentstackCallEvent,
   AgentstackDoctorReport,
+  AgentstackTrustPreview,
   AgentstackWorkflowRun,
   AgentstackWorkflowSummary,
   type AgentstackActionKind,
   type AgentstackActionResult,
   type AgentstackActivity,
   type AgentstackStatus,
+  type AgentstackTrustPreviewResult,
   type AgentstackWorkflowData,
 } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
@@ -125,6 +127,14 @@ export function newestWorkflowRunId(stdout: string): string | null {
   });
 }
 
+const decodeTrustPreview = Schema.decodeUnknownOption(
+  Schema.fromJsonString(AgentstackTrustPreview),
+);
+
+export function parseTrustPreview(stdout: string) {
+  return Option.getOrNull(decodeTrustPreview(stdout));
+}
+
 /** The fixed argv for each vetted action — the client never supplies one. */
 function actionArgv(action: AgentstackActionKind, workspaceRoot: string): ReadonlyArray<string> {
   switch (action) {
@@ -135,6 +145,12 @@ function actionArgv(action: AgentstackActionKind, workspaceRoot: string): Readon
     case "guard-install":
       // Machine-global; only adds pre-tool-use protection (cannot loosen).
       return ["guard", "install"];
+    case "trust-grant":
+      // --yes: the review dialog already showed the surface, so the UI click
+      // is the consent. The CLI still self-refuses an unpinned surface.
+      return ["--manifest-dir", workspaceRoot, "trust", workspaceRoot, "--yes"];
+    case "trust-revoke":
+      return ["--manifest-dir", workspaceRoot, "trust", workspaceRoot, "--revoke"];
   }
 }
 
@@ -154,6 +170,9 @@ export class AgentstackCli extends Context.Service<
     readonly status: (input: AgentstackStatusRequest) => Effect.Effect<AgentstackStatus>;
     readonly activity: (input: AgentstackActivityRequest) => Effect.Effect<AgentstackActivity>;
     readonly workflow: (input: AgentstackWorkspaceRequest) => Effect.Effect<AgentstackWorkflowData>;
+    readonly trustPreview: (
+      input: AgentstackWorkspaceRequest,
+    ) => Effect.Effect<AgentstackTrustPreviewResult>;
     readonly action: (input: AgentstackActionRequest) => Effect.Effect<AgentstackActionResult>;
   }
 >()("t3/agentstack/AgentstackCli") {}
@@ -304,6 +323,24 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
     },
   );
 
+  const trustPreview: AgentstackCli["Service"]["trustPreview"] = Effect.fn(
+    "AgentstackCli.trustPreview",
+  )(function* (input) {
+    const root = input.workspaceRoot;
+    const result = yield* run(["--manifest-dir", root, "trust", root, "--preview"]).pipe(
+      Effect.match({
+        onFailure: (error) =>
+          isBinaryNotFound(error) ? ({ _tag: "NotFound" } as const) : ({ _tag: "Failed" } as const),
+        onSuccess: (r) => ({ _tag: "Success", result: r }) as const,
+      }),
+    );
+    return {
+      installed: result._tag !== "NotFound",
+      preview: result._tag === "Success" ? parseTrustPreview(result.result.stdout) : null,
+      checkedAt: yield* Clock.currentTimeMillis,
+    };
+  });
+
   const action: AgentstackCli["Service"]["action"] = Effect.fn("AgentstackCli.action")(
     function* (input) {
       const result = yield* processRunner
@@ -346,7 +383,7 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
     },
   );
 
-  return AgentstackCli.of({ status, activity, workflow, action });
+  return AgentstackCli.of({ status, activity, workflow, trustPreview, action });
 });
 
 export const layer = Layer.effect(AgentstackCli, make()).pipe(Layer.provide(ProcessRunner.layer));

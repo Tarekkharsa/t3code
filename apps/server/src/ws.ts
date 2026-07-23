@@ -299,6 +299,7 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [WS_METHODS.agentstackStatus, AuthOrchestrationReadScope],
   [WS_METHODS.agentstackActivity, AuthOrchestrationReadScope],
   [WS_METHODS.agentstackWorkflow, AuthOrchestrationReadScope],
+  [WS_METHODS.agentstackTrustPreview, AuthOrchestrationReadScope],
   // Governed actions mutate CLI config on disk (within the machine ceiling) —
   // operate scope, same tier as vcs.pull / server.signalProcess.
   [WS_METHODS.agentstackAction, AuthOrchestrationOperateScope],
@@ -1529,6 +1530,14 @@ const makeWsRpcLayer = (
             WS_METHODS.agentstackWorkflow,
             resolveAgentstackWorkspaceRoot(input).pipe(
               Effect.flatMap((workspaceRoot) => agentstackCli.workflow({ workspaceRoot })),
+            ),
+            { "rpc.aggregate": "agentstack" },
+          ),
+        [WS_METHODS.agentstackTrustPreview]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.agentstackTrustPreview,
+            resolveAgentstackWorkspaceRoot(input).pipe(
+              Effect.flatMap((workspaceRoot) => agentstackCli.trustPreview({ workspaceRoot })),
             ),
             { "rpc.aggregate": "agentstack" },
           ),

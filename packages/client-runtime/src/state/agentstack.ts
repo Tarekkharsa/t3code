@@ -20,6 +20,10 @@ export function createAgentstackEnvironmentAtoms<R, E>(
       tag: WS_METHODS.agentstackWorkflow,
       label: "agentstack.workflow",
     }),
+    trustPreview: createEnvironmentRpcCommand(runtime, {
+      tag: WS_METHODS.agentstackTrustPreview,
+      label: "agentstack.trustPreview",
+    }),
     action: createEnvironmentRpcCommand(runtime, {
       tag: WS_METHODS.agentstackAction,
       label: "agentstack.action",
