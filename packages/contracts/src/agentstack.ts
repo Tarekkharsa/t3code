@@ -201,6 +201,15 @@ export const AgentstackTrustPreview = Schema.Struct({
     extensions: Schema.Number,
     instructions: Schema.Number,
   }),
+  /**
+   * The previewed-surface digest (`sha256:<hex>`) — the exact value a
+   * consent-bound grant must present back as `--consented-digest`, so "a
+   * human reviewed this exact surface" is CLI-enforced. Optional so previews
+   * from agentstack binaries that predate consent binding still decode;
+   * absent means grants from this UI must be refused, not that consent is
+   * optional.
+   */
+  surface_digest: Schema.optionalKey(Schema.NullOr(Schema.String)),
 });
 export type AgentstackTrustPreview = typeof AgentstackTrustPreview.Type;
 
@@ -290,10 +299,12 @@ export type AgentstackDiffInput = typeof AgentstackDiffInput.Type;
  *
  * `guard-install` only adds pre-tool-use protection; `trust-grant` /
  * `trust-revoke` grant or withdraw trust for this project. None can loosen
- * effective policy. `trust-grant` runs `agentstack trust --yes` — the UI only
- * reaches it after the review dialog rendered the actual surface (from
- * `trust --preview`), so the click is the consent that replaces the terminal
- * keystroke; the CLI still self-refuses an unpinned surface.
+ * effective policy. `trust-grant` runs
+ * `agentstack trust --yes --consented-digest <surface_digest>` — the digest
+ * the review dialog got from `trust --preview`, so the click is the consent
+ * that replaces the terminal keystroke AND the CLI itself verifies the
+ * reviewed bytes are the bytes being granted (a stale or missing digest
+ * refuses; an unpinned surface still self-refuses).
  */
 export const AgentstackActionKind = Schema.Literals([
   "apply-project",
@@ -310,6 +321,13 @@ export const AgentstackActionInput = Schema.Struct({
   projectId: ProjectId,
   threadId: Schema.optionalKey(ThreadId),
   action: AgentstackActionKind,
+  /**
+   * `trust-grant` only: the `surface_digest` from the trust preview the user
+   * actually reviewed. The server maps it to `--consented-digest` and refuses
+   * the grant when it is absent; the CLI refuses when it no longer matches
+   * the bytes on disk. Meaningless (ignored) for every other action.
+   */
+  consentedDigest: Schema.optionalKey(Schema.String),
 });
 export type AgentstackActionInput = typeof AgentstackActionInput.Type;
 

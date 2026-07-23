@@ -157,6 +157,77 @@ describe("AgentstackCli", () => {
     }).pipe(Effect.provide(ProcessRunnerTest));
   });
 
+  it.effect("trust-grant presents the consented digest and refuses without one", () => {
+    const run = vi.fn<ProcessRunner.ProcessRunner["Service"]["run"]>(() =>
+      Effect.succeed(okOutput("trusted")),
+    );
+    const ProcessRunnerTest = Layer.succeed(
+      ProcessRunner.ProcessRunner,
+      ProcessRunner.ProcessRunner.of({ run }),
+    );
+    const digest = `sha256:${"ab".repeat(32)}`;
+
+    return Effect.gen(function* () {
+      const agentstack = yield* AgentstackCli.make();
+
+      // The consent binding (§7.2): a grant carries the previewed digest.
+      const granted = yield* agentstack.action({
+        workspaceRoot: "/proj",
+        action: "trust-grant",
+        consentedDigest: digest,
+      });
+      expect(granted.ok).toBe(true);
+      expect(run).toHaveBeenCalledWith(
+        expect.objectContaining({
+          args: [
+            "--manifest-dir",
+            "/proj",
+            "trust",
+            "/proj",
+            "--yes",
+            "--consented-digest",
+            digest,
+          ],
+        }),
+      );
+
+      // No digest (older CLI preview / older client) and a malformed digest
+      // both refuse BEFORE anything spawns — never downgraded to bare --yes.
+      run.mockClear();
+      const absent = yield* agentstack.action({ workspaceRoot: "/proj", action: "trust-grant" });
+      expect(absent.ok).toBe(false);
+      expect(absent.message).toContain("surface digest");
+      const malformed = yield* agentstack.action({
+        workspaceRoot: "/proj",
+        action: "trust-grant",
+        consentedDigest: "sha256:nope",
+      });
+      expect(malformed.ok).toBe(false);
+      expect(run).not.toHaveBeenCalled();
+    }).pipe(Effect.provide(ProcessRunnerTest));
+  });
+
+  it("decodes surface_digest from the preview and tolerates its absence", () => {
+    const base = {
+      path: "/proj",
+      state: "untrusted",
+      re_trust: false,
+      servers: [],
+      secrets: [],
+      counts: { skills: 0, workflows: 0, extensions: 0, instructions: 0 },
+    };
+    const digest = `sha256:${"cd".repeat(32)}`;
+    const withDigest = AgentstackCli.parseTrustPreview(
+      JSON.stringify({ ...base, surface_digest: digest }),
+    );
+    expect(withDigest?.surface_digest).toBe(digest);
+    // An older binary's preview (no field) still decodes — the grant path,
+    // not the decode, is what refuses.
+    const without = AgentstackCli.parseTrustPreview(JSON.stringify(base));
+    expect(without).not.toBeNull();
+    expect(without?.surface_digest).toBeUndefined();
+  });
+
   it("parses the workflow run history and degrades to [] on unknown shapes", () => {
     const wire = JSON.stringify({
       runs: [

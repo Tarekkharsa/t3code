@@ -11,6 +11,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import {
   DEFAULT_AUTOMATIC_GIT_FETCH_INTERVAL,
+  AuthAgentstackAdminScope,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   AuthReviewWriteScope,
@@ -301,9 +302,12 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [WS_METHODS.agentstackWorkflow, AuthOrchestrationReadScope],
   [WS_METHODS.agentstackTrustPreview, AuthOrchestrationReadScope],
   [WS_METHODS.agentstackDiff, AuthOrchestrationReadScope],
-  // Governed actions mutate CLI config on disk (within the machine ceiling) —
-  // operate scope, same tier as vcs.pull / server.signalProcess.
-  [WS_METHODS.agentstackAction, AuthOrchestrationOperateScope],
+  // Governed actions touch the AgentStack security control plane — trust
+  // grant/revoke, machine guard, config writes. That decides what code a
+  // repo may run on this machine, so it takes the dedicated admin scope
+  // (owner sessions carry it; standard delegated clients do not), not the
+  // vcs.pull tier.
+  [WS_METHODS.agentstackAction, AuthAgentstackAdminScope],
   [WS_METHODS.serverRefreshProviders, AuthOrchestrationOperateScope],
   [WS_METHODS.serverUpdateProvider, AuthOrchestrationOperateScope],
   [WS_METHODS.serverUpsertKeybinding, AuthOrchestrationOperateScope],
@@ -1557,7 +1561,13 @@ const makeWsRpcLayer = (
             WS_METHODS.agentstackAction,
             resolveAgentstackWorkspaceRoot(input).pipe(
               Effect.flatMap((workspaceRoot) =>
-                agentstackCli.action({ workspaceRoot, action: input.action }),
+                agentstackCli.action({
+                  workspaceRoot,
+                  action: input.action,
+                  ...(input.consentedDigest !== undefined
+                    ? { consentedDigest: input.consentedDigest }
+                    : {}),
+                }),
               ),
             ),
             { "rpc.aggregate": "agentstack" },

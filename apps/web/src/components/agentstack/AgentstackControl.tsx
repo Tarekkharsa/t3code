@@ -215,8 +215,15 @@ export function AgentstackControl({
   }, [environmentId, fetchTrustPreview, input]);
 
   const onTrust = useCallback(
-    async (action: "trust-grant" | "trust-revoke") => {
-      const r = await runAction({ environmentId, input: { ...input, action } });
+    async (action: "trust-grant" | "trust-revoke", consentedDigest?: string) => {
+      const r = await runAction({
+        environmentId,
+        input: {
+          ...input,
+          action,
+          ...(consentedDigest !== undefined ? { consentedDigest } : {}),
+        },
+      });
       void refresh();
       return r._tag === "Success"
         ? r.value
@@ -478,9 +485,12 @@ type TrustAct =
  * The trust review dialog. Renders the runtime surface the CLI reports for
  * this project (servers, secrets, category counts) and — only from here, after
  * the surface is shown — lets the user grant or revoke trust. The grant runs
- * `agentstack trust --yes`; the click is the consent that replaces the terminal
- * keystroke, and the CLI still refuses an unpinned surface (surfaced as the
- * result message). The UI never bypasses or loosens anything.
+ * `agentstack trust --yes --consented-digest <surface_digest>`, presenting
+ * back the digest THIS preview carried — so "the user reviewed this exact
+ * surface" is verified by the CLI at grant time, not assumed from the dialog
+ * having rendered. A preview without a digest (older agentstack) cannot
+ * grant; the CLI still refuses an unpinned surface (surfaced as the result
+ * message). The UI never bypasses or loosens anything.
  */
 function TrustReviewPanel({
   loadPreview,
@@ -488,7 +498,10 @@ function TrustReviewPanel({
   onClose,
 }: {
   loadPreview: () => Promise<AgentstackTrustPreviewResult | null>;
-  onTrust: (action: "trust-grant" | "trust-revoke") => Promise<{ ok: boolean; message: string }>;
+  onTrust: (
+    action: "trust-grant" | "trust-revoke",
+    consentedDigest?: string,
+  ) => Promise<{ ok: boolean; message: string }>;
   onClose: () => void;
 }) {
   const [load, setLoad] = useState<TrustLoad>({ phase: "loading" });
@@ -505,18 +518,28 @@ function TrustReviewPanel({
     };
   }, [loadPreview]);
 
+  const preview = load.phase === "loaded" ? load.result.preview : null;
+  const state = preview?.state;
+  const running = act.phase === "running";
+  // The consent digest this preview carried. `null`/absent (an agentstack
+  // that predates consent binding) means the grant button stays disabled —
+  // the server refuses digest-less grants, so offering the click would only
+  // manufacture a failure.
+  const consentDigest = preview?.surface_digest ?? null;
+
   const run = async (action: "trust-grant" | "trust-revoke") => {
     setAct({ phase: "running" });
-    const r = await onTrust(action);
+    // A grant presents back the digest of the surface being shown; revoke
+    // needs no consent binding.
+    const r = await onTrust(
+      action,
+      action === "trust-grant" && consentDigest !== null ? consentDigest : undefined,
+    );
     setAct({ phase: "done", ok: r.ok, message: r.message });
     // Re-pull the preview so the state line reflects the new trust status.
     const result = await loadPreview();
     if (result) setLoad({ phase: "loaded", result });
   };
-
-  const preview = load.phase === "loaded" ? load.result.preview : null;
-  const state = preview?.state;
-  const running = act.phase === "running";
 
   return (
     <div className="max-h-[440px] overflow-y-auto">
@@ -603,6 +626,14 @@ function TrustReviewPanel({
             <code className="font-mono">agentstack trust {preview.path}</code> in a terminal.
           </p>
 
+          {consentDigest === null && state !== "trusted" ? (
+            <p className="text-[11px] leading-relaxed text-warning">
+              This agentstack CLI predates consent-bound trust (its preview has no surface digest),
+              so granting from here is disabled. Update agentstack, or trust from a terminal where
+              the review itself is the consent.
+            </p>
+          ) : null}
+
           {act.phase === "done" ? (
             <div
               className={cn(
@@ -633,7 +664,7 @@ function TrustReviewPanel({
             ) : (
               <button
                 type="button"
-                disabled={running}
+                disabled={running || consentDigest === null}
                 onClick={() => run("trust-grant")}
                 className="inline-flex h-7 items-center rounded-lg border border-success/40 bg-success/10 px-3 text-xs font-semibold text-success disabled:opacity-60"
               >

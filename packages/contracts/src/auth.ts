@@ -81,6 +81,16 @@ export const AuthAccessReadScope = "access:read" as const;
 export const AuthAccessWriteScope = "access:write" as const;
 export const AuthRelayReadScope = "relay:read" as const;
 export const AuthRelayWriteScope = "relay:write" as const;
+/**
+ * The AgentStack security control plane: trust grant/revoke, config writes
+ * (`apply`/`adopt`), machine guard install, and future workflow-control
+ * verbs. Deliberately NOT a standard client scope — these actions decide what
+ * code a repo may run on the machine, a different kind of authority than
+ * `orchestration:operate` (the tier of e.g. `vcs.pull`). Administrative
+ * (owner) sessions carry it; delegated/bearer clients must be granted it
+ * explicitly.
+ */
+export const AuthAgentstackAdminScope = "agentstack:admin" as const;
 export const AuthEnvironmentScope = Schema.Literals([
   AuthOrchestrationReadScope,
   AuthOrchestrationOperateScope,
@@ -90,6 +100,7 @@ export const AuthEnvironmentScope = Schema.Literals([
   AuthAccessWriteScope,
   AuthRelayReadScope,
   AuthRelayWriteScope,
+  AuthAgentstackAdminScope,
 ]);
 export type AuthEnvironmentScope = typeof AuthEnvironmentScope.Type;
 export const AuthEnvironmentScopes = Schema.Array(AuthEnvironmentScope);
@@ -107,6 +118,7 @@ export const AuthAdministrativeScopes = [
   AuthAccessReadScope,
   AuthAccessWriteScope,
   AuthRelayWriteScope,
+  AuthAgentstackAdminScope,
 ] as const;
 
 export const AuthTokenExchangeGrantType =

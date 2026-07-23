@@ -61,7 +61,20 @@ export interface AgentstackDiffRequest {
 export interface AgentstackActionRequest {
   readonly workspaceRoot: string;
   readonly action: AgentstackActionKind;
+  /**
+   * `trust-grant` only: the `surface_digest` the client's review dialog got
+   * from `trust --preview`. Mapped to `--consented-digest`; a grant without
+   * it is refused before anything spawns.
+   */
+  readonly consentedDigest?: string;
 }
+
+/**
+ * The only digest shape the CLI ever emits (`sha256:<64 hex>`). Anything else
+ * is refused before it reaches an argv — spawning is args-array (no shell),
+ * so this is shape hygiene, not injection defense.
+ */
+export const CONSENT_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
 
 /** Bounds for the `--tail` the CLI is asked for, whatever the client sent. */
 export const ACTIVITY_LIMIT_MAX = 50;
@@ -137,8 +150,16 @@ export function parseDiffReport(stdout: string) {
   return Option.getOrNull(decodeDiffReport(stdout));
 }
 
-/** The fixed argv for each vetted action — the client never supplies one. */
-function actionArgv(action: AgentstackActionKind, workspaceRoot: string): ReadonlyArray<string> {
+/**
+ * The fixed argv for each vetted action — the client never supplies one.
+ * `consentedDigest` is only consulted for `trust-grant`, and only after the
+ * caller validated it against [`CONSENT_DIGEST_RE`].
+ */
+export function actionArgv(
+  action: AgentstackActionKind,
+  workspaceRoot: string,
+  consentedDigest?: string,
+): ReadonlyArray<string> {
   switch (action) {
     case "apply-project":
     case "apply-global": {
@@ -161,9 +182,21 @@ function actionArgv(action: AgentstackActionKind, workspaceRoot: string): Readon
       // Machine-global; only adds pre-tool-use protection (cannot loosen).
       return ["guard", "install"];
     case "trust-grant":
-      // --yes: the review dialog already showed the surface, so the UI click
-      // is the consent. The CLI still self-refuses an unpinned surface.
-      return ["--manifest-dir", workspaceRoot, "trust", workspaceRoot, "--yes"];
+      // --yes + --consented-digest: the review dialog showed the surface AND
+      // received its digest from `trust --preview`; presenting it back makes
+      // "a human reviewed this exact surface" CLI-enforced — the CLI refuses
+      // a stale or missing digest, and still self-refuses an unpinned
+      // surface. The caller refuses before spawn when the digest is absent,
+      // so the fallback "" here can never reach a process.
+      return [
+        "--manifest-dir",
+        workspaceRoot,
+        "trust",
+        workspaceRoot,
+        "--yes",
+        "--consented-digest",
+        consentedDigest ?? "",
+      ];
     case "trust-revoke":
       return ["--manifest-dir", workspaceRoot, "trust", workspaceRoot, "--revoke"];
   }
@@ -387,10 +420,27 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
 
   const action: AgentstackCli["Service"]["action"] = Effect.fn("AgentstackCli.action")(
     function* (input) {
+      // Consent binding (fail closed, before anything spawns): a trust grant
+      // must carry the digest of the surface the user reviewed. Absence
+      // usually means an older agentstack preview (no surface_digest yet) or
+      // an older client — either way the grant is refused with the reason,
+      // never downgraded to a bare `--yes`.
+      if (input.action === "trust-grant") {
+        const digest = input.consentedDigest;
+        if (digest === undefined || !CONSENT_DIGEST_RE.test(digest)) {
+          return {
+            ok: false,
+            message:
+              digest === undefined
+                ? "trust needs the reviewed surface digest — update the agentstack CLI (this one's preview has no surface_digest) or re-open the review"
+                : "trust was given a malformed surface digest — re-open the review and try again",
+          };
+        }
+      }
       const result = yield* processRunner
         .run({
           command: binary,
-          args: actionArgv(input.action, input.workspaceRoot),
+          args: actionArgv(input.action, input.workspaceRoot, input.consentedDigest),
           timeout: ACTION_TIMEOUT,
           timeoutBehavior: "timedOutResult",
           maxOutputBytes: MAX_STDOUT_BYTES,

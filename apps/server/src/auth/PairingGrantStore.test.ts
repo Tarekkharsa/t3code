@@ -154,6 +154,7 @@ it.layer(NodeServices.layer)("PairingGrantStore.layer", (it) => {
         "access:read",
         "access:write",
         "relay:write",
+        "agentstack:admin",
       ]);
       expect(first.subject).toBe("desktop-bootstrap");
       expect(second.method).toBe("desktop-bootstrap");
