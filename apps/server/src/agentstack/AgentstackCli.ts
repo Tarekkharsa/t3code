@@ -1,5 +1,6 @@
 import {
   AgentstackCallEvent,
+  AgentstackDiffReport,
   AgentstackDoctorReport,
   AgentstackTrustPreview,
   AgentstackWorkflowRun,
@@ -7,6 +8,7 @@ import {
   type AgentstackActionKind,
   type AgentstackActionResult,
   type AgentstackActivity,
+  type AgentstackDiffResult,
   type AgentstackStatus,
   type AgentstackTrustPreviewResult,
   type AgentstackWorkflowData,
@@ -46,6 +48,12 @@ export interface AgentstackActivityRequest {
 /** Server-internal request naming a resolved workspace root; same path rule. */
 export interface AgentstackWorkspaceRequest {
   readonly workspaceRoot: string;
+}
+
+/** A read-only drift preview against a resolved workspace root, at one scope. */
+export interface AgentstackDiffRequest {
+  readonly workspaceRoot: string;
+  readonly scope: "global" | "project";
 }
 
 /** A governed action against a resolved workspace root. */
@@ -135,13 +143,32 @@ export function parseTrustPreview(stdout: string) {
   return Option.getOrNull(decodeTrustPreview(stdout));
 }
 
+const decodeDiffReport = Schema.decodeUnknownOption(Schema.fromJsonString(AgentstackDiffReport));
+
+export function parseDiffReport(stdout: string) {
+  return Option.getOrNull(decodeDiffReport(stdout));
+}
+
 /** The fixed argv for each vetted action — the client never supplies one. */
 function actionArgv(action: AgentstackActionKind, workspaceRoot: string): ReadonlyArray<string> {
   switch (action) {
-    case "apply":
-      // Re-render configs from the manifest, capped by the machine ceiling;
-      // reversible via `agentstack restore`. Never --prune-foreign from here.
-      return ["--manifest-dir", workspaceRoot, "apply", "--write"];
+    case "apply-project":
+    case "apply-global": {
+      // Re-render configs from the manifest at the named scope, capped by the
+      // machine ceiling; reversible via `agentstack restore`. NEVER
+      // --prune-foreign — a default apply keeps servers another setup applied
+      // and never touches hand-added servers no manifest tracks.
+      const scope = action === "apply-global" ? "global" : "project";
+      return ["--manifest-dir", workspaceRoot, "apply", "--scope", scope, "--write"];
+    }
+    case "adopt-project":
+    case "adopt-global": {
+      // Keep the on-disk hand-edit: pull it into the manifest. Adopt only ever
+      // writes `agentstack.toml`, never a CLI's native config, so it can add a
+      // server to the manifest but can never remove one from disk.
+      const scope = action === "adopt-global" ? "global" : "project";
+      return ["--manifest-dir", workspaceRoot, "adopt", "--scope", scope, "--write"];
+    }
     case "guard-install":
       // Machine-global; only adds pre-tool-use protection (cannot loosen).
       return ["guard", "install"];
@@ -173,6 +200,7 @@ export class AgentstackCli extends Context.Service<
     readonly trustPreview: (
       input: AgentstackWorkspaceRequest,
     ) => Effect.Effect<AgentstackTrustPreviewResult>;
+    readonly diff: (input: AgentstackDiffRequest) => Effect.Effect<AgentstackDiffResult>;
     readonly action: (input: AgentstackActionRequest) => Effect.Effect<AgentstackActionResult>;
   }
 >()("t3/agentstack/AgentstackCli") {}
@@ -341,6 +369,28 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
     };
   });
 
+  const diff: AgentstackCli["Service"]["diff"] = Effect.fn("AgentstackCli.diff")(function* (input) {
+    const result = yield* run([
+      "--manifest-dir",
+      input.workspaceRoot,
+      "diff",
+      "--json",
+      "--scope",
+      input.scope,
+    ]).pipe(
+      Effect.match({
+        onFailure: (error) =>
+          isBinaryNotFound(error) ? ({ _tag: "NotFound" } as const) : ({ _tag: "Failed" } as const),
+        onSuccess: (r) => ({ _tag: "Success", result: r }) as const,
+      }),
+    );
+    return {
+      installed: result._tag !== "NotFound",
+      report: result._tag === "Success" ? parseDiffReport(result.result.stdout) : null,
+      checkedAt: yield* Clock.currentTimeMillis,
+    };
+  });
+
   const action: AgentstackCli["Service"]["action"] = Effect.fn("AgentstackCli.action")(
     function* (input) {
       const result = yield* processRunner
@@ -383,7 +433,7 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
     },
   );
 
-  return AgentstackCli.of({ status, activity, workflow, trustPreview, action });
+  return AgentstackCli.of({ status, activity, workflow, trustPreview, diff, action });
 });
 
 export const layer = Layer.effect(AgentstackCli, make()).pipe(Layer.provide(ProcessRunner.layer));

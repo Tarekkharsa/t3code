@@ -49,4 +49,111 @@ describe("AgentstackCli", () => {
       });
     }).pipe(Effect.provide(ProcessRunnerTest));
   });
+
+  const okOutput = (stdout: string) =>
+    ({
+      stdout,
+      stderr: "",
+      code: 0,
+      timedOut: false,
+      stdoutTruncated: false,
+      stderrTruncated: false,
+    }) as const;
+
+  it.effect("diff runs the scoped diff --json and parses the report", () => {
+    const run = vi.fn<ProcessRunner.ProcessRunner["Service"]["run"]>(() =>
+      Effect.succeed(
+        okOutput(
+          JSON.stringify({
+            scope: "global",
+            drifted: 1,
+            targets: [
+              {
+                id: "claude-code",
+                display: "Claude Code",
+                path: "/Users/x/.claude.json",
+                changed: true,
+                diff: "- old\n+ new",
+                kept: ["figma"],
+              },
+            ],
+            warnings: [],
+          }),
+        ),
+      ),
+    );
+    const ProcessRunnerTest = Layer.succeed(
+      ProcessRunner.ProcessRunner,
+      ProcessRunner.ProcessRunner.of({ run }),
+    );
+
+    return Effect.gen(function* () {
+      const agentstack = yield* AgentstackCli.make();
+      const result = yield* agentstack.diff({ workspaceRoot: "/proj", scope: "global" });
+
+      expect(result.installed).toBe(true);
+      expect(result.report).toMatchObject({ scope: "global", drifted: 1 });
+      expect(result.report?.targets[0]).toMatchObject({ changed: true, kept: ["figma"] });
+      expect(run).toHaveBeenCalledWith(
+        expect.objectContaining({
+          args: ["--manifest-dir", "/proj", "diff", "--json", "--scope", "global"],
+        }),
+      );
+    }).pipe(Effect.provide(ProcessRunnerTest));
+  });
+
+  it.effect("maps drift actions to scope-correct argv and never passes --prune-foreign", () => {
+    const run = vi.fn<ProcessRunner.ProcessRunner["Service"]["run"]>(() =>
+      Effect.succeed(okOutput("done")),
+    );
+    const ProcessRunnerTest = Layer.succeed(
+      ProcessRunner.ProcessRunner,
+      ProcessRunner.ProcessRunner.of({ run }),
+    );
+
+    return Effect.gen(function* () {
+      const agentstack = yield* AgentstackCli.make();
+
+      yield* agentstack.action({ workspaceRoot: "/proj", action: "adopt-global" });
+      yield* agentstack.action({ workspaceRoot: "/proj", action: "apply-global" });
+      yield* agentstack.action({ workspaceRoot: "/proj", action: "adopt-project" });
+      yield* agentstack.action({ workspaceRoot: "/proj", action: "apply-project" });
+
+      const argvs = run.mock.calls.map((c) => c[0].args);
+      expect(argvs[0]).toEqual([
+        "--manifest-dir",
+        "/proj",
+        "adopt",
+        "--scope",
+        "global",
+        "--write",
+      ]);
+      expect(argvs[1]).toEqual([
+        "--manifest-dir",
+        "/proj",
+        "apply",
+        "--scope",
+        "global",
+        "--write",
+      ]);
+      expect(argvs[2]).toEqual([
+        "--manifest-dir",
+        "/proj",
+        "adopt",
+        "--scope",
+        "project",
+        "--write",
+      ]);
+      expect(argvs[3]).toEqual([
+        "--manifest-dir",
+        "/proj",
+        "apply",
+        "--scope",
+        "project",
+        "--write",
+      ]);
+      // The destructive prune flag is never emitted from the panel.
+      expect(argvs.flat()).not.toContain("--prune-foreign");
+    }).pipe(Effect.provide(ProcessRunnerTest));
+  });
 });

@@ -195,21 +195,89 @@ export const AgentstackTrustInput = Schema.Struct({
 });
 export type AgentstackTrustInput = typeof AgentstackTrustInput.Type;
 
+// ── drift preview (read) ─────────────────────────────────────────────────────
+// `agentstack diff --json --scope <global|project>` — the exact change a
+// re-render would make, as data, so the panel can show it before any write.
+// Read-only. snake_case verbatim from the CLI. A subset of the CLI's output is
+// modelled; excess keys (profile, owner_refreshes, the top-level `kept` tuple)
+// are stripped on decode.
+
+export const AgentstackDiffTarget = Schema.Struct({
+  /** CLI id, e.g. `claude-code`. */
+  id: Schema.String,
+  display: Schema.String,
+  /** The native config file this target renders to. */
+  path: Schema.String,
+  /** True when a re-render would rewrite this file (real, actionable drift). */
+  changed: Schema.Boolean,
+  /** Unified-diff text of the pending change; "" when unchanged. */
+  diff: Schema.String,
+  /**
+   * Servers on disk that a default render *keeps* (spares) because another
+   * setup applied them — `apply` never removes these without `--prune-foreign`,
+   * which this integration never runs.
+   */
+  kept: Schema.Array(Schema.String),
+});
+export type AgentstackDiffTarget = typeof AgentstackDiffTarget.Type;
+
+export const AgentstackDiffReport = Schema.Struct({
+  /** global | project — the scope this diff was computed for. */
+  scope: Schema.String,
+  /** Count of targets with `changed: true`. Zero means a re-render is a no-op. */
+  drifted: Schema.Number,
+  targets: Schema.Array(AgentstackDiffTarget),
+  /** Defensive: absent on some versions; degrades to []. */
+  warnings: Schema.optionalKey(Schema.Array(Schema.String)),
+});
+export type AgentstackDiffReport = typeof AgentstackDiffReport.Type;
+
+export const AgentstackDiffResult = Schema.Struct({
+  installed: Schema.Boolean,
+  report: Schema.NullOr(AgentstackDiffReport),
+  checkedAt: Schema.Number,
+});
+export type AgentstackDiffResult = typeof AgentstackDiffResult.Type;
+
+export const AgentstackDiffInput = Schema.Struct({
+  projectId: ProjectId,
+  threadId: Schema.optionalKey(ThreadId),
+  /** Which config scope to diff: global (~) or project (repo-local). */
+  scope: Schema.Literals(["global", "project"]),
+});
+export type AgentstackDiffInput = typeof AgentstackDiffInput.Type;
+
 // ── governed actions (write) ─────────────────────────────────────────────────
 
 /**
  * The closed set of governed commands the panel may trigger. The server maps
- * each to fixed argv — the client never supplies a command line. `apply`
- * re-renders configs (capped by the machine ceiling, reversible via
- * `agentstack restore`); `guard-install` only adds pre-tool-use protection;
- * `trust-grant` / `trust-revoke` grant or withdraw trust for this project.
- * None can loosen effective policy. `trust-grant` runs `agentstack trust --yes`
- * — the UI only reaches it after the review dialog rendered the actual surface
- * (from `trust --preview`), so the click is the consent that replaces the
- * terminal keystroke; the CLI still self-refuses an unpinned surface.
+ * each to fixed argv — the client never supplies a command line, a scope, or a
+ * `--prune-foreign` flag (that destructive flag is never emitted from here).
+ *
+ * Drift is fixed by two verbs, each at an explicit scope, so the operation and
+ * where it lands are both closed over server-side:
+ *  - `adopt-{project,global}` runs `agentstack adopt --scope <s> --write`: keeps
+ *    the on-disk hand-edit by pulling it into the manifest. It only ever writes
+ *    `agentstack.toml` — it never rewrites a CLI's native config, so it can add
+ *    a server to the manifest but never remove one from disk (non-destructive).
+ *  - `apply-{project,global}` runs `agentstack apply --scope <s> --write`:
+ *    re-renders the native config from the manifest, capped by the machine
+ *    ceiling and reversible via `agentstack restore`. Without `--prune-foreign`
+ *    (never passed) it keeps servers another setup applied and never touches
+ *    hand-added servers no manifest tracks.
+ *
+ * `guard-install` only adds pre-tool-use protection; `trust-grant` /
+ * `trust-revoke` grant or withdraw trust for this project. None can loosen
+ * effective policy. `trust-grant` runs `agentstack trust --yes` — the UI only
+ * reaches it after the review dialog rendered the actual surface (from
+ * `trust --preview`), so the click is the consent that replaces the terminal
+ * keystroke; the CLI still self-refuses an unpinned surface.
  */
 export const AgentstackActionKind = Schema.Literals([
-  "apply",
+  "apply-project",
+  "apply-global",
+  "adopt-project",
+  "adopt-global",
   "guard-install",
   "trust-grant",
   "trust-revoke",

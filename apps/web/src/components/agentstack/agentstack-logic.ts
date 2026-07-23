@@ -34,12 +34,29 @@ export interface AgentstackOverviewRow {
   label: string;
   summary: string;
   level: AgentstackRowLevel;
-  /** A vetted governed action this row can trigger (fix drift, enable guard). */
+  /** A vetted governed action this row can trigger directly (e.g. enable guard). */
   action?: AgentstackActionKind;
+  /**
+   * True on the Manifest row when drift exists: the button opens the drift
+   * review (which previews `diff --json` and lets the user pick adopt vs apply
+   * at the right scope) rather than firing a single fixed action. Drift is
+   * never fixed by one blind click, because the safe verb (adopt) and the
+   * re-render verb (apply) differ and the scope must be chosen.
+   */
+  reviewDrift?: boolean;
 }
 
-/** The vetted, server-enumerated CLI actions the panel may trigger. */
-export type AgentstackActionKind = "apply" | "guard-install";
+/**
+ * The vetted, server-enumerated CLI actions the panel may trigger. Mirrors the
+ * closed `AgentstackActionKind` enum in the contracts package; the server maps
+ * each to fixed argv (scope included) and never passes `--prune-foreign`.
+ */
+export type AgentstackActionKind =
+  | "apply-project"
+  | "apply-global"
+  | "adopt-project"
+  | "adopt-global"
+  | "guard-install";
 
 function sectionByTitle(
   report: AgentstackDoctorReport,
@@ -74,22 +91,35 @@ export function deriveAgentstackOverviewRows(
 ): AgentstackOverviewRow[] {
   const rows: AgentstackOverviewRow[] = [];
 
-  // Manifest ← Drift section. Drift lines are `info`-level facts, so "pending"
-  // means any non-ok line, not just warn/error.
+  // Manifest ← Drift section. Two distinct kinds of non-ok line exist and must
+  // not be conflated (doing so is what made the old "Fix drift" button a no-op):
+  //   • warn/error — a re-render would actually rewrite this project's config
+  //     (a real, own-manifest hand-edit or pending change) → actionable.
+  //   • info — servers another setup applied are *kept* on disk; a default
+  //     apply never removes them, so this is a fact to surface, not drift to
+  //     "fix". Firing `apply` at it writes nothing.
+  // Either kind opens the drift review (which runs `diff --json` to show the
+  // exact change and offers adopt vs apply at the right scope); we never wire a
+  // one-click fixed action here.
   const drift = sectionByTitle(report, "Drift");
   if (drift) {
-    const hasDrift = drift.lines.some((l) => l.level !== "ok");
+    const actionable = drift.lines.some((l) => l.level === "warn" || l.level === "error");
+    const foreignKept = !actionable && drift.lines.some((l) => l.level === "info");
     const cliCount = sectionByTitle(report, "Adapters & CLIs")?.lines.filter(
       (l) => l.level === "ok",
     ).length;
     rows.push({
       key: "manifest",
       label: "Manifest",
-      summary: hasDrift
+      summary: actionable
         ? "changes pending on disk"
-        : `in sync${cliCount ? ` · rendered to ${cliCount} CLIs` : ""}`,
-      level: hasDrift ? "warn" : "ok",
-      ...(hasDrift ? { action: "apply" as const } : {}),
+        : foreignKept
+          ? "in sync here · other setups' servers kept"
+          : `in sync${cliCount ? ` · rendered to ${cliCount} CLIs` : ""}`,
+      // `info`-only drift is not a fault (this project renders cleanly), so it
+      // stays an "ok" dot; only real own-manifest drift warns.
+      level: actionable ? "warn" : "ok",
+      ...(actionable || foreignKept ? { reviewDrift: true as const } : {}),
     });
   }
 

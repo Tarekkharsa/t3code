@@ -1,5 +1,8 @@
 import type {
   AgentstackActivity,
+  AgentstackDiffReport,
+  AgentstackDiffResult,
+  AgentstackDiffTarget,
   AgentstackStatus,
   AgentstackTrustPreviewResult,
   AgentstackWorkflowData,
@@ -71,10 +74,25 @@ type ActionState =
   | { phase: "done"; ok: boolean; message: string };
 
 const ACTION_META: Record<ActionKind, { label: string; confirm: string }> = {
-  apply: {
-    label: "Fix drift",
+  "adopt-project": {
+    label: "Keep edits",
     confirm:
-      "Re-render every CLI config from the manifest. Capped by machine policy and reversible with agentstack restore.",
+      "Pull the on-disk hand-edits into this project's manifest. Only writes agentstack.toml — never rewrites or removes anything in a CLI's own config.",
+  },
+  "adopt-global": {
+    label: "Keep edits",
+    confirm:
+      "Pull the on-disk hand-edits into this project's manifest at global scope. Only writes agentstack.toml — never rewrites or removes anything in a CLI's own config.",
+  },
+  "apply-project": {
+    label: "Re-render",
+    confirm:
+      "Re-render this project's CLI config from the manifest. Overwrites hand-edits; keeps servers other setups applied and never prunes. Reversible with agentstack restore.",
+  },
+  "apply-global": {
+    label: "Re-render",
+    confirm:
+      "Re-render the global CLI config from this manifest. Overwrites hand-edits; keeps servers other setups applied and never prunes. Reversible with agentstack restore.",
   },
   "guard-install": {
     label: "Enable guard",
@@ -115,6 +133,7 @@ export function AgentstackControl({
   const [unreachable, setUnreachable] = useState(false);
   const [actionState, setActionState] = useState<ActionState>({ phase: "idle" });
   const [reviewing, setReviewing] = useState(false);
+  const [reviewingDrift, setReviewingDrift] = useState(false);
 
   const fetchStatus = useAtomCommand(agentstackEnvironment.status, { reportFailure: false });
   const fetchActivity = useAtomCommand(agentstackEnvironment.activity, { reportFailure: false });
@@ -122,6 +141,7 @@ export function AgentstackControl({
   const fetchTrustPreview = useAtomCommand(agentstackEnvironment.trustPreview, {
     reportFailure: false,
   });
+  const fetchDiff = useAtomCommand(agentstackEnvironment.diff, { reportFailure: false });
   const runAction = useAtomCommand(agentstackEnvironment.action, { reportFailure: false });
 
   const input = useMemo(
@@ -192,6 +212,25 @@ export function AgentstackControl({
     [environmentId, runAction, input, refresh],
   );
 
+  const loadDiff = useCallback(
+    async (scope: "global" | "project") => {
+      const r = await fetchDiff({ environmentId, input: { ...input, scope } });
+      return r._tag === "Success" ? r.value : null;
+    },
+    [environmentId, fetchDiff, input],
+  );
+
+  const runDriftAction = useCallback(
+    async (action: ActionKind) => {
+      const r = await runAction({ environmentId, input: { ...input, action } });
+      void refresh();
+      return r._tag === "Success"
+        ? r.value
+        : { ok: false, message: "The action could not be run." };
+    },
+    [environmentId, runAction, input, refresh],
+  );
+
   const activeRun =
     workflow?.activeRun && workflow.activeRun.outcome === "running" ? workflow.activeRun : null;
 
@@ -230,6 +269,7 @@ export function AgentstackControl({
         if (!next) {
           setActionState({ phase: "idle" });
           setReviewing(false);
+          setReviewingDrift(false);
         }
       }}
       open={open}
@@ -291,6 +331,12 @@ export function AgentstackControl({
             onTrust={onTrust}
             onClose={() => setReviewing(false)}
           />
+        ) : reviewingDrift ? (
+          <DriftReviewPanel
+            loadDiff={loadDiff}
+            onAction={runDriftAction}
+            onClose={() => setReviewingDrift(false)}
+          />
         ) : (
           <>
             {/* Tabs */}
@@ -337,6 +383,7 @@ export function AgentstackControl({
                   doctorAvailable={status.doctor !== null}
                   actionState={actionState}
                   onRequestAction={(a) => setActionState({ phase: "confirm", action: a })}
+                  onReviewDrift={() => setReviewingDrift(true)}
                   onConfirm={onAction}
                   onCancel={() => setActionState({ phase: "idle" })}
                 />
@@ -365,11 +412,42 @@ export function AgentstackControl({
 
 function NotInstalled() {
   return (
-    <p className="px-4 py-4 text-xs leading-relaxed text-muted-foreground">
-      The <code className="font-mono">agentstack</code> CLI isn't installed on the machine running
-      this project, so its sessions run ungoverned. Install it to get trust-gated MCP servers, a
-      pre-tool-use guard, and a per-project audit log.
-    </p>
+    <div className="flex flex-col gap-3 px-4 py-4 text-xs leading-relaxed text-muted-foreground">
+      <p>
+        The <code className="font-mono">agentstack</code> CLI isn't reachable on the machine running
+        this project, so its sessions run ungoverned. It's a local binary — install it to get
+        trust-gated MCP servers, a pre-tool-use guard, and a per-project audit log.
+      </p>
+      <div className="flex flex-col gap-1.5">
+        <p className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
+          Install
+        </p>
+        <p>
+          Build or download it from{" "}
+          <code className="break-all font-mono text-muted-foreground/90">
+            github.com/Tarekkharsa/agentstack
+          </code>
+          , then put <code className="font-mono">agentstack</code> on your <code>PATH</code>.
+        </p>
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <p className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
+          Already installed?
+        </p>
+        <p>
+          If <code className="font-mono">agentstack</code> is a shell function or lives off{" "}
+          <code>PATH</code> (so a packaged/Finder-launched app can't see it), point the server at
+          the binary:
+        </p>
+        <pre className="overflow-x-auto rounded bg-foreground/[0.03] p-2 font-mono text-[10.5px] text-muted-foreground">
+          T3CODE_AGENTSTACK_BIN=/path/to/agentstack
+        </pre>
+      </div>
+      <p className="text-[10.5px] text-muted-foreground/60">
+        This panel re-checks every few seconds — once the CLI is reachable, it fills in
+        automatically.
+      </p>
+    </div>
   );
 }
 
@@ -564,11 +642,307 @@ function TrustReviewPanel({
   );
 }
 
+type DriftLoad =
+  | { phase: "loading" }
+  | { phase: "loaded"; global: AgentstackDiffReport | null; project: AgentstackDiffReport | null }
+  | { phase: "error" };
+
+type DriftAct =
+  | { phase: "idle" }
+  | { phase: "confirm"; action: ActionKind; prompt: string }
+  | { phase: "running" }
+  | { phase: "done"; ok: boolean; message: string };
+
+const DIFF_MAX = 6_000;
+
+/** Unique server names a default render would keep (spare) across a scope. */
+function keptServers(report: AgentstackDiffReport): string[] {
+  return [...new Set(report.targets.flatMap((t) => t.kept))];
+}
+
+/**
+ * The drift review dialog — the honest replacement for the old one-click "Fix
+ * drift" (which fired a project-scope `apply` at global, foreign-kept drift and
+ * changed nothing). It previews `agentstack diff --json` for both scopes and,
+ * per scope, offers only actions that actually change something and never prune:
+ *  - a target with a pending re-render → Keep edits (`adopt`) or Re-render (`apply`)
+ *  - servers another setup applied and kept → Keep edits (`adopt`) to bring them
+ *    under this manifest; `apply` is not offered because it would no-op them.
+ * `--prune-foreign` is never reachable from here.
+ */
+function DriftReviewPanel({
+  loadDiff,
+  onAction,
+  onClose,
+}: {
+  loadDiff: (scope: "global" | "project") => Promise<AgentstackDiffResult | null>;
+  onAction: (action: ActionKind) => Promise<{ ok: boolean; message: string }>;
+  onClose: () => void;
+}) {
+  const [load, setLoad] = useState<DriftLoad>({ phase: "loading" });
+  const [act, setAct] = useState<DriftAct>({ phase: "idle" });
+
+  const reload = useCallback(async () => {
+    setLoad({ phase: "loading" });
+    const [g, p] = await Promise.all([loadDiff("global"), loadDiff("project")]);
+    if (g === null && p === null) {
+      setLoad({ phase: "error" });
+      return;
+    }
+    setLoad({ phase: "loaded", global: g?.report ?? null, project: p?.report ?? null });
+  }, [loadDiff]);
+
+  useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  const run = async (action: ActionKind) => {
+    setAct({ phase: "running" });
+    const r = await onAction(action);
+    setAct({ phase: "done", ok: r.ok, message: r.message });
+    await reload();
+  };
+
+  const scopes: ReadonlyArray<{
+    scope: "global" | "project";
+    report: AgentstackDiffReport | null;
+  }> =
+    load.phase === "loaded"
+      ? [
+          { scope: "project", report: load.project },
+          { scope: "global", report: load.global },
+        ]
+      : [];
+
+  const anyContent = scopes.some(
+    ({ report }) => report && (report.drifted > 0 || keptServers(report).length > 0),
+  );
+  const running = act.phase === "running";
+
+  return (
+    <div className="max-h-[440px] overflow-y-auto">
+      <div className="flex items-center gap-2 border-b border-border/60 px-3.5 py-2">
+        <button
+          type="button"
+          onClick={onClose}
+          className="text-xs font-medium text-muted-foreground hover:text-foreground"
+        >
+          ← Back
+        </button>
+        <span className="text-xs font-semibold text-foreground">Drift review</span>
+      </div>
+
+      {load.phase === "loading" ? (
+        <p className="px-4 py-4 text-xs text-muted-foreground">Loading drift…</p>
+      ) : load.phase === "error" ? (
+        <p className="px-4 py-4 text-xs leading-relaxed text-muted-foreground">
+          Couldn't compute the drift preview — <code className="font-mono">agentstack diff</code>{" "}
+          didn't return a report.
+        </p>
+      ) : !anyContent ? (
+        <p className="px-4 py-4 text-xs leading-relaxed text-muted-foreground">
+          Everything is in sync — the manifest matches every rendered config, and no other setup's
+          servers need attention.
+        </p>
+      ) : (
+        <div className="flex flex-col gap-3 px-4 py-3">
+          {scopes.map(({ scope, report }) =>
+            report ? (
+              <DriftScopeSection
+                key={scope}
+                scope={scope}
+                report={report}
+                disabled={running}
+                onPick={(action, prompt) => setAct({ phase: "confirm", action, prompt })}
+              />
+            ) : null,
+          )}
+
+          {act.phase === "confirm" ? (
+            <div className="rounded-lg border border-warning/30 bg-warning/[0.06] px-3 py-2.5">
+              <p className="mb-2 text-[11px] leading-relaxed text-muted-foreground">{act.prompt}</p>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={running}
+                  onClick={() => void run(act.action)}
+                  className="inline-flex h-6 items-center rounded-md border border-warning/40 bg-warning/15 px-2.5 text-[11px] font-semibold text-warning disabled:opacity-60"
+                >
+                  {running ? "Running…" : `Run ${ACTION_META[act.action].label.toLowerCase()}`}
+                </button>
+                <button
+                  type="button"
+                  disabled={running}
+                  onClick={() => setAct({ phase: "idle" })}
+                  className="inline-flex h-6 items-center rounded-md px-2 text-[11px] font-medium text-muted-foreground disabled:opacity-60"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : act.phase === "done" ? (
+            <div
+              className={cn(
+                "rounded-lg border px-3 py-2 text-[11px] leading-relaxed",
+                act.ok
+                  ? "border-success/30 bg-success/[0.06]"
+                  : "border-destructive/30 bg-destructive/[0.06]",
+              )}
+            >
+              <span className={cn("font-semibold", act.ok ? "text-success" : "text-destructive")}>
+                {act.ok ? "Done" : "Couldn't complete"}
+              </span>
+              {" — "}
+              <span className="break-words font-mono text-muted-foreground">{act.message}</span>
+            </div>
+          ) : null}
+
+          <p className="text-[10.5px] leading-relaxed text-muted-foreground/60">
+            Full line-by-line diff:{" "}
+            <code className="font-mono">agentstack diff --scope global</code> in a terminal.
+            Machine-wide global config is best managed from{" "}
+            <code className="font-mono">agentstack</code> directly.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** One scope's drift: pending re-renders (adopt/apply) and foreign-kept servers (adopt only). */
+function DriftScopeSection({
+  scope,
+  report,
+  disabled,
+  onPick,
+}: {
+  scope: "global" | "project";
+  report: AgentstackDiffReport;
+  disabled: boolean;
+  onPick: (action: ActionKind, prompt: string) => void;
+}) {
+  const changed = report.targets.filter((t) => t.changed);
+  const kept = keptServers(report);
+  if (changed.length === 0 && kept.length === 0) return null;
+
+  const where = scope === "global" ? "global configs (~)" : "this repo";
+  const adopt: ActionKind = scope === "global" ? "adopt-global" : "adopt-project";
+  const apply: ActionKind = scope === "global" ? "apply-global" : "apply-project";
+
+  return (
+    <div className="flex flex-col gap-2">
+      <p className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
+        {where}
+      </p>
+
+      {changed.length > 0 ? (
+        <>
+          {changed.map((t) => (
+            <DriftTarget key={`${scope}-${t.id}`} target={t} />
+          ))}
+          <p className="text-[11px] leading-relaxed text-muted-foreground">
+            The on-disk config was hand-edited. Keep the edit, or re-render from the manifest.
+          </p>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={() =>
+                onPick(
+                  adopt,
+                  `Keep the on-disk hand-edit in ${where} — pull it into this project's manifest. Only writes agentstack.toml; never removes anything from a CLI's config.`,
+                )
+              }
+              className="inline-flex h-7 items-center rounded-lg border border-success/40 bg-success/10 px-3 text-xs font-semibold text-success disabled:opacity-60"
+            >
+              Keep edits
+            </button>
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={() =>
+                onPick(
+                  apply,
+                  `Re-render ${where} from the manifest. This OVERWRITES the hand-edit. Servers other setups applied are kept (never pruned). Reversible with agentstack restore.`,
+                )
+              }
+              className="inline-flex h-7 items-center rounded-lg border border-warning/40 bg-warning/10 px-3 text-xs font-semibold text-warning disabled:opacity-60"
+            >
+              Re-render
+            </button>
+          </div>
+        </>
+      ) : (
+        <>
+          <p className="text-[11px] leading-relaxed text-muted-foreground">
+            {kept.length} server{kept.length === 1 ? "" : "s"} in {where} came from another setup
+            and {kept.length === 1 ? "is" : "are"} kept — this project doesn't manage{" "}
+            {kept.length === 1 ? "it" : "them"} and never removes{" "}
+            {kept.length === 1 ? "it" : "them"}.
+          </p>
+          <ul className="flex flex-wrap gap-1">
+            {kept.map((name) => (
+              <li
+                key={`${scope}-${name}`}
+                className="rounded bg-muted-foreground/10 px-1.5 py-0.5 font-mono text-[10.5px] text-muted-foreground"
+              >
+                {name}
+              </li>
+            ))}
+          </ul>
+          <div>
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={() =>
+                onPick(
+                  adopt,
+                  `Pull ${kept.length} server${
+                    kept.length === 1 ? "" : "s"
+                  } from another setup into THIS project's manifest so it manages ${
+                    kept.length === 1 ? "it" : "them"
+                  }. Only writes agentstack.toml; nothing is removed from disk.`,
+                )
+              }
+              className="inline-flex h-7 items-center rounded-lg border border-border/60 px-3 text-xs font-semibold text-muted-foreground hover:text-foreground disabled:opacity-60"
+            >
+              Adopt into this project
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function DriftTarget({ target }: { target: AgentstackDiffTarget }) {
+  const diff = target.diff.length > DIFF_MAX ? `${target.diff.slice(0, DIFF_MAX)}\n…` : target.diff;
+  return (
+    <div className="rounded-lg border border-border/50 bg-foreground/[0.02] px-2.5 py-2">
+      <p className="mb-1 truncate text-[11px] font-semibold text-foreground" title={target.path}>
+        {target.display}
+      </p>
+      <p
+        className="mb-1 truncate font-mono text-[10px] text-muted-foreground/70"
+        title={target.path}
+      >
+        {target.path}
+      </p>
+      {diff ? (
+        <pre className="max-h-40 overflow-auto rounded bg-foreground/[0.03] p-2 font-mono text-[10px] leading-relaxed text-muted-foreground">
+          {diff}
+        </pre>
+      ) : null}
+    </div>
+  );
+}
+
 function OverviewPanel({
   rows,
   doctorAvailable,
   actionState,
   onRequestAction,
+  onReviewDrift,
   onConfirm,
   onCancel,
 }: {
@@ -576,6 +950,7 @@ function OverviewPanel({
   doctorAvailable: boolean;
   actionState: ActionState;
   onRequestAction: (a: ActionKind) => void;
+  onReviewDrift: () => void;
   onConfirm: (a: ActionKind) => void;
   onCancel: () => void;
 }) {
@@ -601,7 +976,15 @@ function OverviewPanel({
           >
             {row.summary}
           </span>
-          {row.action ? (
+          {row.reviewDrift ? (
+            <button
+              type="button"
+              onClick={onReviewDrift}
+              className="shrink-0 rounded-md border border-warning/40 bg-warning/10 px-2 py-0.5 text-[10px] font-semibold text-warning transition-colors hover:bg-warning/20"
+            >
+              Review drift
+            </button>
+          ) : row.action ? (
             <button
               type="button"
               onClick={() => onRequestAction(row.action!)}
@@ -653,7 +1036,8 @@ function ActionConfirm({
       </div>
     );
   }
-  const action = state.phase === "confirm" || state.phase === "running" ? state.action : "apply";
+  const action =
+    state.phase === "confirm" || state.phase === "running" ? state.action : "guard-install";
   const running = state.phase === "running";
   return (
     <div className="mx-1 mt-1.5 rounded-lg border border-warning/30 bg-warning/[0.06] px-3 py-2.5">

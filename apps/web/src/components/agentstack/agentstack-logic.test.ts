@@ -46,16 +46,18 @@ const report: AgentstackDoctorReport = {
 };
 
 describe("deriveAgentstackOverviewRows", () => {
-  it("maps real doctor sections to the design's rows and offers a fix action on drift", () => {
+  it("maps real doctor sections to the design's rows and opens a drift review on real drift", () => {
     const rows = deriveAgentstackOverviewRows(report);
     const byKey = Object.fromEntries(rows.map((r) => [r.key, r]));
 
-    // Drift present → Manifest warns and offers the apply action.
+    // A warn-level drift line is actionable → Manifest warns and opens the drift
+    // review (adopt-vs-apply preview), never a single blind "apply" action.
     expect(byKey["manifest"]).toMatchObject({
       level: "warn",
       summary: "changes pending on disk",
-      action: "apply",
+      reviewDrift: true,
     });
+    expect(byKey["manifest"]).not.toHaveProperty("action");
     expect(byKey["doctor"]).toMatchObject({ level: "warn" });
     expect(byKey["doctor"]!.summary).toContain("2 warning(s)");
     expect(byKey["gateway"]).toMatchObject({ level: "ok" });
@@ -63,6 +65,37 @@ describe("deriveAgentstackOverviewRows", () => {
     expect(byKey["secrets"]).toMatchObject({ level: "ok", summary: "no secrets referenced" });
     // Sandbox is a standing muted capability row, always present.
     expect(byKey["sandbox"]).toMatchObject({ level: "muted" });
+  });
+
+  it("treats info-only (foreign-kept) drift as in-sync, not a no-op 'fix' button", () => {
+    // The real-world case that made the old button do nothing: the only drift
+    // lines are `info` (servers another setup applied, kept on disk). This
+    // project renders cleanly, so the Manifest row stays "ok" but still opens
+    // the review so the user can see/manage the kept servers.
+    const foreignOnly: AgentstackDoctorReport = {
+      errors: 0,
+      warnings: 0,
+      sections: [
+        {
+          title: "Drift",
+          lines: [
+            {
+              level: "info",
+              msg: "Claude Code    would REMOVE figma, miro ↳ keep them: agentstack adopt --scope global · prune them: agentstack apply --prune-foreign --scope global",
+            },
+          ],
+        },
+      ],
+    };
+    const byKey = Object.fromEntries(
+      deriveAgentstackOverviewRows(foreignOnly).map((r) => [r.key, r]),
+    );
+    expect(byKey["manifest"]).toMatchObject({
+      level: "ok",
+      summary: "in sync here · other setups' servers kept",
+      reviewDrift: true,
+    });
+    expect(byKey["manifest"]).not.toHaveProperty("action");
   });
 
   it("appends a caller-supplied workflow row and degrades to the doctor + sandbox rows", () => {
