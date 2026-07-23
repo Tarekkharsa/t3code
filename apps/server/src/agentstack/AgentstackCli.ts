@@ -2,6 +2,8 @@ import {
   AgentstackCallEvent,
   AgentstackDiffReport,
   AgentstackDoctorReport,
+  AgentstackRestoreInventory,
+  AgentstackSetupPlan,
   AgentstackTrustPreview,
   AgentstackWorkflowRun,
   AgentstackWorkflowRunSummary,
@@ -10,6 +12,9 @@ import {
   type AgentstackActionResult,
   type AgentstackActivity,
   type AgentstackDiffResult,
+  type AgentstackIncompatible,
+  type AgentstackRestoreInventoryResult,
+  type AgentstackSetupPlanResult,
   type AgentstackStatus,
   type AgentstackTrustPreviewResult,
   type AgentstackWorkflowData,
@@ -80,14 +85,65 @@ export interface AgentstackActionRequest {
    * it is refused before anything spawns.
    */
   readonly consentedDigest?: string;
+  /**
+   * `setup-apply` only: the `plan_digest` from the reviewed `init --plan`.
+   * Mapped to `--consented-plan`; an apply without it (or with a malformed
+   * one) is refused before anything spawns.
+   */
+  readonly planDigest?: string;
+  /**
+   * `restore-write` only: the full hex ledger `id` to undo. A write with an
+   * absent or malformed id is refused before anything spawns.
+   */
+  readonly restoreId?: string;
 }
 
 /**
  * The only digest shape the CLI ever emits (`sha256:<64 hex>`). Anything else
  * is refused before it reaches an argv — spawning is args-array (no shell),
- * so this is shape hygiene, not injection defense.
+ * so this is shape hygiene, not injection defense. Shared by trust-grant's
+ * `--consented-digest` and setup-apply's `--consented-plan`.
  */
 export const CONSENT_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
+
+/** The restore ledger id shape (full or short hex). Same fail-closed hygiene. */
+export const RESTORE_ID_RE = /^[0-9a-f]{8,64}$/;
+
+/**
+ * The envelope `schema_version` this build understands. A read whose payload
+ * declares a higher version is surfaced as `incompatible` rather than silently
+ * degraded — the client must be told to update, not shown a half-decoded view.
+ */
+export const SUPPORTED_AGENTSTACK_SCHEMA = 1;
+
+/** The versioned-envelope fields any decoded read payload may carry. */
+interface AgentstackEnvelope {
+  readonly schema_version?: number;
+  readonly features?: ReadonlyArray<string>;
+}
+
+/**
+ * Turn a decoded payload's envelope into the negotiation fields carried on a
+ * read result. An ABSENT envelope (older CLI) reads as `features: []` and no
+ * incompatibility — the existing silent-optional behaviour. A `schema_version`
+ * above [`SUPPORTED_AGENTSTACK_SCHEMA`] yields a non-null `incompatible` so the
+ * client can render "update t3code"; `features` is still surfaced when present.
+ * `null`/undefined payload (a read that failed to decode) is treated as absent.
+ */
+export function negotiate(payload: AgentstackEnvelope | null | undefined): {
+  features: ReadonlyArray<string>;
+  incompatible: AgentstackIncompatible | null;
+} {
+  const version = payload?.schema_version;
+  const features = payload?.features ?? [];
+  if (typeof version === "number" && version > SUPPORTED_AGENTSTACK_SCHEMA) {
+    return {
+      features,
+      incompatible: { cliSchema: version, supported: SUPPORTED_AGENTSTACK_SCHEMA },
+    };
+  }
+  return { features, incompatible: null };
+}
 
 /** Bounds for the `--tail` the CLI is asked for, whatever the client sent. */
 export const ACTIVITY_LIMIT_MAX = 50;
@@ -163,15 +219,34 @@ export function parseDiffReport(stdout: string) {
   return Option.getOrNull(decodeDiffReport(stdout));
 }
 
+const decodeSetupPlan = Schema.decodeUnknownOption(Schema.fromJsonString(AgentstackSetupPlan));
+
+export function parseSetupPlan(stdout: string) {
+  return Option.getOrNull(decodeSetupPlan(stdout));
+}
+
+const decodeRestoreInventory = Schema.decodeUnknownOption(
+  Schema.fromJsonString(AgentstackRestoreInventory),
+);
+
+export function parseRestoreInventory(stdout: string) {
+  return Option.getOrNull(decodeRestoreInventory(stdout));
+}
+
 /**
- * The fixed argv for each vetted action — the client never supplies one.
- * `consentedDigest` is only consulted for `trust-grant`, and only after the
- * caller validated it against [`CONSENT_DIGEST_RE`].
+ * The fixed argv for each vetted action — the client never supplies one. The
+ * bound values (`consentedDigest`, `planDigest`, `restoreId`) are consulted
+ * only for the action that owns them, and only after the caller validated their
+ * shape (see [`action`]).
  */
 export function actionArgv(
   action: AgentstackActionKind,
   workspaceRoot: string,
-  consentedDigest?: string,
+  bound?: {
+    readonly consentedDigest?: string | undefined;
+    readonly planDigest?: string | undefined;
+    readonly restoreId?: string | undefined;
+  },
 ): ReadonlyArray<string> {
   switch (action) {
     case "apply-project":
@@ -208,10 +283,36 @@ export function actionArgv(
         workspaceRoot,
         "--yes",
         "--consented-digest",
-        consentedDigest ?? "",
+        bound?.consentedDigest ?? "",
       ];
     case "trust-revoke":
       return ["--manifest-dir", workspaceRoot, "trust", workspaceRoot, "--revoke"];
+    case "setup-apply":
+      // Apply the reviewed `init --plan`. --consented-plan presents back the
+      // plan_digest the user saw; the CLI writes nothing if detection changed.
+      // NO --secrets flag — both the plan read and this apply default to
+      // keychain, so the digests line up. The caller refuses before spawn when
+      // the digest is absent/malformed, so the "" fallback never reaches argv.
+      return [
+        "--manifest-dir",
+        workspaceRoot,
+        "init",
+        "--yes",
+        "--consented-plan",
+        bound?.planDigest ?? "",
+      ];
+    case "restore-write":
+      // Undo one ledger entry by its full hex id (validated before spawn).
+      // Never `--last` — the ledger is machine-global and the panel already
+      // picked the newest project-touching entry.
+      return [
+        "--manifest-dir",
+        workspaceRoot,
+        "restore",
+        bound?.restoreId ?? "",
+        "--write",
+        "--json",
+      ];
   }
 }
 
@@ -238,6 +339,12 @@ export class AgentstackCli extends Context.Service<
       input: AgentstackWorkspaceRequest,
     ) => Effect.Effect<AgentstackTrustPreviewResult>;
     readonly diff: (input: AgentstackDiffRequest) => Effect.Effect<AgentstackDiffResult>;
+    readonly setupPlan: (
+      input: AgentstackWorkspaceRequest,
+    ) => Effect.Effect<AgentstackSetupPlanResult>;
+    readonly restoreInventory: (
+      input: AgentstackWorkspaceRequest,
+    ) => Effect.Effect<AgentstackRestoreInventoryResult>;
     readonly action: (input: AgentstackActionRequest) => Effect.Effect<AgentstackActionResult>;
   }
 >()("t3/agentstack/AgentstackCli") {}
@@ -291,15 +398,21 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
           installed: false,
           version: null,
           doctor: null,
+          features: [],
+          incompatible: null,
           checkedAt: yield* Clock.currentTimeMillis,
         };
       }
 
+      const doctor =
+        doctorResult._tag === "Success" ? parseDoctorReport(doctorResult.result.stdout) : null;
       return {
         installed: true,
         version: yield* Cache.get(versionCache, "version"),
-        doctor:
-          doctorResult._tag === "Success" ? parseDoctorReport(doctorResult.result.stdout) : null,
+        doctor,
+        // The doctor payload carries the versioned envelope; surface its
+        // features (for action gating) and any schema incompatibility.
+        ...negotiate(doctor),
         checkedAt: yield* Clock.currentTimeMillis,
       };
     },
@@ -423,9 +536,11 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
         onSuccess: (r) => ({ _tag: "Success", result: r }) as const,
       }),
     );
+    const preview = result._tag === "Success" ? parseTrustPreview(result.result.stdout) : null;
     return {
       installed: result._tag !== "NotFound",
-      preview: result._tag === "Success" ? parseTrustPreview(result.result.stdout) : null,
+      preview,
+      ...negotiate(preview),
       checkedAt: yield* Clock.currentTimeMillis,
     };
   });
@@ -445,9 +560,52 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
         onSuccess: (r) => ({ _tag: "Success", result: r }) as const,
       }),
     );
+    const report = result._tag === "Success" ? parseDiffReport(result.result.stdout) : null;
     return {
       installed: result._tag !== "NotFound",
-      report: result._tag === "Success" ? parseDiffReport(result.result.stdout) : null,
+      report,
+      ...negotiate(report),
+      checkedAt: yield* Clock.currentTimeMillis,
+    };
+  });
+
+  const setupPlan: AgentstackCli["Service"]["setupPlan"] = Effect.fn("AgentstackCli.setupPlan")(
+    function* (input) {
+      const result = yield* run(["--manifest-dir", input.workspaceRoot, "init", "--plan"]).pipe(
+        Effect.match({
+          onFailure: (error) =>
+            isBinaryNotFound(error)
+              ? ({ _tag: "NotFound" } as const)
+              : ({ _tag: "Failed" } as const),
+          onSuccess: (r) => ({ _tag: "Success", result: r }) as const,
+        }),
+      );
+      const plan = result._tag === "Success" ? parseSetupPlan(result.result.stdout) : null;
+      return {
+        installed: result._tag !== "NotFound",
+        plan,
+        ...negotiate(plan),
+        checkedAt: yield* Clock.currentTimeMillis,
+      };
+    },
+  );
+
+  const restoreInventory: AgentstackCli["Service"]["restoreInventory"] = Effect.fn(
+    "AgentstackCli.restoreInventory",
+  )(function* (input) {
+    const result = yield* run(["--manifest-dir", input.workspaceRoot, "restore", "--json"]).pipe(
+      Effect.match({
+        onFailure: (error) =>
+          isBinaryNotFound(error) ? ({ _tag: "NotFound" } as const) : ({ _tag: "Failed" } as const),
+        onSuccess: (r) => ({ _tag: "Success", result: r }) as const,
+      }),
+    );
+    const inventory =
+      result._tag === "Success" ? parseRestoreInventory(result.result.stdout) : null;
+    return {
+      installed: result._tag !== "NotFound",
+      inventory,
+      ...negotiate(inventory),
       checkedAt: yield* Clock.currentTimeMillis,
     };
   });
@@ -471,10 +629,43 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
           };
         }
       }
+      // Setup-apply is plan-bound the same way: the reviewed plan_digest must
+      // be present and well-formed, or nothing spawns. Absence usually means an
+      // older `init --plan` (no plan_digest) or an older client.
+      if (input.action === "setup-apply") {
+        const digest = input.planDigest;
+        if (digest === undefined || !CONSENT_DIGEST_RE.test(digest)) {
+          return {
+            ok: false,
+            message:
+              digest === undefined
+                ? "setup needs the reviewed plan digest — update the agentstack CLI (this one's plan has no plan_digest) or re-open setup"
+                : "setup was given a malformed plan digest — re-open setup and try again",
+          };
+        }
+      }
+      // Restore-write is id-bound: refuse anything that isn't a plausible
+      // ledger id before it reaches argv.
+      if (input.action === "restore-write") {
+        const id = input.restoreId;
+        if (id === undefined || !RESTORE_ID_RE.test(id)) {
+          return {
+            ok: false,
+            message:
+              id === undefined
+                ? "undo needs the id of the change to revert — none was provided"
+                : "undo was given a malformed change id — refresh and try again",
+          };
+        }
+      }
       const result = yield* processRunner
         .run({
           command: binary,
-          args: actionArgv(input.action, input.workspaceRoot, input.consentedDigest),
+          args: actionArgv(input.action, input.workspaceRoot, {
+            consentedDigest: input.consentedDigest,
+            planDigest: input.planDigest,
+            restoreId: input.restoreId,
+          }),
           timeout: ACTION_TIMEOUT,
           timeoutBehavior: "timedOutResult",
           maxOutputBytes: MAX_STDOUT_BYTES,
@@ -511,7 +702,17 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
     },
   );
 
-  return AgentstackCli.of({ status, activity, workflow, workflowRun, trustPreview, diff, action });
+  return AgentstackCli.of({
+    status,
+    activity,
+    workflow,
+    workflowRun,
+    trustPreview,
+    diff,
+    setupPlan,
+    restoreInventory,
+    action,
+  });
 });
 
 export const layer = Layer.effect(AgentstackCli, make()).pipe(Layer.provide(ProcessRunner.layer));

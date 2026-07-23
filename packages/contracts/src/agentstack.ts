@@ -16,6 +16,45 @@ import { ProjectId, ThreadId } from "./baseSchemas.ts";
  * only tightens). Bypassing a guard denial has no safe shape and is not offered.
  */
 
+/**
+ * The versioned envelope every UI-facing agentstack JSON read now trails with.
+ * `schema_version` lets t3code detect a CLI newer than it understands;
+ * `features` names the end-to-end contracts (`init-plan`, `apply-setup`,
+ * `trust-consent`, …) actually usable against this binary, so the client can
+ * feature-gate an action instead of firing it blindly and reading a failure.
+ * Both are `optionalKey` so payloads from older CLIs (which omit them) still
+ * decode — an absent envelope means "older CLI", read as `features: []`.
+ */
+const AgentstackEnvelopeFields = {
+  schema_version: Schema.optionalKey(Schema.Number),
+  features: Schema.optionalKey(Schema.Array(Schema.String)),
+} as const;
+
+/**
+ * Surfaced by the server on a read whose payload declares a `schema_version`
+ * higher than the client supports: the CLI speaks a contract this t3code build
+ * cannot. Both version numbers are carried so the UI can say which side to
+ * update. `cliSchema` is the payload's version; `supported` is
+ * `SUPPORTED_AGENTSTACK_SCHEMA`.
+ */
+export const AgentstackIncompatible = Schema.Struct({
+  cliSchema: Schema.Number,
+  supported: Schema.Number,
+});
+export type AgentstackIncompatible = typeof AgentstackIncompatible.Type;
+
+/**
+ * Negotiation carried on each read *result* wrapper (not the raw CLI payload).
+ * `features` is the decoded envelope's feature list, defaulted to `[]` for an
+ * absent envelope (older CLI); `incompatible` is non-null only when the CLI's
+ * schema outruns this client. Both `optionalKey` so a client can decode
+ * responses from a server that predates negotiation.
+ */
+const AgentstackNegotiationFields = {
+  features: Schema.optionalKey(Schema.Array(Schema.String)),
+  incompatible: Schema.optionalKey(Schema.NullOr(AgentstackIncompatible)),
+} as const;
+
 export const AgentstackDoctorLine = Schema.Struct({
   level: Schema.String,
   msg: Schema.String,
@@ -28,13 +67,35 @@ export const AgentstackDoctorSection = Schema.Struct({
 });
 export type AgentstackDoctorSection = typeof AgentstackDoctorSection.Type;
 
+/** guard = the host pre-tool-use guard is installed; machine_policy = a
+ *  restrictive machine ceiling is in force. Both are cooperative host
+ *  protections, NOT a sandbox — surfaced together as the "Protected" posture. */
+export const AgentstackProtection = Schema.Struct({
+  guard: Schema.Boolean,
+  machine_policy: Schema.Boolean,
+});
+export type AgentstackProtection = typeof AgentstackProtection.Type;
+
 export const AgentstackDoctorReport = Schema.Struct({
   errors: Schema.Number,
   warnings: Schema.Number,
   /** trusted | drifted | untrusted — the project's trust state, when a
    *  project was checked. Absent on older CLIs (fall back to gateway prose). */
   trust: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  /**
+   * needs_setup | needs_attention | ready — the one-word posture the panel
+   * turns into a status chip. `needs_setup` means no manifest yet (sections
+   * empty). Kept a free string (not `Literals`) so a future posture still
+   * decodes; absent on older CLIs, where the chip degrades to the row rollup.
+   */
+  state: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  /** One recommended command (e.g. `agentstack secret set SEARCH_TOKEN`), or
+   *  null when nothing is pending. Shown verbatim as the next step. */
+  next_action: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  /** The cooperative host-protection posture, when the CLI reports it. */
+  protection: Schema.optionalKey(Schema.NullOr(AgentstackProtection)),
   sections: Schema.Array(AgentstackDoctorSection),
+  ...AgentstackEnvelopeFields,
 });
 export type AgentstackDoctorReport = typeof AgentstackDoctorReport.Type;
 
@@ -56,6 +117,7 @@ export const AgentstackStatus = Schema.Struct({
   version: Schema.NullOr(Schema.String),
   doctor: Schema.NullOr(AgentstackDoctorReport),
   checkedAt: Schema.Number,
+  ...AgentstackNegotiationFields,
 });
 export type AgentstackStatus = typeof AgentstackStatus.Type;
 
@@ -203,6 +265,20 @@ export const AgentstackTrustServer = Schema.Struct({
 });
 export type AgentstackTrustServer = typeof AgentstackTrustServer.Type;
 
+/** One named workflow in the trust surface, with the agent roles it may spawn. */
+export const AgentstackTrustWorkflow = Schema.Struct({
+  name: Schema.String,
+  roles: Schema.Array(Schema.String),
+});
+export type AgentstackTrustWorkflow = typeof AgentstackTrustWorkflow.Type;
+
+/** One named extension in the trust surface, with what it runs/points at. */
+export const AgentstackTrustExtension = Schema.Struct({
+  name: Schema.String,
+  target: Schema.String,
+});
+export type AgentstackTrustExtension = typeof AgentstackTrustExtension.Type;
+
 export const AgentstackTrustPreview = Schema.Struct({
   path: Schema.String,
   /** trusted | drifted | untrusted */
@@ -218,6 +294,17 @@ export const AgentstackTrustPreview = Schema.Struct({
     instructions: Schema.Number,
   }),
   /**
+   * The complete named surface behind the counts, when a newer CLI emits it:
+   * the actual skill names, workflow names (with roles), extension names (with
+   * target) and instruction names a human is consenting to — rendered instead
+   * of bare counts. All `optionalKey`, so an older preview (counts only) still
+   * decodes and the dialog falls back to the counts.
+   */
+  skills: Schema.optionalKey(Schema.Array(Schema.String)),
+  workflows: Schema.optionalKey(Schema.Array(AgentstackTrustWorkflow)),
+  extensions: Schema.optionalKey(Schema.Array(AgentstackTrustExtension)),
+  instructions: Schema.optionalKey(Schema.Array(Schema.String)),
+  /**
    * The previewed-surface digest (`sha256:<hex>`) — the exact value a
    * consent-bound grant must present back as `--consented-digest`, so "a
    * human reviewed this exact surface" is CLI-enforced. Optional so previews
@@ -226,6 +313,7 @@ export const AgentstackTrustPreview = Schema.Struct({
    * optional.
    */
   surface_digest: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  ...AgentstackEnvelopeFields,
 });
 export type AgentstackTrustPreview = typeof AgentstackTrustPreview.Type;
 
@@ -233,6 +321,7 @@ export const AgentstackTrustPreviewResult = Schema.Struct({
   installed: Schema.Boolean,
   preview: Schema.NullOr(AgentstackTrustPreview),
   checkedAt: Schema.Number,
+  ...AgentstackNegotiationFields,
 });
 export type AgentstackTrustPreviewResult = typeof AgentstackTrustPreviewResult.Type;
 
@@ -276,6 +365,7 @@ export const AgentstackDiffReport = Schema.Struct({
   targets: Schema.Array(AgentstackDiffTarget),
   /** Defensive: absent on some versions; degrades to []. */
   warnings: Schema.optionalKey(Schema.Array(Schema.String)),
+  ...AgentstackEnvelopeFields,
 });
 export type AgentstackDiffReport = typeof AgentstackDiffReport.Type;
 
@@ -283,6 +373,7 @@ export const AgentstackDiffResult = Schema.Struct({
   installed: Schema.Boolean,
   report: Schema.NullOr(AgentstackDiffReport),
   checkedAt: Schema.Number,
+  ...AgentstackNegotiationFields,
 });
 export type AgentstackDiffResult = typeof AgentstackDiffResult.Type;
 
@@ -293,6 +384,132 @@ export const AgentstackDiffInput = Schema.Struct({
   scope: Schema.Literals(["global", "project"]),
 });
 export type AgentstackDiffInput = typeof AgentstackDiffInput.Type;
+
+// ── setup plan (read) ────────────────────────────────────────────────────────
+// `agentstack init --plan` — a read-only preview of what a first-time setup
+// would import, as data, so the panel can show it in plain language before any
+// write. snake_case verbatim from the CLI. The apply that follows presents back
+// `plan_digest`; the CLI refuses if detection no longer digests to it.
+
+/** One coding tool the CLI detected on the machine. */
+export const AgentstackSetupDetected = Schema.Struct({
+  id: Schema.String,
+  display: Schema.String,
+});
+export type AgentstackSetupDetected = typeof AgentstackSetupDetected.Type;
+
+/** One MCP server the plan would import into the new manifest. */
+export const AgentstackSetupServer = Schema.Struct({
+  name: Schema.String,
+  /** stdio | http | … */
+  kind: Schema.String,
+  /** what it runs (stdio) or contacts (http). */
+  target: Schema.String,
+});
+export type AgentstackSetupServer = typeof AgentstackSetupServer.Type;
+
+/** A name defined by more than one detected tool — surfaced so the user knows
+ *  the import picks one definition. */
+export const AgentstackSetupConflict = Schema.Struct({
+  name: Schema.String,
+  other_definitions: Schema.Number,
+});
+export type AgentstackSetupConflict = typeof AgentstackSetupConflict.Type;
+
+/** A secret the setup will reference but not store — the user still provides
+ *  the value via `agentstack secret set <reference>`. */
+export const AgentstackSetupSecret = Schema.Struct({
+  reference: Schema.String,
+  origin: Schema.String,
+});
+export type AgentstackSetupSecret = typeof AgentstackSetupSecret.Type;
+
+export const AgentstackSetupPlan = Schema.Struct({
+  path: Schema.String,
+  /** The manifest file the setup would create/manage. */
+  manifest_path: Schema.String,
+  already_initialized: Schema.Boolean,
+  detected: Schema.Array(AgentstackSetupDetected),
+  servers: Schema.Array(AgentstackSetupServer),
+  /** Tool ids whose settings would be imported. */
+  settings_from: Schema.Array(Schema.String),
+  conflicts: Schema.Array(AgentstackSetupConflict),
+  secrets: Schema.Array(AgentstackSetupSecret),
+  /** Where secret values will live (e.g. `keychain`). */
+  secrets_destination: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  /**
+   * `sha256:<hex>` over the reviewed plan. The apply presents it back as
+   * `--consented-plan`; the CLI refuses if detection changed since. Optional
+   * so a CLI that predates plan binding still decodes — but without it, apply
+   * from this UI must be refused (the setup button disables), not downgraded.
+   */
+  plan_digest: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  ...AgentstackEnvelopeFields,
+});
+export type AgentstackSetupPlan = typeof AgentstackSetupPlan.Type;
+
+export const AgentstackSetupPlanResult = Schema.Struct({
+  installed: Schema.Boolean,
+  plan: Schema.NullOr(AgentstackSetupPlan),
+  checkedAt: Schema.Number,
+  ...AgentstackNegotiationFields,
+});
+export type AgentstackSetupPlanResult = typeof AgentstackSetupPlanResult.Type;
+
+export const AgentstackSetupPlanInput = Schema.Struct({
+  projectId: ProjectId,
+  threadId: Schema.optionalKey(ThreadId),
+});
+export type AgentstackSetupPlanInput = typeof AgentstackSetupPlanInput.Type;
+
+// ── restore inventory (read) ─────────────────────────────────────────────────
+// `agentstack restore --json` — the machine-global undo ledger. `touches_project`
+// marks entries whose files live under this workspace; the panel's Undo picks
+// the newest such entry that is not already undone, never a blind `--last`.
+
+export const AgentstackRestoreEntry = Schema.Struct({
+  /** Full hex id — the value the undo write must present back. */
+  id: Schema.String,
+  short_id: Schema.optionalKey(Schema.String),
+  time_unix: Schema.Number,
+  /** project | global — the scope of the recorded change. */
+  scope: Schema.String,
+  /** Human one-liner, e.g. "1 file · claude-code, codex". */
+  summary: Schema.String,
+  undone: Schema.Boolean,
+  /** True when this entry's files live under the current workspace. */
+  touches_project: Schema.Boolean,
+});
+export type AgentstackRestoreEntry = typeof AgentstackRestoreEntry.Type;
+
+export const AgentstackRestoreBackup = Schema.Struct({
+  adapter: Schema.String,
+  scope: Schema.String,
+  path: Schema.String,
+});
+export type AgentstackRestoreBackup = typeof AgentstackRestoreBackup.Type;
+
+export const AgentstackRestoreInventory = Schema.Struct({
+  /** Newest first, matching the CLI's inventory order. */
+  entries: Schema.Array(AgentstackRestoreEntry),
+  adapter_backups: Schema.optionalKey(Schema.Array(AgentstackRestoreBackup)),
+  ...AgentstackEnvelopeFields,
+});
+export type AgentstackRestoreInventory = typeof AgentstackRestoreInventory.Type;
+
+export const AgentstackRestoreInventoryResult = Schema.Struct({
+  installed: Schema.Boolean,
+  inventory: Schema.NullOr(AgentstackRestoreInventory),
+  checkedAt: Schema.Number,
+  ...AgentstackNegotiationFields,
+});
+export type AgentstackRestoreInventoryResult = typeof AgentstackRestoreInventoryResult.Type;
+
+export const AgentstackRestoreInventoryInput = Schema.Struct({
+  projectId: ProjectId,
+  threadId: Schema.optionalKey(ThreadId),
+});
+export type AgentstackRestoreInventoryInput = typeof AgentstackRestoreInventoryInput.Type;
 
 // ── governed actions (write) ─────────────────────────────────────────────────
 
@@ -330,6 +547,13 @@ export const AgentstackActionKind = Schema.Literals([
   "guard-install",
   "trust-grant",
   "trust-revoke",
+  // `setup-apply` applies a reviewed `init --plan` (`init --yes
+  // --consented-plan <planDigest>`); the CLI refuses if detection no longer
+  // digests to it. `restore-write` undoes one ledger entry by id (`restore
+  // <restoreId> --write`). Both are consent-/id-bound the same way trust-grant
+  // is digest-bound: the server refuses before spawning without a valid value.
+  "setup-apply",
+  "restore-write",
 ]);
 export type AgentstackActionKind = typeof AgentstackActionKind.Type;
 
@@ -344,6 +568,19 @@ export const AgentstackActionInput = Schema.Struct({
    * the bytes on disk. Meaningless (ignored) for every other action.
    */
   consentedDigest: Schema.optionalKey(Schema.String),
+  /**
+   * `setup-apply` only: the `plan_digest` from the `init --plan` the user
+   * reviewed. Mapped to `--consented-plan`; the server refuses before spawning
+   * when it is absent or malformed, the CLI refuses when detection changed.
+   * Ignored for every other action.
+   */
+  planDigest: Schema.optionalKey(Schema.String),
+  /**
+   * `restore-write` only: the full hex `id` of the ledger entry to undo. The
+   * server refuses before spawning unless it matches the id shape. Ignored for
+   * every other action.
+   */
+  restoreId: Schema.optionalKey(Schema.String),
 });
 export type AgentstackActionInput = typeof AgentstackActionInput.Type;
 

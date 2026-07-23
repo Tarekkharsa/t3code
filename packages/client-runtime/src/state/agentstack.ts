@@ -32,6 +32,14 @@ export function createAgentstackEnvironmentAtoms<R, E>(
       tag: WS_METHODS.agentstackDiff,
       label: "agentstack.diff",
     }),
+    setupPlan: createEnvironmentRpcCommand(runtime, {
+      tag: WS_METHODS.agentstackSetupPlan,
+      label: "agentstack.setupPlan",
+    }),
+    restoreInventory: createEnvironmentRpcCommand(runtime, {
+      tag: WS_METHODS.agentstackRestoreInventory,
+      label: "agentstack.restoreInventory",
+    }),
     action: createEnvironmentRpcCommand(runtime, {
       tag: WS_METHODS.agentstackAction,
       label: "agentstack.action",

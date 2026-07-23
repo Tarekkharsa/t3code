@@ -1,15 +1,20 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  agentstackFeatureKnownMissing,
   deriveAgentstackActivityRows,
   deriveAgentstackOverviewRows,
   deriveAgentstackPolicyRows,
+  deriveAgentstackStatusChip,
   deriveAgentstackTrustBadge,
   deriveWorkflowCounts,
   deriveWorkflowStages,
+  hasAgentstackFeature,
   matchAgentstackDenial,
+  selectAgentstackUndoEntry,
   shortDigest,
   type AgentstackDoctorReport,
+  type AgentstackRestoreEntryLike,
   type AgentstackWorkflowStepLike,
 } from "./agentstack-logic";
 
@@ -141,6 +146,101 @@ describe("deriveAgentstackTrustBadge", () => {
     expect(deriveAgentstackTrustBadge({ errors: 0, warnings: 0, sections: [] }).state).toBe(
       "unknown",
     );
+  });
+});
+
+describe("deriveAgentstackStatusChip", () => {
+  it("derives one chip per state and Protected only when both protections are on", () => {
+    expect(deriveAgentstackStatusChip({ state: "needs_setup" })).toMatchObject({
+      label: "Needs setup",
+      isProtected: false,
+    });
+    expect(deriveAgentstackStatusChip({ state: "needs_attention" })).toMatchObject({
+      label: "Needs attention",
+      level: "warn",
+    });
+    // Ready without both protections is just "Ready".
+    expect(
+      deriveAgentstackStatusChip({
+        state: "ready",
+        protection: { guard: true, machine_policy: false },
+      }),
+    ).toMatchObject({ label: "Ready", isProtected: false });
+    expect(
+      deriveAgentstackStatusChip({
+        state: "ready",
+        protection: { guard: false, machine_policy: true },
+      }),
+    ).toMatchObject({ label: "Ready", isProtected: false });
+    expect(deriveAgentstackStatusChip({ state: "ready" })).toMatchObject({ label: "Ready" });
+    // Only guard AND machine_policy earns "Protected".
+    expect(
+      deriveAgentstackStatusChip({
+        state: "ready",
+        protection: { guard: true, machine_policy: true },
+      }),
+    ).toMatchObject({ label: "Protected", level: "ok", isProtected: true });
+    // Absent/unknown state → no chip (caller falls back to the row rollup).
+    expect(deriveAgentstackStatusChip({})).toBeNull();
+    expect(deriveAgentstackStatusChip({ state: "something-new" })).toBeNull();
+  });
+});
+
+describe("feature gating", () => {
+  it("reports whether a contract is usable, defaulting an absent list to unusable", () => {
+    expect(hasAgentstackFeature(["apply-setup", "restore-last"], "apply-setup")).toBe(true);
+    expect(hasAgentstackFeature(["apply-setup"], "restore-last")).toBe(false);
+    // Absent/empty (older CLI) → newer-only contracts are treated as unusable.
+    expect(hasAgentstackFeature(undefined, "apply-setup")).toBe(false);
+    expect(hasAgentstackFeature([], "apply-setup")).toBe(false);
+  });
+
+  it("only reports a contract as known-missing when the CLI advertised its features", () => {
+    // Known list that omits it → known-missing (add the extra gate).
+    expect(agentstackFeatureKnownMissing(["apply-setup"], "trust-consent")).toBe(true);
+    // Present → not missing.
+    expect(agentstackFeatureKnownMissing(["trust-consent"], "trust-consent")).toBe(false);
+    // Unknown/empty (older CLI) → NOT known-missing, so no extra gate is added
+    // and the existing digest gate stands on its own.
+    expect(agentstackFeatureKnownMissing([], "trust-consent")).toBe(false);
+    expect(agentstackFeatureKnownMissing(undefined, "trust-consent")).toBe(false);
+  });
+});
+
+describe("selectAgentstackUndoEntry", () => {
+  const entry = (over: Partial<AgentstackRestoreEntryLike>): AgentstackRestoreEntryLike => ({
+    id: "a".repeat(16),
+    time_unix: 1_000,
+    scope: "project",
+    summary: "1 file",
+    undone: false,
+    touches_project: true,
+    ...over,
+  });
+
+  it("picks the newest project-touching, not-yet-undone entry", () => {
+    const chosen = selectAgentstackUndoEntry([
+      entry({ id: "old", time_unix: 100 }),
+      entry({ id: "newest", time_unix: 300 }),
+      entry({ id: "mid", time_unix: 200 }),
+    ]);
+    expect(chosen?.id).toBe("newest");
+  });
+
+  it("skips already-undone and non-project entries", () => {
+    const chosen = selectAgentstackUndoEntry([
+      entry({ id: "undone", time_unix: 900, undone: true }),
+      entry({ id: "other-project", time_unix: 800, touches_project: false }),
+      entry({ id: "safe", time_unix: 500 }),
+    ]);
+    expect(chosen?.id).toBe("safe");
+  });
+
+  it("returns null when nothing is safe to undo here", () => {
+    expect(selectAgentstackUndoEntry([])).toBeNull();
+    expect(
+      selectAgentstackUndoEntry([entry({ touches_project: false }), entry({ undone: true })]),
+    ).toBeNull();
   });
 });
 

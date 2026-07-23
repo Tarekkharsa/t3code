@@ -21,6 +21,10 @@ import {
   AgentstackActivityInput,
   AgentstackDiffInput,
   AgentstackDiffResult,
+  AgentstackRestoreInventoryInput,
+  AgentstackRestoreInventoryResult,
+  AgentstackSetupPlanInput,
+  AgentstackSetupPlanResult,
   AgentstackStatus,
   AgentstackStatusInput,
   AgentstackTrustInput,
@@ -195,6 +199,8 @@ export const WS_METHODS = {
   agentstackWorkflowRun: "agentstack.workflowRun",
   agentstackTrustPreview: "agentstack.trustPreview",
   agentstackDiff: "agentstack.diff",
+  agentstackSetupPlan: "agentstack.setupPlan",
+  agentstackRestoreInventory: "agentstack.restoreInventory",
   agentstackAction: "agentstack.action",
 
   // Git workflow methods
@@ -320,6 +326,18 @@ export const WsAgentstackTrustPreviewRpc = Rpc.make(WS_METHODS.agentstackTrustPr
 export const WsAgentstackDiffRpc = Rpc.make(WS_METHODS.agentstackDiff, {
   payload: AgentstackDiffInput,
   success: AgentstackDiffResult,
+  error: Schema.Union([AgentstackWorkspaceContextError, EnvironmentAuthorizationError]),
+});
+
+export const WsAgentstackSetupPlanRpc = Rpc.make(WS_METHODS.agentstackSetupPlan, {
+  payload: AgentstackSetupPlanInput,
+  success: AgentstackSetupPlanResult,
+  error: Schema.Union([AgentstackWorkspaceContextError, EnvironmentAuthorizationError]),
+});
+
+export const WsAgentstackRestoreInventoryRpc = Rpc.make(WS_METHODS.agentstackRestoreInventory, {
+  payload: AgentstackRestoreInventoryInput,
+  success: AgentstackRestoreInventoryResult,
   error: Schema.Union([AgentstackWorkspaceContextError, EnvironmentAuthorizationError]),
 });
 
@@ -767,6 +785,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsAgentstackWorkflowRunRpc,
   WsAgentstackTrustPreviewRpc,
   WsAgentstackDiffRpc,
+  WsAgentstackSetupPlanRpc,
+  WsAgentstackRestoreInventoryRpc,
   WsAgentstackActionRpc,
   WsServerRefreshProvidersRpc,
   WsServerUpdateProviderRpc,

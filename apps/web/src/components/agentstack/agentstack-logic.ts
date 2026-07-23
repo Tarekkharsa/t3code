@@ -18,11 +18,23 @@ export interface AgentstackDoctorSection {
   lines: ReadonlyArray<AgentstackDoctorLine>;
 }
 
+/** Cooperative host protections (guard + machine policy) — NOT a sandbox. */
+export interface AgentstackProtection {
+  guard: boolean;
+  machine_policy: boolean;
+}
+
 export interface AgentstackDoctorReport {
   errors: number;
   warnings: number;
   /** trusted | drifted | untrusted, when the CLI emits it (else undefined). */
   trust?: string | null;
+  /** needs_setup | needs_attention | ready, when the CLI emits it. */
+  state?: string | null;
+  /** One recommended command, or null/absent when nothing is pending. */
+  next_action?: string | null;
+  /** The cooperative host-protection posture, when reported. */
+  protection?: AgentstackProtection | null;
   sections: ReadonlyArray<AgentstackDoctorSection>;
 }
 
@@ -248,6 +260,116 @@ export function deriveAgentstackTrustBadge(report: AgentstackDoctorReport): Agen
   if (trusted) return { state: "trusted", label: "Repo trusted" };
   if (notTrusted) return { state: "inert", label: "Inert — review pending" };
   return { state: "unknown", label: "Status unknown" };
+}
+
+// ── status chip (header) ─────────────────────────────────────────────────────
+
+export type AgentstackSetupState = "needs_setup" | "needs_attention" | "ready";
+
+export interface AgentstackStatusChip {
+  /** "Needs setup" | "Needs attention" | "Ready" | "Protected". */
+  label: string;
+  level: AgentstackRowLevel;
+  /** True only for the "Protected" chip (ready + both cooperative protections). */
+  isProtected: boolean;
+}
+
+/**
+ * Derive the single status chip from the doctor's structured `state`. "Protected"
+ * is a strictly stronger "Ready": it appears only when the project is ready AND
+ * both cooperative host protections (the pre-tool-use guard and a machine policy
+ * ceiling) are on. It is deliberately NOT a claim of sandboxing. When `state` is
+ * absent (older CLI) the chip is null and the caller falls back to the row
+ * rollup.
+ */
+export function deriveAgentstackStatusChip(input: {
+  state?: string | null | undefined;
+  protection?: AgentstackProtection | null | undefined;
+}): AgentstackStatusChip | null {
+  switch (input.state) {
+    case "needs_setup":
+      return { label: "Needs setup", level: "warn", isProtected: false };
+    case "needs_attention":
+      return { label: "Needs attention", level: "warn", isProtected: false };
+    case "ready": {
+      const isProtected =
+        input.protection?.guard === true && input.protection?.machine_policy === true;
+      return isProtected
+        ? { label: "Protected", level: "ok", isProtected: true }
+        : { label: "Ready", level: "ok", isProtected: false };
+    }
+    default:
+      return null;
+  }
+}
+
+// ── capability negotiation & feature gating ──────────────────────────────────
+
+export interface AgentstackIncompatible {
+  /** The CLI payload's schema_version. */
+  cliSchema: number;
+  /** The schema this t3code build supports. */
+  supported: number;
+}
+
+/**
+ * Whether a named end-to-end contract is usable against the connected CLI.
+ * `features` is the negotiated list a read returned (server defaults an absent
+ * envelope to `[]`). An unknown/absent list means the contract is NOT usable —
+ * these are newer-CLI-only actions, so the safe default is "disabled, update
+ * the CLI", never "fire and hope".
+ */
+export function hasAgentstackFeature(
+  features: ReadonlyArray<string> | undefined,
+  feature: string,
+): boolean {
+  return (features ?? []).includes(feature);
+}
+
+/**
+ * True only when we positively KNOW the feature is unavailable — the features
+ * list is non-empty (so the CLI advertised its contracts) and does not name it.
+ * Used to add an extra gate to trust-grant only when features are known, while
+ * leaving the existing digest-presence gate to stand on its own for older CLIs
+ * (empty/unknown features), which never advertise the list.
+ */
+export function agentstackFeatureKnownMissing(
+  features: ReadonlyArray<string> | undefined,
+  feature: string,
+): boolean {
+  return Array.isArray(features) && features.length > 0 && !features.includes(feature);
+}
+
+// ── undo (restore ledger) ────────────────────────────────────────────────────
+
+export interface AgentstackRestoreEntryLike {
+  id: string;
+  short_id?: string;
+  time_unix: number;
+  scope: string;
+  summary: string;
+  undone: boolean;
+  /** True when this entry's files live under the current workspace. */
+  touches_project: boolean;
+}
+
+/**
+ * The entry the panel's "Undo last change" affordance acts on: the newest
+ * project-touching entry that has not already been undone. The ledger is
+ * machine-global, so a blind `--last` could revert an unrelated project's
+ * change — this filters to `touches_project` first, then picks the newest by
+ * `time_unix` (not relying on inventory order). Null when there is nothing
+ * safe to undo here.
+ */
+export function selectAgentstackUndoEntry(
+  entries: ReadonlyArray<AgentstackRestoreEntryLike>,
+): AgentstackRestoreEntryLike | null {
+  let best: AgentstackRestoreEntryLike | null = null;
+  for (const entry of entries) {
+    if (!entry.touches_project || entry.undone) continue;
+    if (best === null || entry.time_unix > best.time_unix) best = entry;
+  }
+  return best;
 }
 
 // ── policy tab ───────────────────────────────────────────────────────────────

@@ -303,6 +303,8 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [WS_METHODS.agentstackWorkflowRun, AuthOrchestrationReadScope],
   [WS_METHODS.agentstackTrustPreview, AuthOrchestrationReadScope],
   [WS_METHODS.agentstackDiff, AuthOrchestrationReadScope],
+  [WS_METHODS.agentstackSetupPlan, AuthOrchestrationReadScope],
+  [WS_METHODS.agentstackRestoreInventory, AuthOrchestrationReadScope],
   // Governed actions touch the AgentStack security control plane — trust
   // grant/revoke, machine guard, config writes. That decides what code a
   // repo may run on this machine, so it takes the dedicated admin scope
@@ -1567,6 +1569,22 @@ const makeWsRpcLayer = (
             ),
             { "rpc.aggregate": "agentstack" },
           ),
+        [WS_METHODS.agentstackSetupPlan]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.agentstackSetupPlan,
+            resolveAgentstackWorkspaceRoot(input).pipe(
+              Effect.flatMap((workspaceRoot) => agentstackCli.setupPlan({ workspaceRoot })),
+            ),
+            { "rpc.aggregate": "agentstack" },
+          ),
+        [WS_METHODS.agentstackRestoreInventory]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.agentstackRestoreInventory,
+            resolveAgentstackWorkspaceRoot(input).pipe(
+              Effect.flatMap((workspaceRoot) => agentstackCli.restoreInventory({ workspaceRoot })),
+            ),
+            { "rpc.aggregate": "agentstack" },
+          ),
         [WS_METHODS.agentstackAction]: (input) =>
           observeRpcEffect(
             WS_METHODS.agentstackAction,
@@ -1578,6 +1596,8 @@ const makeWsRpcLayer = (
                   ...(input.consentedDigest !== undefined
                     ? { consentedDigest: input.consentedDigest }
                     : {}),
+                  ...(input.planDigest !== undefined ? { planDigest: input.planDigest } : {}),
+                  ...(input.restoreId !== undefined ? { restoreId: input.restoreId } : {}),
                 }),
               ),
             ),

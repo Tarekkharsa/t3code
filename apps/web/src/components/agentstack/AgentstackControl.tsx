@@ -3,6 +3,9 @@ import type {
   AgentstackDiffReport,
   AgentstackDiffResult,
   AgentstackDiffTarget,
+  AgentstackRestoreInventoryResult,
+  AgentstackSetupPlan,
+  AgentstackSetupPlanResult,
   AgentstackStatus,
   AgentstackTrustPreviewResult,
   AgentstackWorkflowData,
@@ -12,7 +15,7 @@ import type {
   ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { useAgentstackPanelStore } from "~/agentstackPanelStore";
 import { agentstackEnvironment } from "~/state/agentstack";
@@ -30,18 +33,27 @@ import {
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { AgentstackMark } from "./AgentstackMark";
 import {
+  agentstackFeatureKnownMissing,
   deriveAgentstackActivityRows,
   deriveAgentstackOverviewRows,
   deriveAgentstackPolicyRows,
+  deriveAgentstackStatusChip,
   deriveAgentstackTrustBadge,
   deriveWorkflowCounts,
   deriveWorkflowStages,
+  hasAgentstackFeature,
+  selectAgentstackUndoEntry,
   shortDigest,
   type AgentstackActionKind as ActionKind,
   type AgentstackOverviewRow,
   type AgentstackRowLevel,
   type AgentstackTrustState,
 } from "./agentstack-logic";
+
+/** End-to-end contract names the CLI advertises in its read envelope. */
+const FEATURE_APPLY_SETUP = "apply-setup";
+const FEATURE_RESTORE_LAST = "restore-last";
+const FEATURE_TRUST_CONSENT = "trust-consent";
 
 const LEVEL_DOT: Record<AgentstackRowLevel, string> = {
   ok: "bg-success",
@@ -173,6 +185,10 @@ export function AgentstackControl({
     reportFailure: false,
   });
   const fetchDiff = useAtomCommand(agentstackEnvironment.diff, { reportFailure: false });
+  const fetchSetupPlan = useAtomCommand(agentstackEnvironment.setupPlan, { reportFailure: false });
+  const fetchRestoreInventory = useAtomCommand(agentstackEnvironment.restoreInventory, {
+    reportFailure: false,
+  });
   const runAction = useAtomCommand(agentstackEnvironment.action, { reportFailure: false });
 
   const input = useMemo(
@@ -260,6 +276,46 @@ export function AgentstackControl({
     [environmentId, fetchDiff, input],
   );
 
+  const loadSetupPlan = useCallback(async () => {
+    const r = await fetchSetupPlan({ environmentId, input });
+    return r._tag === "Success" ? r.value : null;
+  }, [environmentId, fetchSetupPlan, input]);
+
+  const loadRestoreInventory = useCallback(async () => {
+    const r = await fetchRestoreInventory({ environmentId, input });
+    return r._tag === "Success" ? r.value : null;
+  }, [environmentId, fetchRestoreInventory, input]);
+
+  // Apply a reviewed setup plan: the plan_digest the user saw is presented
+  // back, so the CLI writes nothing if detection changed since the preview.
+  const onSetupApply = useCallback(
+    async (planDigest: string) => {
+      const r = await runAction({
+        environmentId,
+        input: { ...input, action: "setup-apply", planDigest },
+      });
+      void refresh();
+      return r._tag === "Success" ? r.value : { ok: false, message: "The setup could not be run." };
+    },
+    [environmentId, runAction, input, refresh],
+  );
+
+  // Undo one ledger entry by its full hex id — the caller already selected the
+  // newest project-touching, not-yet-undone entry.
+  const onUndo = useCallback(
+    async (restoreId: string) => {
+      const r = await runAction({
+        environmentId,
+        input: { ...input, action: "restore-write", restoreId },
+      });
+      void refresh();
+      return r._tag === "Success"
+        ? r.value
+        : { ok: false, message: "The change could not be undone." };
+    },
+    [environmentId, runAction, input, refresh],
+  );
+
   const runDriftAction = useCallback(
     async (action: ActionKind) => {
       const r = await runAction({ environmentId, input: { ...input, action } });
@@ -299,6 +355,19 @@ export function AgentstackControl({
 
   const trust = status?.doctor ? deriveAgentstackTrustBadge(status.doctor) : null;
   const trustBadge = trust ? TRUST_BADGE[trust.state] : null;
+
+  // Capability negotiation: an incompatible read (CLI schema newer than this
+  // build understands) takes over the whole body; otherwise the advertised
+  // feature list gates individual actions. An absent envelope (older CLI)
+  // reads as no features known.
+  const incompatible = status?.incompatible ?? null;
+  const features = status?.features;
+  const setupState = status?.doctor?.state ?? null;
+  const canApplySetup = hasAgentstackFeature(features, FEATURE_APPLY_SETUP);
+  const canRestore = hasAgentstackFeature(features, FEATURE_RESTORE_LAST);
+  // Trust-grant keeps its digest-presence gate regardless; the feature gate is
+  // only additive when the CLI actually advertises its features.
+  const trustConsentMissing = agentstackFeatureKnownMissing(features, FEATURE_TRUST_CONSENT);
 
   const overviewRows: AgentstackOverviewRow[] = useMemo(() => {
     if (!status?.doctor) return [];
@@ -401,6 +470,7 @@ export function AgentstackControl({
               loadPreview={loadPreview}
               onTrust={onTrust}
               onClose={() => setReviewing(false)}
+              trustConsentMissing={trustConsentMissing}
             />
           ) : reviewingDrift ? (
             <DriftReviewPanel
@@ -408,6 +478,10 @@ export function AgentstackControl({
               onAction={runDriftAction}
               onClose={() => setReviewingDrift(false)}
             />
+          ) : status?.installed && incompatible ? (
+            <UpdateNeeded incompatible={incompatible} cliVersion={status.version} />
+          ) : status?.installed && setupState === "needs_setup" ? (
+            <SetupPanel loadPlan={loadSetupPlan} onApply={onSetupApply} canApply={canApplySetup} />
           ) : (
             <>
               {/* Tabs */}
@@ -452,6 +526,14 @@ export function AgentstackControl({
                   <OverviewPanel
                     rows={overviewRows}
                     doctorAvailable={status.doctor !== null}
+                    chip={deriveAgentstackStatusChip({
+                      state: status.doctor?.state,
+                      protection: status.doctor?.protection,
+                    })}
+                    nextAction={status.doctor?.next_action ?? null}
+                    loadRestoreInventory={loadRestoreInventory}
+                    onUndo={onUndo}
+                    canRestore={canRestore}
                     actionState={actionState}
                     onRequestAction={(a) => setActionState({ phase: "confirm", action: a })}
                     onReviewDrift={() => setReviewingDrift(true)}
@@ -556,6 +638,7 @@ function TrustReviewPanel({
   loadPreview,
   onTrust,
   onClose,
+  trustConsentMissing,
 }: {
   loadPreview: () => Promise<AgentstackTrustPreviewResult | null>;
   onTrust: (
@@ -563,6 +646,8 @@ function TrustReviewPanel({
     consentedDigest?: string,
   ) => Promise<{ ok: boolean; message: string }>;
   onClose: () => void;
+  /** True when the CLI advertises its features but not consent-bound trust. */
+  trustConsentMissing: boolean;
 }) {
   const [load, setLoad] = useState<TrustLoad>({ phase: "loading" });
   const [act, setAct] = useState<TrustAct>({ phase: "idle" });
@@ -586,6 +671,9 @@ function TrustReviewPanel({
   // the server refuses digest-less grants, so offering the click would only
   // manufacture a failure.
   const consentDigest = preview?.surface_digest ?? null;
+  // Granting needs the digest (existing gate) AND, when the CLI advertises its
+  // features, the consent-bound-trust contract to be among them.
+  const canGrant = consentDigest !== null && !trustConsentMissing;
 
   const run = async (action: "trust-grant" | "trust-revoke") => {
     setAct({ phase: "running" });
@@ -666,6 +754,60 @@ function TrustReviewPanel({
           ) : null}
 
           {(() => {
+            // Prefer the CLI's named surface when it emits one — the actual
+            // skill/workflow/extension/instruction names a human consents to,
+            // not a bare count.
+            const named =
+              (preview.skills && preview.skills.length > 0) ||
+              (preview.workflows && preview.workflows.length > 0) ||
+              (preview.extensions && preview.extensions.length > 0) ||
+              (preview.instructions && preview.instructions.length > 0);
+            if (named) {
+              return (
+                <div className="flex flex-col gap-2">
+                  <TrustNamedList title="Skills" items={preview.skills ?? []} />
+                  {preview.workflows && preview.workflows.length > 0 ? (
+                    <div>
+                      <p className="mb-1 text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
+                        Workflows ({preview.workflows.length})
+                      </p>
+                      <ul className="flex flex-col gap-0.5">
+                        {preview.workflows.map((w) => (
+                          <li key={w.name} className="text-[11px] leading-relaxed">
+                            <span className="font-semibold text-foreground">{w.name}</span>
+                            {w.roles.length > 0 ? (
+                              <span className="text-muted-foreground">
+                                {" "}
+                                — roles: {w.roles.join(", ")}
+                              </span>
+                            ) : null}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                  {preview.extensions && preview.extensions.length > 0 ? (
+                    <div>
+                      <p className="mb-1 text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
+                        Extensions ({preview.extensions.length})
+                      </p>
+                      <ul className="flex flex-col gap-0.5">
+                        {preview.extensions.map((e) => (
+                          <li key={e.name} className="text-[11px] leading-relaxed">
+                            <span className="font-semibold text-foreground">{e.name}</span>{" "}
+                            <code className="break-all font-mono text-muted-foreground/90">
+                              {e.target}
+                            </code>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                  <TrustNamedList title="Instructions" items={preview.instructions ?? []} />
+                </div>
+              );
+            }
+            // Fall back to the counts summary for older previews.
             const c = preview.counts;
             const extra = [
               c.skills ? `${c.skills} skill(s)` : null,
@@ -686,11 +828,11 @@ function TrustReviewPanel({
             <code className="font-mono">agentstack trust {preview.path}</code> in a terminal.
           </p>
 
-          {consentDigest === null && state !== "trusted" ? (
+          {!canGrant && state !== "trusted" ? (
             <p className="text-[11px] leading-relaxed text-warning">
-              This agentstack CLI predates consent-bound trust (its preview has no surface digest),
-              so granting from here is disabled. Update agentstack, or trust from a terminal where
-              the review itself is the consent.
+              {consentDigest === null
+                ? "This agentstack CLI predates consent-bound trust (its preview has no surface digest), so granting from here is disabled. Update agentstack, or trust from a terminal where the review itself is the consent."
+                : "This agentstack CLI doesn't support consent-bound trust from t3code. Update agentstack, or trust from a terminal where the review itself is the consent."}
             </p>
           ) : null}
 
@@ -724,7 +866,7 @@ function TrustReviewPanel({
             ) : (
               <button
                 type="button"
-                disabled={running || consentDigest === null}
+                disabled={running || !canGrant}
                 onClick={() => run("trust-grant")}
                 className="inline-flex h-7 items-center rounded-lg border border-success/40 bg-success/10 px-3 text-xs font-semibold text-success disabled:opacity-60"
               >
@@ -742,6 +884,28 @@ function TrustReviewPanel({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/** A simple named list in the trust surface (skills, instructions). */
+function TrustNamedList({ title, items }: { title: string; items: ReadonlyArray<string> }) {
+  if (items.length === 0) return null;
+  return (
+    <div>
+      <p className="mb-1 text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
+        {title} ({items.length})
+      </p>
+      <ul className="flex flex-wrap gap-1">
+        {items.map((name) => (
+          <li
+            key={name}
+            className="rounded bg-muted-foreground/10 px-1.5 py-0.5 font-mono text-[10.5px] text-muted-foreground"
+          >
+            {name}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -1044,6 +1208,11 @@ function DriftTarget({ target }: { target: AgentstackDiffTarget }) {
 function OverviewPanel({
   rows,
   doctorAvailable,
+  chip,
+  nextAction,
+  loadRestoreInventory,
+  onUndo,
+  canRestore,
   actionState,
   onRequestAction,
   onReviewDrift,
@@ -1052,6 +1221,11 @@ function OverviewPanel({
 }: {
   rows: AgentstackOverviewRow[];
   doctorAvailable: boolean;
+  chip: ReturnType<typeof deriveAgentstackStatusChip>;
+  nextAction: string | null;
+  loadRestoreInventory: () => Promise<AgentstackRestoreInventoryResult | null>;
+  onUndo: (restoreId: string) => Promise<{ ok: boolean; message: string }>;
+  canRestore: boolean;
   actionState: ActionState;
   onRequestAction: (a: ActionKind) => void;
   onReviewDrift: () => void;
@@ -1068,6 +1242,7 @@ function OverviewPanel({
   }
   return (
     <div className="flex flex-col p-1.5">
+      {chip ? <StatusSummary chip={chip} nextAction={nextAction} /> : null}
       {rows.map((row) => (
         <div key={row.key} className="flex items-center gap-2.5 rounded-lg px-2.5 py-[7px]">
           <span className={cn("size-1.5 shrink-0 rounded-full", LEVEL_DOT[row.level])} />
@@ -1102,6 +1277,447 @@ function OverviewPanel({
       {actionState.phase !== "idle" ? (
         <ActionConfirm state={actionState} onConfirm={onConfirm} onCancel={onCancel} />
       ) : null}
+      <UndoAffordance
+        loadInventory={loadRestoreInventory}
+        onUndo={onUndo}
+        canRestore={canRestore}
+      />
+    </div>
+  );
+}
+
+/**
+ * The status summary at the top of Overview: one chip derived from the doctor's
+ * `state`, plus the single recommended next step. "Protected" (ready + guard +
+ * machine policy) is the strongest posture — its title spells out that these
+ * are cooperative host protections, not a sandbox.
+ */
+function StatusSummary({
+  chip,
+  nextAction,
+}: {
+  chip: NonNullable<ReturnType<typeof deriveAgentstackStatusChip>>;
+  nextAction: string | null;
+}) {
+  return (
+    <div className="mx-1 mb-1.5 flex flex-col gap-1.5 rounded-lg border border-border/50 bg-foreground/[0.02] px-2.5 py-2">
+      <div className="flex items-center gap-2">
+        <span className={cn("size-1.5 shrink-0 rounded-full", LEVEL_DOT[chip.level])} aria-hidden />
+        <span
+          className="text-[12.5px] font-semibold text-foreground"
+          title={
+            chip.isProtected
+              ? "Ready, with the host guard and a machine policy in force — cooperative protections, not a sandbox."
+              : undefined
+          }
+        >
+          {chip.label}
+        </span>
+      </div>
+      {nextAction ? (
+        <div className="flex items-baseline gap-1.5">
+          <span className="shrink-0 text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
+            Next
+          </span>
+          <code className="min-w-0 break-all font-mono text-[11px] text-muted-foreground">
+            {nextAction}
+          </code>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+type UndoLoad =
+  | { phase: "idle" }
+  | { phase: "loading" }
+  | { phase: "empty" }
+  | {
+      phase: "ready";
+      entry: { id: string; summary: string; time_unix: number };
+    };
+
+type UndoAct =
+  | { phase: "idle" }
+  | { phase: "confirm" }
+  | { phase: "running" }
+  | { phase: "done"; ok: boolean; message: string };
+
+/** Compact relative age from unix seconds. */
+function undoAge(unixSeconds: number): string {
+  const secs = Math.max(0, Math.floor(Date.now() / 1000) - unixSeconds);
+  if (secs < 60) return "just now";
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+  if (secs < 86_400) return `${Math.floor(secs / 3600)}h ago`;
+  return `${Math.floor(secs / 86_400)}d ago`;
+}
+
+/**
+ * "Undo last change" — backed by the machine-global restore ledger. On demand
+ * it loads the inventory and picks the newest entry whose files live under THIS
+ * workspace and that hasn't been undone yet (never a blind `--last`), shows its
+ * summary and age, and undoes that specific entry by id behind a confirm step.
+ * Disabled with an upgrade hint when the CLI doesn't advertise the contract.
+ */
+function UndoAffordance({
+  loadInventory,
+  onUndo,
+  canRestore,
+}: {
+  loadInventory: () => Promise<AgentstackRestoreInventoryResult | null>;
+  onUndo: (restoreId: string) => Promise<{ ok: boolean; message: string }>;
+  canRestore: boolean;
+}) {
+  const [load, setLoad] = useState<UndoLoad>({ phase: "idle" });
+  const [act, setAct] = useState<UndoAct>({ phase: "idle" });
+
+  const reveal = useCallback(async () => {
+    setLoad({ phase: "loading" });
+    setAct({ phase: "idle" });
+    const result = await loadInventory();
+    const entry = result?.inventory ? selectAgentstackUndoEntry(result.inventory.entries) : null;
+    setLoad(
+      entry
+        ? {
+            phase: "ready",
+            entry: { id: entry.id, summary: entry.summary, time_unix: entry.time_unix },
+          }
+        : { phase: "empty" },
+    );
+  }, [loadInventory]);
+
+  const run = useCallback(async () => {
+    if (load.phase !== "ready") return;
+    setAct({ phase: "running" });
+    const r = await onUndo(load.entry.id);
+    setAct({ phase: "done", ok: r.ok, message: r.message });
+    // Re-pull so a repeat click reflects the entry now being undone.
+    await reveal();
+  }, [load, onUndo, reveal]);
+
+  if (!canRestore) {
+    return (
+      <div className="mx-1 mt-1.5 border-t border-border/40 px-1.5 pt-2">
+        <span className="text-[11px] text-muted-foreground/70" title="Update the agentstack CLI">
+          Undo isn't available on this agentstack CLI — update it to revert managed changes.
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mx-1 mt-1.5 flex flex-col gap-1.5 border-t border-border/40 px-1.5 pt-2">
+      {load.phase === "idle" ? (
+        <button
+          type="button"
+          onClick={() => void reveal()}
+          className="self-start text-[11px] font-semibold text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+        >
+          Undo last change…
+        </button>
+      ) : load.phase === "loading" ? (
+        <span className="text-[11px] text-muted-foreground">Checking recent changes…</span>
+      ) : load.phase === "empty" ? (
+        <span className="text-[11px] text-muted-foreground">
+          Nothing to undo — no recorded change touches this project.
+        </span>
+      ) : (
+        <>
+          <p className="text-[11px] leading-relaxed text-muted-foreground">
+            Undo <span className="font-semibold text-foreground">{load.entry.summary}</span>{" "}
+            <span className="text-muted-foreground/70">· {undoAge(load.entry.time_unix)}</span>
+          </p>
+          {act.phase === "confirm" || act.phase === "running" ? (
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                disabled={act.phase === "running"}
+                onClick={() => void run()}
+                className="inline-flex h-6 items-center rounded-md border border-warning/40 bg-warning/15 px-2.5 text-[11px] font-semibold text-warning disabled:opacity-60"
+              >
+                {act.phase === "running" ? "Undoing…" : "Undo this change"}
+              </button>
+              <button
+                type="button"
+                disabled={act.phase === "running"}
+                onClick={() => setAct({ phase: "idle" })}
+                className="inline-flex h-6 items-center rounded-md px-2 text-[11px] font-medium text-muted-foreground disabled:opacity-60"
+              >
+                Cancel
+              </button>
+            </div>
+          ) : act.phase === "done" ? (
+            <div
+              className={cn(
+                "rounded-md border px-2.5 py-1.5 text-[11px] leading-relaxed",
+                act.ok
+                  ? "border-success/30 bg-success/[0.06]"
+                  : "border-destructive/30 bg-destructive/[0.06]",
+              )}
+            >
+              <span className={cn("font-semibold", act.ok ? "text-success" : "text-destructive")}>
+                {act.ok ? "Undone" : "Couldn't undo"}
+              </span>
+              {" — "}
+              <span className="break-words font-mono text-muted-foreground">{act.message}</span>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setAct({ phase: "confirm" })}
+              className="self-start text-[11px] font-semibold text-warning underline-offset-2 hover:underline"
+            >
+              Undo this change
+            </button>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The capability-negotiation body: shown when a read reports a `schema_version`
+ * higher than this t3code build supports. Names both versions so the user knows
+ * which side to update; actions are unavailable in this state.
+ */
+function UpdateNeeded({
+  incompatible,
+  cliVersion,
+}: {
+  incompatible: { cliSchema: number; supported: number };
+  cliVersion: string | null;
+}) {
+  return (
+    <div className="flex flex-col gap-3 px-4 py-4 text-xs leading-relaxed text-muted-foreground">
+      <p className="text-[12.5px] font-semibold text-foreground">Update t3code to continue</p>
+      <p>
+        This project's <code className="font-mono">agentstack</code> CLI
+        {cliVersion ? (
+          <>
+            {" "}
+            (<span className="font-mono">{cliVersion.replace(/^agentstack\s*/, "v")}</span>)
+          </>
+        ) : null}{" "}
+        speaks a newer data format (schema {incompatible.cliSchema}) than this t3code build
+        understands (schema {incompatible.supported}). Update t3code to read this AgentStack CLI —
+        until then, the panel's actions are disabled to avoid acting on data it can't fully read.
+      </p>
+    </div>
+  );
+}
+
+type SetupLoad =
+  | { phase: "loading" }
+  | { phase: "loaded"; plan: AgentstackSetupPlan }
+  | { phase: "error" };
+
+type SetupAct =
+  | { phase: "idle" }
+  | { phase: "confirm" }
+  | { phase: "running" }
+  | { phase: "done"; ok: boolean; message: string };
+
+/**
+ * The first-run setup card, shown when the project has no manifest yet. It
+ * renders `init --plan` in plain language — the tools found, what would be
+ * imported, the file AgentStack will manage, and the secret names the user
+ * still provides — behind one "Set up this project" button. No trust/policy/
+ * digest vocabulary on the card itself (the digest lives in a Details
+ * disclosure); it presents the plan_digest back on apply so the CLI writes
+ * nothing if detection changed. Disabled with an upgrade note when the CLI's
+ * plan carries no digest.
+ */
+function SetupPanel({
+  loadPlan,
+  onApply,
+  canApply,
+}: {
+  loadPlan: () => Promise<AgentstackSetupPlanResult | null>;
+  onApply: (planDigest: string) => Promise<{ ok: boolean; message: string }>;
+  canApply: boolean;
+}) {
+  const [load, setLoad] = useState<SetupLoad>({ phase: "loading" });
+  const [act, setAct] = useState<SetupAct>({ phase: "idle" });
+
+  useEffect(() => {
+    let alive = true;
+    void loadPlan().then((result) => {
+      if (!alive) return;
+      setLoad(result?.plan ? { phase: "loaded", plan: result.plan } : { phase: "error" });
+    });
+    return () => {
+      alive = false;
+    };
+  }, [loadPlan]);
+
+  const plan = load.phase === "loaded" ? load.plan : null;
+  const planDigest = plan?.plan_digest ?? null;
+  // Setup can proceed only when the CLI advertises the contract AND the plan
+  // carried a digest to bind the apply to.
+  const canSetUp = canApply && planDigest !== null;
+
+  const run = async () => {
+    if (planDigest === null) return;
+    setAct({ phase: "running" });
+    const r = await onApply(planDigest);
+    setAct({ phase: "done", ok: r.ok, message: r.message });
+  };
+
+  if (load.phase === "loading") {
+    return <p className="px-4 py-4 text-xs text-muted-foreground">Preparing setup…</p>;
+  }
+  if (plan === null) {
+    return (
+      <p className="px-4 py-4 text-xs leading-relaxed text-muted-foreground">
+        Couldn't prepare a setup plan — <code className="font-mono">agentstack init --plan</code>{" "}
+        didn't return one for this project.
+      </p>
+    );
+  }
+
+  const settingsFrom = plan.settings_from ?? [];
+  return (
+    <div className="flex flex-col gap-3 px-4 py-3 text-xs">
+      <p className="text-[12.5px] leading-relaxed text-muted-foreground">
+        Set up AgentStack for this project — it unifies the tools you already have. Here's what it
+        will do:
+      </p>
+
+      <SetupGroup title="Coding tools found">
+        {plan.detected.length === 0 ? (
+          <span className="text-[11px] text-muted-foreground">none detected</span>
+        ) : (
+          <ul className="flex flex-wrap gap-1">
+            {plan.detected.map((d) => (
+              <li
+                key={d.id}
+                className="rounded bg-muted-foreground/10 px-1.5 py-0.5 text-[11px] text-foreground"
+              >
+                {d.display}
+              </li>
+            ))}
+          </ul>
+        )}
+      </SetupGroup>
+
+      <SetupGroup title="What will be imported">
+        {plan.servers.length === 0 && settingsFrom.length === 0 && plan.conflicts.length === 0 ? (
+          <span className="text-[11px] text-muted-foreground">nothing to import</span>
+        ) : (
+          <ul className="flex flex-col gap-1 text-[11px] leading-relaxed">
+            {plan.servers.map((s) => (
+              <li key={s.name}>
+                <span className="font-semibold text-foreground">{s.name}</span>{" "}
+                <span className="text-muted-foreground">
+                  {s.kind === "stdio" ? "runs" : "contacts"}
+                </span>{" "}
+                <code className="break-all font-mono text-muted-foreground/90">{s.target}</code>
+              </li>
+            ))}
+            {settingsFrom.length > 0 ? (
+              <li className="text-muted-foreground">Settings from {settingsFrom.join(", ")}</li>
+            ) : null}
+            {plan.conflicts.map((c) => (
+              <li key={c.name} className="text-warning">
+                {c.name} is defined by {c.other_definitions + 1} tools — one will be used
+              </li>
+            ))}
+          </ul>
+        )}
+      </SetupGroup>
+
+      <SetupGroup title="Files AgentStack will manage">
+        <code className="block break-all font-mono text-[11px] text-muted-foreground/90">
+          {plan.manifest_path}
+        </code>
+      </SetupGroup>
+
+      {plan.secrets.length > 0 ? (
+        <SetupGroup title="Values you'll still provide">
+          <ul className="flex flex-col gap-0.5 text-[11px] leading-relaxed text-muted-foreground">
+            {plan.secrets.map((s) => (
+              <li key={s.reference}>
+                <code className="font-mono text-foreground">{s.reference}</code>{" "}
+                <span className="text-muted-foreground/70">— {s.origin}</span>
+              </li>
+            ))}
+          </ul>
+        </SetupGroup>
+      ) : null}
+
+      {!canSetUp ? (
+        <p className="text-[11px] leading-relaxed text-warning">
+          {canApply
+            ? "This agentstack CLI's plan has no digest to confirm against, so setup from here is disabled. Update agentstack, or run agentstack init in a terminal."
+            : "This agentstack CLI doesn't support one-click setup. Update agentstack, or run agentstack init in a terminal."}
+        </p>
+      ) : null}
+
+      {act.phase === "done" ? (
+        <div
+          className={cn(
+            "rounded-lg border px-3 py-2 text-[11px] leading-relaxed",
+            act.ok
+              ? "border-success/30 bg-success/[0.06]"
+              : "border-destructive/30 bg-destructive/[0.06]",
+          )}
+        >
+          <span className={cn("font-semibold", act.ok ? "text-success" : "text-destructive")}>
+            {act.ok ? "Set up" : "Couldn't set up"}
+          </span>
+          {" — "}
+          <span className="break-words font-mono text-muted-foreground">{act.message}</span>
+        </div>
+      ) : act.phase === "confirm" || act.phase === "running" ? (
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            disabled={act.phase === "running"}
+            onClick={() => void run()}
+            className="inline-flex h-7 items-center rounded-lg border border-success/40 bg-success/10 px-3 text-xs font-semibold text-success disabled:opacity-60"
+          >
+            {act.phase === "running" ? "Setting up…" : "Confirm setup"}
+          </button>
+          <button
+            type="button"
+            disabled={act.phase === "running"}
+            onClick={() => setAct({ phase: "idle" })}
+            className="inline-flex h-7 items-center rounded-lg px-2.5 text-xs font-medium text-muted-foreground disabled:opacity-60"
+          >
+            Cancel
+          </button>
+        </div>
+      ) : (
+        <button
+          type="button"
+          disabled={!canSetUp}
+          onClick={() => setAct({ phase: "confirm" })}
+          className="inline-flex h-8 items-center self-start rounded-lg border border-success/40 bg-success/10 px-3.5 text-xs font-semibold text-success disabled:opacity-60"
+        >
+          Set up this project
+        </button>
+      )}
+
+      {planDigest ? (
+        <details className="text-[10.5px] text-muted-foreground/60">
+          <summary className="cursor-pointer select-none">Details</summary>
+          <code className="mt-1 block break-all font-mono">
+            plan {shortDigest(planDigest) ?? planDigest}
+          </code>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
+function SetupGroup({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <div className="flex flex-col gap-1">
+      <p className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
+        {title}
+      </p>
+      {children}
     </div>
   );
 }
