@@ -19,6 +19,14 @@ import { agentstackEnvironment } from "~/state/agentstack";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { cn } from "~/lib/utils";
 import { Button } from "../ui/button";
+import {
+  Dialog,
+  DialogFooter,
+  DialogHeader,
+  DialogPanel,
+  DialogPopup,
+  DialogTitle,
+} from "../ui/dialog";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { AgentstackMark } from "./AgentstackMark";
 import {
@@ -147,10 +155,20 @@ export function AgentstackControl({
   const [actionState, setActionState] = useState<ActionState>({ phase: "idle" });
   const [reviewing, setReviewing] = useState(false);
   const [reviewingDrift, setReviewingDrift] = useState(false);
+  // The 1c expanded monitor: which run it shows, and (for recorded runs) the
+  // evidence fetched for it. A live target reads the polled activeRun instead.
+  const [monitorTarget, setMonitorTarget] = useState<{
+    runId: string;
+    summary: AgentstackWorkflowRunSummary | null;
+  } | null>(null);
+  const [monitorFetched, setMonitorFetched] = useState<AgentstackWorkflowRun | null>(null);
 
   const fetchStatus = useAtomCommand(agentstackEnvironment.status, { reportFailure: false });
   const fetchActivity = useAtomCommand(agentstackEnvironment.activity, { reportFailure: false });
   const fetchWorkflow = useAtomCommand(agentstackEnvironment.workflow, { reportFailure: false });
+  const fetchWorkflowRun = useAtomCommand(agentstackEnvironment.workflowRun, {
+    reportFailure: false,
+  });
   const fetchTrustPreview = useAtomCommand(agentstackEnvironment.trustPreview, {
     reportFailure: false,
   });
@@ -179,11 +197,13 @@ export function AgentstackControl({
   }, [environmentId, fetchStatus, fetchActivity, fetchWorkflow, input]);
 
   useEffect(() => {
-    if (!open) return;
+    // The monitor dialog keeps polling alive after the popover closes, so a
+    // live run's step tree stays current while it's being watched.
+    if (!open && monitorTarget === null) return;
     void refresh();
     const timer = setInterval(() => void refresh(), REFRESH_MS);
     return () => clearInterval(timer);
-  }, [open, refresh]);
+  }, [open, monitorTarget, refresh]);
 
   // React to "open me on tab X" requests from elsewhere (e.g. a guard-denial
   // card's "View in audit log"). The nonce makes repeat requests re-fire.
@@ -254,6 +274,29 @@ export function AgentstackControl({
   const activeRun =
     workflow?.activeRun && workflow.activeRun.outcome === "running" ? workflow.activeRun : null;
 
+  // A live target streams from the polled activeRun; a recorded one is
+  // fetched once from its evidence log (and re-fetched when a watched live
+  // run finishes, to pick up the terminal outcome).
+  const monitorIsLive = monitorTarget !== null && activeRun?.run === monitorTarget.runId;
+  useEffect(() => {
+    if (monitorTarget === null) {
+      setMonitorFetched(null);
+      return;
+    }
+    if (monitorIsLive) return;
+    let cancelled = false;
+    void fetchWorkflowRun({
+      environmentId,
+      input: { ...input, runId: monitorTarget.runId },
+    }).then((result) => {
+      if (!cancelled && result._tag === "Success") setMonitorFetched(result.value);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [monitorTarget, monitorIsLive, fetchWorkflowRun, environmentId, input]);
+  const monitorRun = monitorTarget === null ? null : monitorIsLive ? activeRun : monitorFetched;
+
   const trust = status?.doctor ? deriveAgentstackTrustBadge(status.doctor) : null;
   const trustBadge = trust ? TRUST_BADGE[trust.state] : null;
 
@@ -283,150 +326,167 @@ export function AgentstackControl({
   const anyAttention = overviewRows.some((r) => r.level === "warn" || r.level === "error");
 
   return (
-    <Popover
-      onOpenChange={(next) => {
-        setOpen(next);
-        if (!next) {
-          setActionState({ phase: "idle" });
-          setReviewing(false);
-          setReviewingDrift(false);
-        }
-      }}
-      open={open}
-    >
-      <PopoverTrigger render={<Button aria-label="AgentStack" size="xs" variant="outline" />}>
-        <AgentstackMark className="size-3.5" />
-        {activeRun ? (
-          <span aria-hidden className="-mr-0.5 size-1.5 rounded-full bg-warning animate-pulse" />
-        ) : anyAttention ? (
-          <span aria-hidden className="-mr-0.5 size-1.5 rounded-full bg-warning" />
-        ) : null}
-      </PopoverTrigger>
-      <PopoverPopup align="end" className="w-[400px] p-0" side="bottom">
-        {/* Header */}
-        <div className="flex items-center gap-2 px-4 pb-2.5 pt-3.5">
-          <AgentstackMark className="size-[22px]" />
-          <span className="font-semibold text-sm text-foreground">AgentStack</span>
-          {status?.version ? (
-            <span className="text-[11px] text-muted-foreground">
-              {status.version.replace(/^agentstack\s*/, "v")}
-            </span>
+    <>
+      <Popover
+        onOpenChange={(next) => {
+          setOpen(next);
+          if (!next) {
+            setActionState({ phase: "idle" });
+            setReviewing(false);
+            setReviewingDrift(false);
+          }
+        }}
+        open={open}
+      >
+        <PopoverTrigger render={<Button aria-label="AgentStack" size="xs" variant="outline" />}>
+          <AgentstackMark className="size-3.5" />
+          {activeRun ? (
+            <span aria-hidden className="-mr-0.5 size-1.5 rounded-full bg-warning animate-pulse" />
+          ) : anyAttention ? (
+            <span aria-hidden className="-mr-0.5 size-1.5 rounded-full bg-warning" />
           ) : null}
-          {trust && trustBadge ? (
+        </PopoverTrigger>
+        <PopoverPopup align="end" className="w-[400px] p-0" side="bottom">
+          {/* Header */}
+          <div className="flex items-center gap-2 px-4 pb-2.5 pt-3.5">
+            <AgentstackMark className="size-[22px]" />
+            <span className="font-semibold text-sm text-foreground">AgentStack</span>
+            {status?.version ? (
+              <span className="text-[11px] text-muted-foreground">
+                {status.version.replace(/^agentstack\s*/, "v")}
+              </span>
+            ) : null}
+            {trust && trustBadge ? (
+              <button
+                type="button"
+                onClick={() => setReviewing(true)}
+                title="Review this repo's trust surface"
+                className={cn(
+                  "ml-auto inline-flex h-5 items-center gap-1.5 rounded-md px-2 text-[11px] font-semibold transition-opacity hover:opacity-80",
+                  trustBadge.text,
+                  trustBadge.bg,
+                )}
+              >
+                <span className={cn("size-[5px] rounded-full", trustBadge.dot)} />
+                {trust.label}
+              </button>
+            ) : null}
+          </div>
+
+          {/* Live workflow strip */}
+          {activeRun ? (
             <button
               type="button"
-              onClick={() => setReviewing(true)}
-              title="Review this repo's trust surface"
-              className={cn(
-                "ml-auto inline-flex h-5 items-center gap-1.5 rounded-md px-2 text-[11px] font-semibold transition-opacity hover:opacity-80",
-                trustBadge.text,
-                trustBadge.bg,
-              )}
+              onClick={() =>
+                setMonitorTarget({
+                  runId: activeRun.run,
+                  // The history row for the live run carries its start time —
+                  // that's what makes the dialog's elapsed clock honest.
+                  summary: workflow?.runs?.find((r) => r.run === activeRun.run) ?? null,
+                })
+              }
+              className="mx-3 mb-2.5 flex w-[calc(100%-1.5rem)] items-center gap-2 rounded-lg border border-warning/25 bg-warning/[0.07] px-2.5 py-2 text-left"
             >
-              <span className={cn("size-[5px] rounded-full", trustBadge.dot)} />
-              {trust.label}
+              <span className="size-[7px] shrink-0 rounded-full bg-warning animate-pulse" />
+              <span className="text-xs text-foreground">
+                <span className="font-semibold">{activeRun.workflow}</span> running ·{" "}
+                {deriveWorkflowCounts(activeRun.steps).running} active
+              </span>
+              <span className="ml-auto text-xs font-medium text-warning">View agents →</span>
             </button>
           ) : null}
-        </div>
 
-        {/* Live workflow strip */}
-        {activeRun ? (
-          <button
-            type="button"
-            onClick={() => setTab("workflow")}
-            className="mx-3 mb-2.5 flex w-[calc(100%-1.5rem)] items-center gap-2 rounded-lg border border-warning/25 bg-warning/[0.07] px-2.5 py-2 text-left"
-          >
-            <span className="size-[7px] shrink-0 rounded-full bg-warning animate-pulse" />
-            <span className="text-xs text-foreground">
-              <span className="font-semibold">{activeRun.workflow}</span> running ·{" "}
-              {deriveWorkflowCounts(activeRun.steps).running} active
+          {reviewing ? (
+            <TrustReviewPanel
+              loadPreview={loadPreview}
+              onTrust={onTrust}
+              onClose={() => setReviewing(false)}
+            />
+          ) : reviewingDrift ? (
+            <DriftReviewPanel
+              loadDiff={loadDiff}
+              onAction={runDriftAction}
+              onClose={() => setReviewingDrift(false)}
+            />
+          ) : (
+            <>
+              {/* Tabs */}
+              <div
+                role="tablist"
+                aria-label="AgentStack panel"
+                className="flex items-center gap-1 border-b border-border/60 px-3 pb-2.5"
+              >
+                {(["overview", "workflow", "activity", "policy"] as const).map((t) => (
+                  <button
+                    key={t}
+                    type="button"
+                    role="tab"
+                    aria-selected={tab === t}
+                    onClick={() => setTab(t)}
+                    className={cn(
+                      "flex h-6 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium capitalize transition-colors",
+                      tab === t
+                        ? "bg-accent font-semibold text-foreground"
+                        : "text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {t}
+                    {t === "workflow" && activeRun ? (
+                      <span className="size-[5px] rounded-full bg-warning animate-pulse" />
+                    ) : null}
+                  </button>
+                ))}
+              </div>
+
+              {/* Body */}
+              <div className="max-h-[420px] overflow-y-auto">
+                {unreachable ? (
+                  <p className="px-4 py-4 text-xs text-muted-foreground">
+                    Couldn't check status — the t3code server didn't answer.
+                  </p>
+                ) : status === null ? (
+                  <p className="px-4 py-4 text-xs text-muted-foreground">Checking…</p>
+                ) : !status.installed ? (
+                  <NotInstalled />
+                ) : tab === "overview" ? (
+                  <OverviewPanel
+                    rows={overviewRows}
+                    doctorAvailable={status.doctor !== null}
+                    actionState={actionState}
+                    onRequestAction={(a) => setActionState({ phase: "confirm", action: a })}
+                    onReviewDrift={() => setReviewingDrift(true)}
+                    onConfirm={onAction}
+                    onCancel={() => setActionState({ phase: "idle" })}
+                  />
+                ) : tab === "workflow" ? (
+                  <WorkflowPanel
+                    data={workflow}
+                    onOpenRun={(r) => setMonitorTarget({ runId: r.run, summary: r })}
+                  />
+                ) : tab === "activity" ? (
+                  <ActivityPanel activity={activity} />
+                ) : (
+                  <PolicyPanel doctor={status.doctor} />
+                )}
+              </div>
+            </>
+          )}
+
+          {/* Footer */}
+          <div className="flex items-center gap-2 border-t border-border/60 bg-foreground/[0.02] px-4 py-2.5">
+            <code className="font-mono text-[11px] text-muted-foreground">agentstack doctor</code>
+            <span className="text-[11px] text-muted-foreground/70">
+              — every warning names its fix
             </span>
-            <span className="ml-auto text-xs font-medium text-warning">View agents →</span>
-          </button>
-        ) : null}
-
-        {reviewing ? (
-          <TrustReviewPanel
-            loadPreview={loadPreview}
-            onTrust={onTrust}
-            onClose={() => setReviewing(false)}
-          />
-        ) : reviewingDrift ? (
-          <DriftReviewPanel
-            loadDiff={loadDiff}
-            onAction={runDriftAction}
-            onClose={() => setReviewingDrift(false)}
-          />
-        ) : (
-          <>
-            {/* Tabs */}
-            <div
-              role="tablist"
-              aria-label="AgentStack panel"
-              className="flex items-center gap-1 border-b border-border/60 px-3 pb-2.5"
-            >
-              {(["overview", "workflow", "activity", "policy"] as const).map((t) => (
-                <button
-                  key={t}
-                  type="button"
-                  role="tab"
-                  aria-selected={tab === t}
-                  onClick={() => setTab(t)}
-                  className={cn(
-                    "flex h-6 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium capitalize transition-colors",
-                    tab === t
-                      ? "bg-accent font-semibold text-foreground"
-                      : "text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  {t}
-                  {t === "workflow" && activeRun ? (
-                    <span className="size-[5px] rounded-full bg-warning animate-pulse" />
-                  ) : null}
-                </button>
-              ))}
-            </div>
-
-            {/* Body */}
-            <div className="max-h-[420px] overflow-y-auto">
-              {unreachable ? (
-                <p className="px-4 py-4 text-xs text-muted-foreground">
-                  Couldn't check status — the t3code server didn't answer.
-                </p>
-              ) : status === null ? (
-                <p className="px-4 py-4 text-xs text-muted-foreground">Checking…</p>
-              ) : !status.installed ? (
-                <NotInstalled />
-              ) : tab === "overview" ? (
-                <OverviewPanel
-                  rows={overviewRows}
-                  doctorAvailable={status.doctor !== null}
-                  actionState={actionState}
-                  onRequestAction={(a) => setActionState({ phase: "confirm", action: a })}
-                  onReviewDrift={() => setReviewingDrift(true)}
-                  onConfirm={onAction}
-                  onCancel={() => setActionState({ phase: "idle" })}
-                />
-              ) : tab === "workflow" ? (
-                <WorkflowPanel data={workflow} />
-              ) : tab === "activity" ? (
-                <ActivityPanel activity={activity} />
-              ) : (
-                <PolicyPanel doctor={status.doctor} />
-              )}
-            </div>
-          </>
-        )}
-
-        {/* Footer */}
-        <div className="flex items-center gap-2 border-t border-border/60 bg-foreground/[0.02] px-4 py-2.5">
-          <code className="font-mono text-[11px] text-muted-foreground">agentstack doctor</code>
-          <span className="text-[11px] text-muted-foreground/70">
-            — every warning names its fix
-          </span>
-        </div>
-      </PopoverPopup>
-    </Popover>
+          </div>
+        </PopoverPopup>
+      </Popover>
+      <WorkflowMonitorDialog
+        target={monitorTarget}
+        run={monitorRun}
+        onClose={() => setMonitorTarget(null)}
+      />
+    </>
   );
 }
 
@@ -1110,7 +1170,13 @@ function ActionConfirm({
   );
 }
 
-function WorkflowPanel({ data }: { data: AgentstackWorkflowData | null }) {
+function WorkflowPanel({
+  data,
+  onOpenRun,
+}: {
+  data: AgentstackWorkflowData | null;
+  onOpenRun: (run: AgentstackWorkflowRunSummary) => void;
+}) {
   if (data === null) {
     return <p className="px-4 py-4 text-xs text-muted-foreground">Checking workflows…</p>;
   }
@@ -1121,7 +1187,7 @@ function WorkflowPanel({ data }: { data: AgentstackWorkflowData | null }) {
     return (
       <div className="flex flex-col">
         <WorkflowMonitor run={data.activeRun} />
-        <WorkflowRunHistory runs={history} />
+        <WorkflowRunHistory runs={history} onOpenRun={onOpenRun} />
       </div>
     );
   }
@@ -1132,7 +1198,7 @@ function WorkflowPanel({ data }: { data: AgentstackWorkflowData | null }) {
           No workflows declared. A <code className="font-mono">[workflows.*]</code> entry in the
           manifest defines a governed, pinned workflow — each step a locked run.
         </p>
-        <WorkflowRunHistory runs={history} />
+        <WorkflowRunHistory runs={history} onOpenRun={onOpenRun} />
       </div>
     );
   }
@@ -1174,7 +1240,7 @@ function WorkflowPanel({ data }: { data: AgentstackWorkflowData | null }) {
           </div>
         ))}
       </div>
-      <WorkflowRunHistory runs={history} />
+      <WorkflowRunHistory runs={history} onOpenRun={onOpenRun} />
     </div>
   );
 }
@@ -1185,22 +1251,41 @@ function WorkflowPanel({ data }: { data: AgentstackWorkflowData | null }) {
  * "did my run work?" after the fact; `interrupted` rows are resumable via
  * `workflow run <name> --resume <id>`.
  */
-function WorkflowRunHistory({ runs }: { runs: ReadonlyArray<AgentstackWorkflowRunSummary> }) {
+function WorkflowRunHistory({
+  runs,
+  onOpenRun,
+}: {
+  runs: ReadonlyArray<AgentstackWorkflowRunSummary>;
+  onOpenRun: (run: AgentstackWorkflowRunSummary) => void;
+}) {
   if (runs.length === 0) return null;
+  // The popover is a glance surface: show the newest few, point at the CLI
+  // for the rest (the dialog and `workflow runs` carry the full history).
+  const shown = runs.slice(0, 6);
+  const older = runs.length - shown.length;
   return (
-    <div className="flex flex-col gap-1 p-2 pt-0">
+    <div className="flex flex-col p-2 pt-0">
       <div className="flex items-center gap-2 px-1 py-1.5">
         <span className="text-[11px] font-bold tracking-wide text-muted-foreground">
           Recent runs
         </span>
         <span className="h-px flex-1 bg-border/60" />
       </div>
-      {runs.map((r) => {
+      {shown.map((r) => {
         const dur = fmtDuration(r.duration_ms);
+        // Calm when fine: a completed run is just a green dot. Badges are
+        // reserved for the states that ask something of the user.
+        const badge = r.resumable
+          ? { label: "resumable", className: "bg-warning/10 text-warning" }
+          : r.outcome === "failed"
+            ? { label: "failed", className: "bg-destructive/10 text-destructive" }
+            : null;
         return (
-          <div
+          <button
             key={r.run}
-            className="flex items-center gap-2.5 rounded-lg border border-border/50 bg-foreground/[0.02] px-2.5 py-2"
+            type="button"
+            onClick={() => onOpenRun(r)}
+            className="flex items-center gap-2.5 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-foreground/[0.04]"
           >
             <span
               className={cn(
@@ -1208,35 +1293,274 @@ function WorkflowRunHistory({ runs }: { runs: ReadonlyArray<AgentstackWorkflowRu
                 STEP_DOT[r.outcome] ?? "bg-muted-foreground/50",
               )}
             />
-            <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-              <span className="truncate text-xs font-semibold text-foreground">{r.workflow}</span>
-              <span className="truncate font-mono text-[10px] text-muted-foreground">{r.run}</span>
+            <div className="flex min-w-0 flex-1 items-baseline gap-2">
+              <span className="truncate text-xs font-medium text-foreground">{r.workflow}</span>
+              <span className="shrink-0 font-mono text-[10px] text-muted-foreground/70">
+                {r.run}
+              </span>
             </div>
-            <span className="shrink-0 text-[11px] text-muted-foreground">
-              {fmtAgo(r.started_unix)} ago{dur ? ` · ${dur}` : ""} · {r.steps} step
-              {r.steps === 1 ? "" : "s"}
+            <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+              {fmtAgo(r.started_unix)}
+              {dur ? ` · ${dur}` : ""} · {r.steps} step{r.steps === 1 ? "" : "s"}
             </span>
-            <span
-              className={cn(
-                "inline-flex h-[18px] shrink-0 items-center rounded px-1.5 text-[10px] font-semibold",
-                r.outcome === "completed"
-                  ? "bg-success/10 text-success"
-                  : r.outcome === "failed"
-                    ? "bg-destructive/10 text-destructive"
-                    : "bg-warning/10 text-warning",
-              )}
-            >
-              {r.outcome}
-            </span>
-            {r.resumable ? (
-              <span className="inline-flex h-[18px] shrink-0 items-center rounded bg-warning/10 px-1.5 text-[10px] font-semibold text-warning">
-                resumable
+            {badge ? (
+              <span
+                className={cn(
+                  "inline-flex h-[17px] shrink-0 items-center rounded px-1.5 text-[10px] font-semibold",
+                  badge.className,
+                )}
+              >
+                {badge.label}
               </span>
             ) : null}
-          </div>
+          </button>
         );
       })}
+      {older > 0 ? (
+        <span className="px-2 pt-1 text-[10px] text-muted-foreground/60">
+          {older} older run{older === 1 ? "" : "s"} ·{" "}
+          <code className="font-mono">agentstack workflow runs</code>
+        </span>
+      ) : null}
     </div>
+  );
+}
+
+/**
+ * The expanded workflow monitor (design frame 1c, right pane) as a large
+ * dialog: the full stage/agent tree for one run. A live run streams from the
+ * popover's polling; a recorded run renders its evidence as fetched — same
+ * join, never reconstructed. Opened from the live strip's "View agents →"
+ * and from Recent-runs rows.
+ */
+function WorkflowMonitorDialog({
+  target,
+  run,
+  onClose,
+}: {
+  target: { runId: string; summary: AgentstackWorkflowRunSummary | null } | null;
+  run: AgentstackWorkflowRun | null;
+  onClose: () => void;
+}) {
+  if (target === null) return null;
+  const summary = target.summary;
+  const outcome = run?.outcome ?? summary?.outcome ?? "running";
+  const live = outcome === "running";
+  const pinned = shortDigest(run?.workflow_digest ?? undefined);
+  const dur = fmtDuration(run?.duration_ms ?? summary?.duration_ms);
+  const counts = run ? deriveWorkflowCounts(run.steps) : null;
+  const stages = run ? deriveWorkflowStages(run.steps).stages : [];
+  const steps = run?.steps ?? [];
+  const stepName = new Map(steps.map((s) => [s.step, s.label ?? `step ${s.step}`]));
+  const totalToolCalls = steps.reduce((n, s) => n + (s.tool_calls ?? 0), 0);
+  const elapsed =
+    live && summary !== null
+      ? fmtDuration((Math.floor(Date.now() / 1000) - summary.started_unix) * 1000)
+      : null;
+  // Density rule (design 2b): cards read well up to a dozen steps; a bigger
+  // fan-out renders as one-line rows so the whole run stays scannable.
+  const dense = steps.length > 12;
+  return (
+    <Dialog
+      open
+      onOpenChange={(next) => {
+        if (!next) onClose();
+      }}
+    >
+      <DialogPopup className="max-w-3xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2.5 pr-8">
+            <span
+              className={cn(
+                "size-[7px] shrink-0 rounded-full",
+                STEP_DOT[outcome] ?? "bg-muted-foreground/50",
+              )}
+            />
+            <span className="truncate">{run?.workflow ?? summary?.workflow ?? target.runId}</span>
+            <span className="ml-auto shrink-0 text-xs font-normal tabular-nums text-muted-foreground">
+              {live
+                ? `live${elapsed ? ` · ${elapsed}` : ""}`
+                : dur
+                  ? `${outcome} · ${dur}`
+                  : outcome}
+            </span>
+          </DialogTitle>
+          <div className="flex items-center gap-2 pt-1">
+            {pinned ? (
+              <code className="font-mono text-[10px] text-muted-foreground">pinned {pinned}</code>
+            ) : null}
+            <span className="inline-flex h-[17px] items-center rounded bg-success/10 px-1.5 text-[10px] font-semibold text-success">
+              every step: locked run
+            </span>
+            {run ? (
+              <span className="ml-auto text-[10px] tabular-nums text-muted-foreground/70">
+                agents {steps.length}/{run.max_agents}
+                {totalToolCalls ? ` · ${totalToolCalls} tool calls` : ""}
+              </span>
+            ) : (
+              <code className="ml-auto font-mono text-[10px] text-muted-foreground/70">
+                {target.runId}
+              </code>
+            )}
+          </div>
+        </DialogHeader>
+        {run === null ? (
+          <DialogPanel>
+            <p className="py-4 text-xs text-muted-foreground">Reading run evidence…</p>
+          </DialogPanel>
+        ) : (
+          <DialogPanel className="flex flex-col gap-1">
+            {/* The coordinator (design 2a): the envelope process itself —
+                brokered spawns only, no role, no code access. */}
+            <div className="mb-1 flex items-center gap-2 rounded-lg bg-foreground/[0.03] px-2.5 py-1.5">
+              <span
+                className={cn(
+                  "size-1.5 shrink-0 rounded-full",
+                  live ? "bg-warning animate-pulse" : "bg-muted-foreground/50",
+                )}
+              />
+              <span className="shrink-0 text-[11px] font-semibold text-foreground">
+                orchestrator
+              </span>
+              <code className="shrink-0 font-mono text-[10px] text-muted-foreground">
+                {target.runId}
+              </code>
+              <span className="truncate text-[11px] text-muted-foreground">
+                schedules &amp; gates every spawn · touches no code
+              </span>
+              <span className="ml-auto inline-flex h-4 shrink-0 items-center rounded bg-foreground/[0.06] px-1.5 text-[10px] font-semibold text-muted-foreground">
+                role: none
+              </span>
+            </div>
+            {stages.map((stage) => {
+              const done = stage.steps.filter((s) => s.state === "completed").length;
+              return (
+                <div key={stage.key}>
+                  <div className="flex items-center gap-2 py-1.5">
+                    <span className="text-[11px] font-bold tracking-wide text-muted-foreground">
+                      {stage.title}
+                    </span>
+                    <span className="text-[10.5px] tabular-nums text-muted-foreground/70">
+                      {done}/{stage.steps.length} done
+                    </span>
+                    <span className="h-px flex-1 bg-border/60" />
+                  </div>
+                  <div
+                    className={cn(
+                      "ml-1 border-l-2 pl-3",
+                      live ? "border-warning/25" : "border-border/60",
+                      dense ? "flex flex-col" : "grid grid-cols-2 gap-1.5",
+                    )}
+                  >
+                    {stage.steps.map((s) => {
+                      const stepDur = fmtDuration(s.duration_ms);
+                      const inputs =
+                        s.taint && s.taint.length > 0
+                          ? s.taint.map((t) => stepName.get(t) ?? `step ${t}`).join(" · ")
+                          : null;
+                      if (dense) {
+                        return (
+                          <div
+                            key={s.step}
+                            className="flex items-center gap-2 rounded px-1.5 py-1 transition-colors hover:bg-foreground/[0.03]"
+                          >
+                            <span
+                              className={cn(
+                                "size-1.5 shrink-0 rounded-full",
+                                STEP_DOT[s.state] ?? "bg-muted-foreground/50",
+                              )}
+                            />
+                            <span className="w-36 truncate text-xs font-medium text-foreground">
+                              {s.label ?? `step ${s.step}`}
+                            </span>
+                            <span className="min-w-0 flex-1 truncate text-[10.5px] text-muted-foreground">
+                              {s.state}
+                              {stepDur ? ` · ${stepDur}` : ""}
+                              {s.tool_calls ? ` · ${s.tool_calls} tool calls` : ""}
+                              {s.child_run_id ? ` · ${s.child_run_id}` : ""}
+                            </span>
+                            {inputs ? (
+                              <span className="max-w-44 shrink-0 truncate text-[10px] text-warning/90">
+                                ⇠ {inputs}
+                              </span>
+                            ) : null}
+                            <span className="inline-flex h-4 shrink-0 items-center rounded bg-warning/10 px-1.5 text-[10px] font-semibold text-warning">
+                              {s.role}
+                            </span>
+                          </div>
+                        );
+                      }
+                      return (
+                        <div
+                          key={s.step}
+                          className="flex items-center gap-2.5 rounded-lg border border-border/50 bg-foreground/[0.02] px-2.5 py-2"
+                        >
+                          <span
+                            className={cn(
+                              "size-1.5 shrink-0 rounded-full",
+                              STEP_DOT[s.state] ?? "bg-muted-foreground/50",
+                            )}
+                          />
+                          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                            <span className="truncate text-xs font-semibold text-foreground">
+                              {s.label ?? `step ${s.step}`}
+                            </span>
+                            <span className="truncate text-[10.5px] text-muted-foreground">
+                              {s.state}
+                              {stepDur ? ` · ${stepDur}` : ""}
+                              {s.tool_calls ? ` · ${s.tool_calls} tool calls` : ""}
+                              {s.child_run_id ? ` · ${s.child_run_id}` : ""}
+                            </span>
+                            {inputs ? (
+                              <span className="truncate text-[10px] text-warning/90">
+                                ⇠ {inputs}
+                              </span>
+                            ) : null}
+                          </div>
+                          <span className="inline-flex h-4 shrink-0 items-center rounded bg-warning/10 px-1.5 text-[10px] font-semibold text-warning">
+                            {s.role}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+            {summary?.resumable ? (
+              <div className="mt-1 flex flex-col gap-1 rounded-lg border border-warning/25 bg-warning/[0.07] px-2.5 py-2">
+                <span className="text-[11px] font-semibold text-warning">Resumable</span>
+                <span className="text-[11px] text-muted-foreground">
+                  No terminal outcome was recorded. Journaled steps replay without re-executing:
+                </span>
+                <code className="font-mono text-[10.5px] text-foreground">
+                  agentstack workflow run {run.workflow} --resume {run.run}
+                </code>
+              </div>
+            ) : null}
+          </DialogPanel>
+        )}
+        <DialogFooter className="items-center gap-3 text-[11px] sm:justify-start">
+          {counts ? (
+            <span className="text-muted-foreground">
+              <span className="font-semibold text-success">{counts.done} done</span>
+              {counts.running > 0 ? (
+                <>
+                  {" · "}
+                  <span className="font-semibold text-warning">{counts.running} running</span>
+                </>
+              ) : null}
+            </span>
+          ) : null}
+          {run?.exhausted ? (
+            <span className="font-semibold text-warning">agent ceiling exhausted</span>
+          ) : null}
+          <span className="ml-auto text-muted-foreground/70">
+            roles can only narrow · ceilings frozen at spawn
+          </span>
+        </DialogFooter>
+      </DialogPopup>
+    </Dialog>
   );
 }
 
@@ -1285,8 +1609,8 @@ function WorkflowMonitor({ run }: { run: AgentstackWorkflowRun }) {
                       </span>
                       <span className="truncate text-[10.5px] text-muted-foreground">
                         {s.state}
-                        {s.tool_calls != null ? ` · ${s.tool_calls} tool calls` : ""}
                         {dur ? ` · ${dur}` : ""}
+                        {s.tool_calls ? ` · ${s.tool_calls} tool calls` : ""}
                       </span>
                     </div>
                     <span className="inline-flex h-4 shrink-0 items-center rounded bg-warning/10 px-1.5 text-[10px] font-semibold text-warning">

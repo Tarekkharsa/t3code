@@ -51,6 +51,19 @@ export interface AgentstackWorkspaceRequest {
   readonly workspaceRoot: string;
 }
 
+/** One recorded workflow run's evidence tree, by envelope run id. */
+export interface AgentstackWorkflowRunRequest {
+  readonly workspaceRoot: string;
+  readonly runId: string;
+}
+
+/**
+ * The only client-influenced value that ever reaches the CLI's argv. The CLI
+ * itself rejects unsafe path segments, but validate the shape here too —
+ * defense in depth, and a cheaper failure.
+ */
+const WORKFLOW_RUN_ID = /^w-[a-z0-9]{6,32}$/;
+
 /** A read-only drift preview against a resolved workspace root, at one scope. */
 export interface AgentstackDiffRequest {
   readonly workspaceRoot: string;
@@ -218,6 +231,9 @@ export class AgentstackCli extends Context.Service<
     readonly status: (input: AgentstackStatusRequest) => Effect.Effect<AgentstackStatus>;
     readonly activity: (input: AgentstackActivityRequest) => Effect.Effect<AgentstackActivity>;
     readonly workflow: (input: AgentstackWorkspaceRequest) => Effect.Effect<AgentstackWorkflowData>;
+    readonly workflowRun: (
+      input: AgentstackWorkflowRunRequest,
+    ) => Effect.Effect<AgentstackWorkflowRun | null>;
     readonly trustPreview: (
       input: AgentstackWorkspaceRequest,
     ) => Effect.Effect<AgentstackTrustPreviewResult>;
@@ -378,6 +394,24 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
     },
   );
 
+  const workflowRun: AgentstackCli["Service"]["workflowRun"] = Effect.fn(
+    "AgentstackCli.workflowRun",
+  )(function* (input) {
+    // The run id came from a client. Refuse anything that isn't a plausible
+    // envelope id before it reaches argv — the CLI validates too, but the
+    // cheap refusal belongs at the boundary.
+    if (!WORKFLOW_RUN_ID.test(input.runId)) return null;
+    const result = yield* run([
+      "--manifest-dir",
+      input.workspaceRoot,
+      "workflow",
+      "report",
+      input.runId,
+      "--json",
+    ]).pipe(Effect.orElseSucceed(() => null));
+    return result && !result.timedOut ? parseWorkflowRun(result.stdout) : null;
+  });
+
   const trustPreview: AgentstackCli["Service"]["trustPreview"] = Effect.fn(
     "AgentstackCli.trustPreview",
   )(function* (input) {
@@ -477,7 +511,7 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
     },
   );
 
-  return AgentstackCli.of({ status, activity, workflow, trustPreview, diff, action });
+  return AgentstackCli.of({ status, activity, workflow, workflowRun, trustPreview, diff, action });
 });
 
 export const layer = Layer.effect(AgentstackCli, make()).pipe(Layer.provide(ProcessRunner.layer));

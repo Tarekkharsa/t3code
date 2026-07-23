@@ -27,6 +27,8 @@ import {
   AgentstackTrustPreviewResult,
   AgentstackWorkflowData,
   AgentstackWorkflowInput,
+  AgentstackWorkflowRun,
+  AgentstackWorkflowRunInput,
   AgentstackWorkspaceContextError,
 } from "./agentstack.ts";
 import {
@@ -190,6 +192,7 @@ export const WS_METHODS = {
   agentstackStatus: "agentstack.status",
   agentstackActivity: "agentstack.activity",
   agentstackWorkflow: "agentstack.workflow",
+  agentstackWorkflowRun: "agentstack.workflowRun",
   agentstackTrustPreview: "agentstack.trustPreview",
   agentstackDiff: "agentstack.diff",
   agentstackAction: "agentstack.action",
@@ -297,6 +300,14 @@ export const WsAgentstackActivityRpc = Rpc.make(WS_METHODS.agentstackActivity, {
 export const WsAgentstackWorkflowRpc = Rpc.make(WS_METHODS.agentstackWorkflow, {
   payload: AgentstackWorkflowInput,
   success: AgentstackWorkflowData,
+  error: Schema.Union([AgentstackWorkspaceContextError, EnvironmentAuthorizationError]),
+});
+
+export const WsAgentstackWorkflowRunRpc = Rpc.make(WS_METHODS.agentstackWorkflowRun, {
+  payload: AgentstackWorkflowRunInput,
+  // Null when the run isn't found (or an older CLI can't report it) — the
+  // dialog degrades to its summary-row data rather than erroring.
+  success: Schema.NullOr(AgentstackWorkflowRun),
   error: Schema.Union([AgentstackWorkspaceContextError, EnvironmentAuthorizationError]),
 });
 
@@ -753,6 +764,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsAgentstackStatusRpc,
   WsAgentstackActivityRpc,
   WsAgentstackWorkflowRpc,
+  WsAgentstackWorkflowRunRpc,
   WsAgentstackTrustPreviewRpc,
   WsAgentstackDiffRpc,
   WsAgentstackActionRpc,

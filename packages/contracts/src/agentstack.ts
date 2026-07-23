@@ -120,6 +120,9 @@ export const AgentstackWorkflowStep = Schema.Struct({
   outcome: Schema.optionalKey(Schema.NullOr(Schema.String)),
   tool_calls: Schema.optionalKey(Schema.Number),
   duration_ms: Schema.optionalKey(Schema.NullOr(Schema.Number)),
+  /** Recorded data-flow (D2): prior step ids whose RESULT text appears in
+   *  this step's prompt — the honest "shuffle" edge, never inferred. */
+  taint: Schema.optionalKey(Schema.Array(Schema.Number)),
 });
 export type AgentstackWorkflowStep = typeof AgentstackWorkflowStep.Type;
 
@@ -173,6 +176,19 @@ export const AgentstackWorkflowInput = Schema.Struct({
   threadId: Schema.optionalKey(ThreadId),
 });
 export type AgentstackWorkflowInput = typeof AgentstackWorkflowInput.Type;
+
+/**
+ * One recorded run's full evidence tree by id (`workflow report --json`) —
+ * the click-through behind a run-history row. The id shape is re-validated
+ * server-side before it reaches the CLI's argv.
+ */
+export const AgentstackWorkflowRunInput = Schema.Struct({
+  projectId: ProjectId,
+  threadId: Schema.optionalKey(ThreadId),
+  /** The workflow envelope run id, e.g. `w-2572621809`. */
+  runId: Schema.String,
+});
+export type AgentstackWorkflowRunInput = typeof AgentstackWorkflowRunInput.Type;
 
 // ── trust preview (read) ─────────────────────────────────────────────────────
 // `agentstack trust <path> --preview` — the runtime surface a human consents

@@ -362,6 +362,8 @@ export interface AgentstackWorkflowStepLike {
   readonly outcome?: string | null;
   readonly tool_calls?: number;
   readonly duration_ms?: number | null;
+  /** Recorded data-flow: prior step ids whose result text fed this prompt. */
+  readonly taint?: ReadonlyArray<number>;
 }
 
 export interface AgentstackWorkflowRunLike {

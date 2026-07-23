@@ -300,6 +300,7 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [WS_METHODS.agentstackStatus, AuthOrchestrationReadScope],
   [WS_METHODS.agentstackActivity, AuthOrchestrationReadScope],
   [WS_METHODS.agentstackWorkflow, AuthOrchestrationReadScope],
+  [WS_METHODS.agentstackWorkflowRun, AuthOrchestrationReadScope],
   [WS_METHODS.agentstackTrustPreview, AuthOrchestrationReadScope],
   [WS_METHODS.agentstackDiff, AuthOrchestrationReadScope],
   // Governed actions touch the AgentStack security control plane — trust
@@ -1535,6 +1536,16 @@ const makeWsRpcLayer = (
             WS_METHODS.agentstackWorkflow,
             resolveAgentstackWorkspaceRoot(input).pipe(
               Effect.flatMap((workspaceRoot) => agentstackCli.workflow({ workspaceRoot })),
+            ),
+            { "rpc.aggregate": "agentstack" },
+          ),
+        [WS_METHODS.agentstackWorkflowRun]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.agentstackWorkflowRun,
+            resolveAgentstackWorkspaceRoot(input).pipe(
+              Effect.flatMap((workspaceRoot) =>
+                agentstackCli.workflowRun({ workspaceRoot, runId: input.runId }),
+              ),
             ),
             { "rpc.aggregate": "agentstack" },
           ),
