@@ -156,6 +156,7 @@ describe("matchAgentstackDenial", () => {
       target: "/repo/.env",
       rule: "!.env",
       source: "machine policy",
+      dimension: "filesystem",
     });
   });
 
@@ -167,7 +168,12 @@ describe("matchAgentstackDenial", () => {
       detail: 'Read: {"file_path":"/repo/.env"}',
       failureText: reason,
     });
-    expect(denial).toEqual({ target: "/repo/.env", rule: "!.env", source: "machine policy" });
+    expect(denial).toEqual({
+      target: "/repo/.env",
+      rule: "!.env",
+      source: "machine policy",
+      dimension: "filesystem",
+    });
   });
 
   it("recognizes the Codex hook-block phrasing embedded in error text", () => {

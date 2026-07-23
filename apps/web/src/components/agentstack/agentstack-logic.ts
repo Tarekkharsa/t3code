@@ -415,6 +415,8 @@ export interface AgentstackDenial {
   rule?: string;
   /** Where the rule comes from, when stated (e.g. `machine policy`). */
   source?: string;
+  /** The policy dimension the rule lives in (e.g. `filesystem` from `[policy.filesystem]`). */
+  dimension?: string;
 }
 
 /**
@@ -441,10 +443,12 @@ export function matchAgentstackDenial(entry: {
   const target = (deniedBy[0] ?? afterMarker).trim();
   const rule = /deny rule "([^"]+)"/i.exec(text)?.[1];
   const source = /\(([^)—]+)\s*—/.exec(text)?.[1]?.trim();
+  const dimension = /\[policy\.([a-z0-9_-]+)\]/i.exec(text)?.[1];
 
   return {
     target: target || "(command withheld)",
     ...(rule ? { rule } : {}),
     ...(source ? { source } : {}),
+    ...(dimension ? { dimension } : {}),
   };
 }

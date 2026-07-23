@@ -9,6 +9,7 @@ import type {
 } from "@t3tools/contracts";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { useAgentstackPanelStore } from "~/agentstackPanelStore";
 import { agentstackEnvironment } from "~/state/agentstack";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { cn } from "~/lib/utils";
@@ -145,6 +146,16 @@ export function AgentstackControl({
     const timer = setInterval(() => void refresh(), REFRESH_MS);
     return () => clearInterval(timer);
   }, [open, refresh]);
+
+  // React to "open me on tab X" requests from elsewhere (e.g. a guard-denial
+  // card's "View in audit log"). The nonce makes repeat requests re-fire.
+  const panelOpenNonce = useAgentstackPanelStore((s) => s.openNonce);
+  const panelRequestedTab = useAgentstackPanelStore((s) => s.requestedTab);
+  useEffect(() => {
+    if (panelOpenNonce === 0) return;
+    setTab(panelRequestedTab);
+    setOpen(true);
+  }, [panelOpenNonce, panelRequestedTab]);
 
   const onAction = useCallback(
     async (action: ActionKind) => {
