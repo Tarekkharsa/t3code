@@ -94,12 +94,16 @@ function lineContaining(
  * Curated mapping from real doctor sections to the design's overview rows.
  * Each row is sourced from actual doctor output — rows we cannot source
  * honestly are omitted rather than filled with invented numbers, so the panel
- * stays truthful across agentstack versions. `workflowRow` is supplied
- * separately by the caller from the workflow feed (doctor doesn't carry it).
+ * stays truthful across agentstack versions.
+ *
+ * Beginner surface only (Stage 1.4): the overview names outcomes — is the
+ * setup in sync, does the checkup pass, do secrets resolve, is the library
+ * pinned. Guard/gateway/sandbox/workflow facts move to the protection and
+ * advanced views (`deriveAgentstackProtectionRows`), so first-run navigation
+ * stays Setup / Toolset / Status / Undo.
  */
 export function deriveAgentstackOverviewRows(
   report: AgentstackDoctorReport,
-  workflowRow?: AgentstackOverviewRow,
 ): AgentstackOverviewRow[] {
   const rows: AgentstackOverviewRow[] = [];
 
@@ -135,9 +139,11 @@ export function deriveAgentstackOverviewRows(
     });
   }
 
+  // "Checkup", not "doctor": the beginner label for the same fact (the key
+  // stays `doctor` — it names the source, not the display).
   rows.push({
     key: "doctor",
-    label: "Doctor",
+    label: "Checkup",
     summary:
       report.errors === 0 && report.warnings === 0
         ? "all checks pass"
@@ -149,40 +155,6 @@ export function deriveAgentstackOverviewRows(
             .join(" · ") + " — each names its fix",
     level: report.errors > 0 ? "error" : report.warnings > 0 ? "warn" : "ok",
   });
-
-  // Guard ← the t3code supervisor section's guard line (present wherever this
-  // panel runs). Offer "enable guard" when it isn't covering the providers.
-  const t3 = sectionByTitle(report, "t3code (supervisor)");
-  const guardLine = lineContaining(t3, "guard");
-  if (guardLine) {
-    const enabled = guardLine.level === "ok";
-    rows.push({
-      key: "guard",
-      label: "Guard",
-      summary: enabled
-        ? "hooks cover the detected providers"
-        : "not enabled — sessions run ungated",
-      level: enabled ? "ok" : "warn",
-      ...(enabled ? {} : { action: "guard-install" as const }),
-    });
-  }
-
-  const gateway = sectionByTitle(report, "Zero-files gateway");
-  if (gateway) {
-    const registered = gateway.lines.filter(
-      (l) => l.level === "ok" && l.msg.includes("gateway registered"),
-    ).length;
-    const trusted = gateway.lines.some((l) => l.msg.includes("trusted for auto mode"));
-    rows.push({
-      key: "gateway",
-      label: "Gateway",
-      summary:
-        registered > 0
-          ? `connected · ${registered} CLI(s)${trusted ? " · trusted" : ""}`
-          : "not registered",
-      level: worstLevel(gateway),
-    });
-  }
 
   const secrets = sectionByTitle(report, "Secrets");
   if (secrets) {
@@ -205,16 +177,108 @@ export function deriveAgentstackOverviewRows(
     });
   }
 
-  // Sandbox is a standing capability of the binary, not a doctor finding — a
-  // grey "available" fact, matching the design's muted Sandbox row.
+  return rows;
+}
+
+// ── "More protection" ladder ─────────────────────────────────────────────────
+
+export interface AgentstackProtectionRow {
+  key: string;
+  label: string;
+  /** What this layer covers, honestly — no claim beyond the enforcement. */
+  summary: string;
+  /** What turning it on costs (setup, dependencies, speed), when it isn't free. */
+  cost?: string;
+  level: AgentstackRowLevel;
+  /** A vetted governed action this row can trigger directly (enable guard). */
+  action?: AgentstackActionKind;
+}
+
+/**
+ * The "More protection" view: every stronger mode in one place, each labelled
+ * with what it actually covers and what it costs (Stage 1.4). The first two
+ * rows read live state from doctor sections; the run tiers are standing
+ * capabilities of the binary, described but never claimed as active.
+ */
+export function deriveAgentstackProtectionRows(
+  report: AgentstackDoctorReport,
+): AgentstackProtectionRow[] {
+  const rows: AgentstackProtectionRow[] = [];
+
+  // Guard ← the t3code supervisor section's guard line (present wherever this
+  // panel runs). Offer "enable guard" when it isn't covering the providers.
+  const t3 = sectionByTitle(report, "t3code (supervisor)");
+  const guardLine = lineContaining(t3, "guard");
+  if (guardLine) {
+    const enabled = guardLine.level === "ok";
+    rows.push({
+      key: "guard",
+      label: "Guard",
+      summary: enabled
+        ? "on — blocks destructive agent commands before they run"
+        : "off — agent commands run without a pre-check",
+      cost: enabled
+        ? "covers agent tool calls on this machine — not a sandbox"
+        : "free — adds a pre-check hook to every detected CLI",
+      level: enabled ? "ok" : "warn",
+      ...(enabled ? {} : { action: "guard-install" as const }),
+    });
+  }
+
+  // Machine policy ← the always-computed one-word posture. "unconfigured" is
+  // a fact, not a fault — muted, with the exact place to add one.
+  const machine = sectionByTitle(report, "Machine policy");
+  const machineMsg = machine ? (firstMessage(machine) ?? "") : "";
+  if (machine) {
+    const unconfigured = machineMsg.startsWith("unconfigured");
+    rows.push({
+      key: "machine-policy",
+      label: "Machine policy",
+      summary: unconfigured
+        ? "none — each project uses its own limits"
+        : `the ceiling every session runs under — ${machineMsg}`,
+      cost: unconfigured
+        ? "add [policy] to ~/.agentstack/agentstack.toml — no repo can loosen it"
+        : "no repo or UI can loosen it",
+      level: unconfigured ? "muted" : worstLevel(machine),
+    });
+  }
+
+  // Zero-files gateway ← live registration state; honest about what inertness
+  // means (review-gated serving), not an enforcement claim about rendered files.
+  const gateway = sectionByTitle(report, "Zero-files gateway");
+  if (gateway) {
+    const registered = gateway.lines.filter(
+      (l) => l.level === "ok" && l.msg.includes("gateway registered"),
+    ).length;
+    rows.push({
+      key: "gateway",
+      label: "Live serving",
+      summary:
+        registered > 0
+          ? `on — ${registered} CLI(s) fetch servers live; unreviewed repos stay inert`
+          : "off — servers render as config files instead",
+      cost: "review each repo once before its servers run",
+      level: registered > 0 ? worstLevel(gateway) : "muted",
+    });
+  }
+
+  // Standing run tiers — capabilities of the binary, never claimed active.
+  rows.push({
+    key: "locked-run",
+    label: "Locked run",
+    summary: "agentstack run <cli> --locked — pins content and records evidence",
+    cost: "host process — not kernel isolation",
+    level: "muted",
+  });
   rows.push({
     key: "sandbox",
     label: "Sandbox",
-    summary: "run --sandbox --lockdown available",
+    summary:
+      "agentstack run --sandbox / --lockdown — container isolation; lockdown enforces the network route",
+    cost: "needs Docker · slower start",
     level: "muted",
   });
-
-  if (workflowRow) rows.push(workflowRow);
 
   return rows;
 }

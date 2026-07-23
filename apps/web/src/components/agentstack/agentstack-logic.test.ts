@@ -5,6 +5,7 @@ import {
   deriveAgentstackActivityRows,
   deriveAgentstackOverviewRows,
   deriveAgentstackPolicyRows,
+  deriveAgentstackProtectionRows,
   deriveAgentstackStatusChip,
   deriveAgentstackTrustBadge,
   deriveToolsetRows,
@@ -52,7 +53,7 @@ const report: AgentstackDoctorReport = {
 };
 
 describe("deriveAgentstackOverviewRows", () => {
-  it("maps real doctor sections to the design's rows and opens a drift review on real drift", () => {
+  it("maps real doctor sections to the beginner rows and opens a drift review on real drift", () => {
     const rows = deriveAgentstackOverviewRows(report);
     const byKey = Object.fromEntries(rows.map((r) => [r.key, r]));
 
@@ -64,13 +65,15 @@ describe("deriveAgentstackOverviewRows", () => {
       reviewDrift: true,
     });
     expect(byKey["manifest"]).not.toHaveProperty("action");
-    expect(byKey["doctor"]).toMatchObject({ level: "warn" });
+    // The beginner label for the doctor rollup is "Checkup".
+    expect(byKey["doctor"]).toMatchObject({ level: "warn", label: "Checkup" });
     expect(byKey["doctor"]!.summary).toContain("2 warning(s)");
-    expect(byKey["gateway"]).toMatchObject({ level: "ok" });
-    expect(byKey["gateway"]!.summary).toContain("trusted");
     expect(byKey["secrets"]).toMatchObject({ level: "ok", summary: "no secrets referenced" });
-    // Sandbox is a standing muted capability row, always present.
-    expect(byKey["sandbox"]).toMatchObject({ level: "muted" });
+    // Guard/gateway/sandbox facts are protection-view rows, not beginner rows
+    // (Stage 1.4): the overview names outcomes only.
+    expect(byKey["gateway"]).toBeUndefined();
+    expect(byKey["guard"]).toBeUndefined();
+    expect(byKey["sandbox"]).toBeUndefined();
   });
 
   it("treats info-only (foreign-kept) drift as in-sync, not a no-op 'fix' button", () => {
@@ -104,14 +107,65 @@ describe("deriveAgentstackOverviewRows", () => {
     expect(byKey["manifest"]).not.toHaveProperty("action");
   });
 
-  it("appends a caller-supplied workflow row and degrades to the doctor + sandbox rows", () => {
-    const rows = deriveAgentstackOverviewRows(
-      { errors: 0, warnings: 0, sections: [] },
-      { key: "workflows", label: "Workflows", summary: "1 declared", level: "ok" },
-    );
-    const keys = rows.map((r) => r.key);
-    expect(keys).toEqual(["doctor", "sandbox", "workflows"]);
+  it("degrades to the checkup row alone on an empty report", () => {
+    const rows = deriveAgentstackOverviewRows({ errors: 0, warnings: 0, sections: [] });
+    expect(rows.map((r) => r.key)).toEqual(["doctor"]);
     expect(rows[0]).toMatchObject({ key: "doctor", level: "ok", summary: "all checks pass" });
+  });
+});
+
+describe("deriveAgentstackProtectionRows", () => {
+  it("reads live guard/machine-policy/gateway state and labels every tier with cost and coverage", () => {
+    const withGuard: AgentstackDoctorReport = {
+      ...report,
+      sections: [
+        ...report.sections,
+        {
+          title: "t3code (supervisor)",
+          lines: [{ level: "warn", msg: "guard hooks do not cover the detected providers" }],
+        },
+      ],
+    };
+    const rows = deriveAgentstackProtectionRows(withGuard);
+    const byKey = Object.fromEntries(rows.map((r) => [r.key, r]));
+
+    // Guard off → actionable enable, honestly labelled free.
+    expect(byKey["guard"]).toMatchObject({ level: "warn", action: "guard-install" });
+    expect(byKey["guard"]!.summary).toContain("off");
+    // A configured machine policy is the ceiling — its posture word surfaces.
+    expect(byKey["machine-policy"]!.summary).toContain("restrictive");
+    expect(byKey["machine-policy"]!.cost).toContain("no repo or UI can loosen");
+    // Registered gateway → live serving on, with the inert-until-reviewed fact.
+    expect(byKey["gateway"]).toMatchObject({ level: "ok", label: "Live serving" });
+    expect(byKey["gateway"]!.summary).toContain("stay inert");
+    // Standing run tiers never claim to be active and name their real costs.
+    expect(byKey["locked-run"]).toMatchObject({ level: "muted" });
+    expect(byKey["locked-run"]!.cost).toContain("not kernel isolation");
+    expect(byKey["sandbox"]).toMatchObject({ level: "muted" });
+    expect(byKey["sandbox"]!.cost).toContain("needs Docker");
+  });
+
+  it("shows an unconfigured machine policy as a fact with the exact place to add one", () => {
+    const unconfigured: AgentstackDoctorReport = {
+      errors: 0,
+      warnings: 0,
+      sections: [
+        {
+          title: "Machine policy",
+          lines: [
+            {
+              level: "ok",
+              msg: "unconfigured — no machine policy file — projects use their own policy",
+            },
+          ],
+        },
+      ],
+    };
+    const rows = deriveAgentstackProtectionRows(unconfigured);
+    const machine = rows.find((r) => r.key === "machine-policy");
+    expect(machine).toMatchObject({ level: "muted" });
+    expect(machine!.summary).toContain("none");
+    expect(machine!.cost).toContain("~/.agentstack/agentstack.toml");
   });
 });
 

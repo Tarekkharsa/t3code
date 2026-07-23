@@ -38,6 +38,7 @@ import {
   deriveAgentstackActivityRows,
   deriveAgentstackOverviewRows,
   deriveAgentstackPolicyRows,
+  deriveAgentstackProtectionRows,
   deriveAgentstackStatusChip,
   deriveAgentstackTrustBadge,
   deriveToolsetRows,
@@ -93,6 +94,18 @@ const STEP_DOT: Record<string, string> = {
 const REFRESH_MS = 5_000;
 
 type Tab = "overview" | "workflow" | "activity" | "policy";
+
+/**
+ * The advanced views behind the Overview (Stage 1.4): beginner navigation is
+ * the four jobs on the Overview itself (Setup / Toolset / Status / Undo);
+ * these open one level deeper with a back row. The `policy` id is kept for
+ * store compatibility — it renders as "More protection".
+ */
+const ADVANCED_VIEWS: Record<Exclude<Tab, "overview">, { title: string; hint: string }> = {
+  policy: { title: "More protection", hint: "stronger modes, honest coverage" },
+  activity: { title: "Activity", hint: "every brokered call, newest first" },
+  workflow: { title: "Workflows", hint: "governed multi-agent runs" },
+};
 
 type ActionState =
   | { phase: "idle" }
@@ -403,28 +416,10 @@ export function AgentstackControl({
   const canSessions = hasAgentstackFeature(features, FEATURE_SESSIONS);
   const sessionsKnownMissing = agentstackFeatureKnownMissing(features, FEATURE_SESSIONS);
 
-  const overviewRows: AgentstackOverviewRow[] = useMemo(() => {
-    if (!status?.doctor) return [];
-    let wfRow: AgentstackOverviewRow | undefined;
-    if (workflow?.installed) {
-      const list = workflow.workflows;
-      const allReady =
-        list.length > 0 && list.every((w) => w.trusted && w.lock_status === "matches");
-      wfRow = {
-        key: "workflows",
-        label: "Workflows",
-        summary: activeRun
-          ? `${activeRun.workflow} running`
-          : list.length === 0
-            ? "none declared"
-            : allReady
-              ? `${list.length} declared · pinned & trusted`
-              : `${list.length} declared · review pending`,
-        level: activeRun ? "warn" : list.length === 0 ? "muted" : allReady ? "ok" : "warn",
-      };
-    }
-    return deriveAgentstackOverviewRows(status.doctor, wfRow);
-  }, [status, workflow, activeRun]);
+  const overviewRows: AgentstackOverviewRow[] = useMemo(
+    () => (status?.doctor ? deriveAgentstackOverviewRows(status.doctor) : []),
+    [status],
+  );
 
   const anyAttention = overviewRows.some((r) => r.level === "warn" || r.level === "error");
 
@@ -518,33 +513,22 @@ export function AgentstackControl({
             <SetupPanel loadPlan={loadSetupPlan} onApply={onSetupApply} canApply={canApplySetup} />
           ) : (
             <>
-              {/* Tabs */}
-              <div
-                role="tablist"
-                aria-label="AgentStack panel"
-                className="flex items-center gap-1 border-b border-border/60 px-3 pb-2.5"
-              >
-                {(["overview", "workflow", "activity", "policy"] as const).map((t) => (
+              {/* Advanced views carry a back row (like the review panels) so
+                  the beginner surface stays a single Overview screen. */}
+              {tab !== "overview" ? (
+                <div className="flex items-center gap-2 border-b border-border/60 px-3.5 py-2">
                   <button
-                    key={t}
                     type="button"
-                    role="tab"
-                    aria-selected={tab === t}
-                    onClick={() => setTab(t)}
-                    className={cn(
-                      "flex h-6 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium capitalize transition-colors",
-                      tab === t
-                        ? "bg-accent font-semibold text-foreground"
-                        : "text-muted-foreground hover:text-foreground",
-                    )}
+                    onClick={() => setTab("overview")}
+                    className="text-xs font-medium text-muted-foreground hover:text-foreground"
                   >
-                    {t}
-                    {t === "workflow" && activeRun ? (
-                      <span className="size-[5px] rounded-full bg-warning animate-pulse" />
-                    ) : null}
+                    ← Back
                   </button>
-                ))}
-              </div>
+                  <span className="text-xs font-semibold text-foreground">
+                    {ADVANCED_VIEWS[tab].title}
+                  </span>
+                </div>
+              ) : null}
 
               {/* Body */}
               <div className="max-h-[420px] overflow-y-auto">
@@ -557,28 +541,31 @@ export function AgentstackControl({
                 ) : !status.installed ? (
                   <NotInstalled />
                 ) : tab === "overview" ? (
-                  <OverviewPanel
-                    rows={overviewRows}
-                    doctorAvailable={status.doctor !== null}
-                    chip={deriveAgentstackStatusChip({
-                      state: status.doctor?.state,
-                      protection: status.doctor?.protection,
-                    })}
-                    nextAction={status.doctor?.next_action ?? null}
-                    loadRestoreInventory={loadRestoreInventory}
-                    onUndo={onUndo}
-                    canRestore={canRestore}
-                    toolsets={toolsets}
-                    canSessions={canSessions}
-                    sessionsKnownMissing={sessionsKnownMissing}
-                    onSessionStart={onSessionStart}
-                    onSessionEnd={onSessionEnd}
-                    actionState={actionState}
-                    onRequestAction={(a) => setActionState({ phase: "confirm", action: a })}
-                    onReviewDrift={() => setReviewingDrift(true)}
-                    onConfirm={onAction}
-                    onCancel={() => setActionState({ phase: "idle" })}
-                  />
+                  <>
+                    <OverviewPanel
+                      rows={overviewRows}
+                      doctorAvailable={status.doctor !== null}
+                      chip={deriveAgentstackStatusChip({
+                        state: status.doctor?.state,
+                        protection: status.doctor?.protection,
+                      })}
+                      nextAction={status.doctor?.next_action ?? null}
+                      loadRestoreInventory={loadRestoreInventory}
+                      onUndo={onUndo}
+                      canRestore={canRestore}
+                      toolsets={toolsets}
+                      canSessions={canSessions}
+                      sessionsKnownMissing={sessionsKnownMissing}
+                      onSessionStart={onSessionStart}
+                      onSessionEnd={onSessionEnd}
+                      actionState={actionState}
+                      onRequestAction={(a) => setActionState({ phase: "confirm", action: a })}
+                      onReviewDrift={() => setReviewingDrift(true)}
+                      onConfirm={onAction}
+                      onCancel={() => setActionState({ phase: "idle" })}
+                    />
+                    <AdvancedNav onOpen={setTab} workflowLive={activeRun !== null} />
+                  </>
                 ) : tab === "workflow" ? (
                   <WorkflowPanel
                     data={workflow}
@@ -587,7 +574,13 @@ export function AgentstackControl({
                 ) : tab === "activity" ? (
                   <ActivityPanel activity={activity} />
                 ) : (
-                  <PolicyPanel doctor={status.doctor} />
+                  <ProtectionPanel
+                    doctor={status.doctor}
+                    actionState={actionState}
+                    onRequestAction={(a) => setActionState({ phase: "confirm", action: a })}
+                    onConfirm={onAction}
+                    onCancel={() => setActionState({ phase: "idle" })}
+                  />
                 )}
               </div>
             </>
@@ -2478,28 +2471,119 @@ function ActivityPanel({ activity }: { activity: AgentstackActivity | null }) {
   );
 }
 
-function PolicyPanel({ doctor }: { doctor: AgentstackStatus["doctor"] }) {
-  const rows = doctor ? deriveAgentstackPolicyRows(doctor) : [];
-  if (rows.length === 0) {
+/**
+ * The collapsed entry to the deeper views, rendered under the Overview. One
+ * quiet row per view — a label plus its outcome hint — so the beginner surface
+ * stays the four jobs while everything else remains one tap away.
+ */
+function AdvancedNav({
+  onOpen,
+  workflowLive,
+}: {
+  onOpen: (tab: Tab) => void;
+  workflowLive: boolean;
+}) {
+  return (
+    <div className="mx-1.5 mb-1.5 mt-1 border-t border-border/50 pt-1.5">
+      {(Object.keys(ADVANCED_VIEWS) as Array<Exclude<Tab, "overview">>).map((t) => (
+        <button
+          key={t}
+          type="button"
+          onClick={() => onOpen(t)}
+          className="flex w-full items-center gap-2 rounded-lg px-2.5 py-[6px] text-left transition-colors hover:bg-foreground/[0.04]"
+        >
+          <span className="text-[12px] font-medium text-foreground">{ADVANCED_VIEWS[t].title}</span>
+          {t === "workflow" && workflowLive ? (
+            <span className="size-[5px] rounded-full bg-warning animate-pulse" />
+          ) : null}
+          <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground/70">
+            {ADVANCED_VIEWS[t].hint}
+          </span>
+          <span className="text-[11px] text-muted-foreground/50">→</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * "More protection": the stronger modes in one place, each labelled with what
+ * it actually covers and what it costs — never a claim the selected mode does
+ * not enforce. The raw machine-policy/policy doctor lines stay available under
+ * a Details disclosure for the precise version.
+ */
+function ProtectionPanel({
+  doctor,
+  actionState,
+  onRequestAction,
+  onConfirm,
+  onCancel,
+}: {
+  doctor: AgentstackStatus["doctor"];
+  actionState: ActionState;
+  onRequestAction: (a: ActionKind) => void;
+  onConfirm: (a: ActionKind) => void;
+  onCancel: () => void;
+}) {
+  if (!doctor) {
     return (
       <p className="px-4 py-4 text-xs leading-relaxed text-muted-foreground">
         The machine policy is the ceiling every session runs under — no repo can loosen it.
       </p>
     );
   }
+  const rows = deriveAgentstackProtectionRows(doctor);
+  const policyRows = deriveAgentstackPolicyRows(doctor);
   return (
-    <div className="flex flex-col gap-2 p-3">
+    <div className="flex flex-col p-1.5">
+      <p className="px-2.5 pb-1.5 pt-1 text-[11px] leading-relaxed text-muted-foreground">
+        Normal setup already fails closed. These layers add stronger checks — each says what it
+        covers and what it costs.
+      </p>
       {rows.map((row) => (
-        <div key={row.key} className="flex items-start gap-2.5">
+        <div key={row.key} className="flex items-start gap-2.5 rounded-lg px-2.5 py-[7px]">
           <span className={cn("mt-1 size-1.5 shrink-0 rounded-full", LEVEL_DOT[row.level])} />
-          <div className="flex min-w-0 flex-col gap-0.5">
-            <span className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
-              {row.title}
-            </span>
-            <span className="text-xs leading-relaxed text-muted-foreground">{row.msg}</span>
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <span className="text-[12.5px] font-semibold text-foreground">{row.label}</span>
+            <span className="text-xs leading-relaxed text-muted-foreground">{row.summary}</span>
+            {row.cost ? (
+              <span className="text-[11px] text-muted-foreground/60">{row.cost}</span>
+            ) : null}
           </div>
+          {row.action ? (
+            <button
+              type="button"
+              onClick={() => onRequestAction(row.action!)}
+              className="mt-0.5 shrink-0 rounded-md border border-warning/40 bg-warning/10 px-2 py-0.5 text-[10px] font-semibold text-warning transition-colors hover:bg-warning/20"
+            >
+              {ACTION_META[row.action].label}
+            </button>
+          ) : null}
         </div>
       ))}
+      {actionState.phase !== "idle" ? (
+        <ActionConfirm state={actionState} onConfirm={onConfirm} onCancel={onCancel} />
+      ) : null}
+      {policyRows.length > 0 ? (
+        <details className="mx-1 mb-1 mt-1.5 rounded-lg border border-border/50 px-2.5 py-1.5">
+          <summary className="cursor-pointer text-[11px] font-medium text-muted-foreground">
+            Details — the exact policy lines
+          </summary>
+          <div className="flex flex-col gap-2 pb-1 pt-2">
+            {policyRows.map((row) => (
+              <div key={row.key} className="flex items-start gap-2.5">
+                <span className={cn("mt-1 size-1.5 shrink-0 rounded-full", LEVEL_DOT[row.level])} />
+                <div className="flex min-w-0 flex-col gap-0.5">
+                  <span className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
+                    {row.title}
+                  </span>
+                  <span className="text-xs leading-relaxed text-muted-foreground">{row.msg}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </details>
+      ) : null}
     </div>
   );
 }
