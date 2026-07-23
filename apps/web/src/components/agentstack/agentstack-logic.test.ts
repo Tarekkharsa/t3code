@@ -77,6 +77,21 @@ describe("deriveAgentstackOverviewRows", () => {
 });
 
 describe("deriveAgentstackTrustBadge", () => {
+  it("prefers the structured trust state over gateway prose", () => {
+    // Structured field wins even when prose would say otherwise.
+    const drifted: AgentstackDoctorReport = {
+      errors: 0,
+      warnings: 0,
+      trust: "drifted",
+      sections: [
+        { title: "Zero-files gateway", lines: [{ level: "ok", msg: "trusted for auto mode" }] },
+      ],
+    };
+    expect(deriveAgentstackTrustBadge(drifted).state).toBe("drifted");
+    expect(deriveAgentstackTrustBadge({ ...drifted, trust: "untrusted" }).state).toBe("inert");
+    expect(deriveAgentstackTrustBadge({ ...drifted, trust: "trusted" }).state).toBe("trusted");
+  });
+
   it("reads trusted / inert / unknown from the gateway section", () => {
     expect(deriveAgentstackTrustBadge(report).state).toBe("trusted");
     const inert: AgentstackDoctorReport = {

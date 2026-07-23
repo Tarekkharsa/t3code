@@ -21,6 +21,8 @@ export interface AgentstackDoctorSection {
 export interface AgentstackDoctorReport {
   errors: number;
   warnings: number;
+  /** trusted | drifted | untrusted, when the CLI emits it (else undefined). */
+  trust?: string | null;
   sections: ReadonlyArray<AgentstackDoctorSection>;
 }
 
@@ -192,6 +194,17 @@ export interface AgentstackTrustBadge {
  * agentstack does not yet emit, so we only claim `drifted` on a clear signal.
  */
 export function deriveAgentstackTrustBadge(report: AgentstackDoctorReport): AgentstackTrustBadge {
+  // Prefer the CLI's structured trust state when present — it's authoritative
+  // and distinguishes drifted from untrusted, which prose can't reliably do.
+  switch (report.trust) {
+    case "trusted":
+      return { state: "trusted", label: "Repo trusted" };
+    case "drifted":
+      return { state: "drifted", label: "Drift — re-gated" };
+    case "untrusted":
+      return { state: "inert", label: "Inert — review pending" };
+  }
+  // Fallback for older CLIs: infer from the gateway section's prose.
   const gateway = sectionByTitle(report, "Zero-files gateway");
   // "not trusted for auto mode" contains "trusted for auto mode" — test the
   // negative first.

@@ -31,6 +31,9 @@ export type AgentstackDoctorSection = typeof AgentstackDoctorSection.Type;
 export const AgentstackDoctorReport = Schema.Struct({
   errors: Schema.Number,
   warnings: Schema.Number,
+  /** trusted | drifted | untrusted — the project's trust state, when a
+   *  project was checked. Absent on older CLIs (fall back to gateway prose). */
+  trust: Schema.optionalKey(Schema.NullOr(Schema.String)),
   sections: Schema.Array(AgentstackDoctorSection),
 });
 export type AgentstackDoctorReport = typeof AgentstackDoctorReport.Type;
