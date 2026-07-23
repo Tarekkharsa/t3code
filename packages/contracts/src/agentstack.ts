@@ -136,12 +136,34 @@ export const AgentstackWorkflowRun = Schema.Struct({
 });
 export type AgentstackWorkflowRun = typeof AgentstackWorkflowRun.Type;
 
+// One row of `agentstack workflow runs --json` — the durable run history
+// read from each run's own evidence log, joined with the live registry.
+// `outcome` is the CLI's honest three-state (plus `interrupted`: no terminal
+// recorded and the envelope process is gone — the resumable case).
+export const AgentstackWorkflowRunSummary = Schema.Struct({
+  run: Schema.String,
+  workflow: Schema.String,
+  outcome: Schema.Literals(["completed", "failed", "running", "interrupted"]),
+  exhausted: Schema.Boolean,
+  resumable: Schema.Boolean,
+  started_unix: Schema.Number,
+  duration_ms: Schema.optionalKey(Schema.NullOr(Schema.Number)),
+  steps: Schema.Number,
+});
+export type AgentstackWorkflowRunSummary = typeof AgentstackWorkflowRunSummary.Type;
+
 export const AgentstackWorkflowData = Schema.Struct({
   installed: Schema.Boolean,
   /** Every declared `[workflows.*]` entry with its admission status. */
   workflows: Schema.Array(AgentstackWorkflowSummary),
   /** The most recent workflow run's evidence, if one exists. */
   activeRun: Schema.NullOr(AgentstackWorkflowRun),
+  /**
+   * Recorded run history, newest first. Optional so a client can still
+   * decode responses from servers (or agentstack binaries) that predate
+   * `workflow runs`; absent means "unknown", not "none".
+   */
+  runs: Schema.optionalKey(Schema.Array(AgentstackWorkflowRunSummary)),
   checkedAt: Schema.Number,
 });
 export type AgentstackWorkflowData = typeof AgentstackWorkflowData.Type;

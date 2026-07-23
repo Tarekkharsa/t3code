@@ -4,6 +4,7 @@ import {
   AgentstackDoctorReport,
   AgentstackTrustPreview,
   AgentstackWorkflowRun,
+  AgentstackWorkflowRunSummary,
   AgentstackWorkflowSummary,
   type AgentstackActionKind,
   type AgentstackActionResult,
@@ -107,31 +108,18 @@ export function parseWorkflowRun(stdout: string): AgentstackWorkflowRun | null {
   return Option.getOrNull(decodeWorkflowRun(stdout));
 }
 
-// The live-runs registry: only the fields needed to find the newest workflow
-// envelope (`w-…`). Anything else in the record is ignored.
-const decodeRunsRegistry = Schema.decodeUnknownOption(
-  Schema.fromJsonString(
-    Schema.Array(
-      Schema.Struct({
-        id: Schema.String,
-        started_unix: Schema.optionalKey(Schema.Number),
-      }),
-    ),
-  ),
+// `agentstack workflow runs --json` — the durable run history (newest
+// first), each row read from the run's own evidence log with liveness
+// already joined by the CLI. An older binary without the subcommand (or a
+// malformed payload) degrades to [].
+const decodeWorkflowRuns = Schema.decodeUnknownOption(
+  Schema.fromJsonString(Schema.Struct({ runs: Schema.Array(AgentstackWorkflowRunSummary) })),
 );
 
-/** The id of the most recently started live workflow run, or null. */
-export function newestWorkflowRunId(stdout: string): string | null {
-  return Option.match(decodeRunsRegistry(stdout), {
-    onNone: () => null,
-    onSome: (rows) => {
-      const workflowRuns = rows.filter((r) => r.id.startsWith("w-"));
-      if (workflowRuns.length === 0) return null;
-      const newest = workflowRuns.reduce((a, b) =>
-        (b.started_unix ?? 0) > (a.started_unix ?? 0) ? b : a,
-      );
-      return newest.id;
-    },
+export function parseWorkflowRuns(stdout: string): ReadonlyArray<AgentstackWorkflowRunSummary> {
+  return Option.match(decodeWorkflowRuns(stdout), {
+    onNone: () => [],
+    onSome: (r) => r.runs,
   });
 }
 
@@ -315,19 +303,24 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
           installed: false,
           workflows: [],
           activeRun: null,
+          runs: [],
           checkedAt: yield* Clock.currentTimeMillis,
         };
       }
       const workflows =
         listResult._tag === "Success" ? parseWorkflowList(listResult.result.stdout) : [];
 
-      // Find the newest live workflow envelope from the runs registry, then
-      // read its evidence tree. A failure at any step degrades to "no run".
-      const runsResult = yield* run(["report", "runs", "--json"]).pipe(
+      // The durable run history — identity, outcome, and liveness already
+      // joined by the CLI from each run's own evidence log. A failure (e.g.
+      // an older binary without the subcommand) degrades to [].
+      const runsResult = yield* run(["--manifest-dir", root, "workflow", "runs", "--json"]).pipe(
         Effect.orElseSucceed(() => null),
       );
-      const runId =
-        runsResult && !runsResult.timedOut ? newestWorkflowRunId(runsResult.stdout) : null;
+      const runs = runsResult && !runsResult.timedOut ? parseWorkflowRuns(runsResult.stdout) : [];
+
+      // A running row (there is at most one per envelope process) gets its
+      // full evidence tree for the live step view. Degrades to "no run".
+      const runId = runs.find((r) => r.outcome === "running")?.run ?? null;
       let activeRun: AgentstackWorkflowRun | null = null;
       if (runId) {
         const reportResult = yield* run([
@@ -346,6 +339,7 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
         installed: true,
         workflows,
         activeRun,
+        runs,
         checkedAt: yield* Clock.currentTimeMillis,
       };
     },

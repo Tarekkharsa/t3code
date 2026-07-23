@@ -156,4 +156,38 @@ describe("AgentstackCli", () => {
       expect(argvs.flat()).not.toContain("--prune-foreign");
     }).pipe(Effect.provide(ProcessRunnerTest));
   });
+
+  it("parses the workflow run history and degrades to [] on unknown shapes", () => {
+    const wire = JSON.stringify({
+      runs: [
+        {
+          run: "w-abc123",
+          workflow: "mapreduce-acceptance",
+          outcome: "running",
+          exhausted: false,
+          resumable: false,
+          started_unix: 1_784_792_723,
+          duration_ms: null,
+          steps: 5,
+        },
+        {
+          run: "w-def456",
+          workflow: "mapreduce-acceptance",
+          outcome: "interrupted",
+          exhausted: false,
+          resumable: true,
+          started_unix: 1_784_790_000,
+          duration_ms: 26_340,
+          steps: 3,
+        },
+      ],
+    });
+    const runs = AgentstackCli.parseWorkflowRuns(wire);
+    expect(runs).toHaveLength(2);
+    expect(runs[0]?.outcome).toBe("running");
+    expect(runs[1]?.resumable).toBe(true);
+    // An older binary's error text (or any non-history payload) is never a throw.
+    expect(AgentstackCli.parseWorkflowRuns("error: unrecognized subcommand")).toEqual([]);
+    expect(AgentstackCli.parseWorkflowRuns(JSON.stringify({ runs: [{ run: 1 }] }))).toEqual([]);
+  });
 });

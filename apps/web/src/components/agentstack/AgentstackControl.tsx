@@ -7,6 +7,7 @@ import type {
   AgentstackTrustPreviewResult,
   AgentstackWorkflowData,
   AgentstackWorkflowRun,
+  AgentstackWorkflowRunSummary,
   EnvironmentId,
   ProjectId,
   ThreadId,
@@ -60,6 +61,9 @@ const STEP_DOT: Record<string, string> = {
   failed: "bg-destructive",
   running: "bg-warning animate-pulse",
   spawned: "bg-muted-foreground/50",
+  // History-only state: no terminal recorded and the envelope process is
+  // gone — the run is resumable, not live, so no pulse.
+  interrupted: "bg-warning",
 };
 
 /** Poll cadence while the popover is open; nothing polls while it's closed. */
@@ -105,6 +109,15 @@ function fmtDuration(ms: number | undefined | null): string | null {
   if (ms == null || ms < 0) return null;
   const total = Math.floor(ms / 1000);
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
+
+/** Compact relative age from a unix-seconds start: `45s`, `12m`, `3h`, `2d`. */
+function fmtAgo(startedUnix: number): string {
+  const secs = Math.max(0, Math.floor(Date.now() / 1000) - startedUnix);
+  if (secs < 60) return `${secs}s`;
+  if (secs < 3600) return `${Math.floor(secs / 60)}m`;
+  if (secs < 86_400) return `${Math.floor(secs / 3600)}h`;
+  return `${Math.floor(secs / 86_400)}d`;
 }
 
 /**
@@ -1070,53 +1083,128 @@ function WorkflowPanel({ data }: { data: AgentstackWorkflowData | null }) {
   if (data === null) {
     return <p className="px-4 py-4 text-xs text-muted-foreground">Checking workflows…</p>;
   }
+  // The live run renders as the full monitor; the history below excludes it
+  // so a run never appears twice.
+  const history = (data.runs ?? []).filter((r) => r.outcome !== "running");
   if (data.activeRun && data.activeRun.outcome === "running") {
-    return <WorkflowMonitor run={data.activeRun} />;
+    return (
+      <div className="flex flex-col">
+        <WorkflowMonitor run={data.activeRun} />
+        <WorkflowRunHistory runs={history} />
+      </div>
+    );
   }
   if (data.workflows.length === 0) {
     return (
-      <p className="px-4 py-4 text-xs leading-relaxed text-muted-foreground">
-        No workflows declared. A <code className="font-mono">[workflows.*]</code> entry in the
-        manifest defines a governed, pinned workflow — each step a locked run.
-      </p>
+      <div className="flex flex-col">
+        <p className="px-4 py-4 text-xs leading-relaxed text-muted-foreground">
+          No workflows declared. A <code className="font-mono">[workflows.*]</code> entry in the
+          manifest defines a governed, pinned workflow — each step a locked run.
+        </p>
+        <WorkflowRunHistory runs={history} />
+      </div>
     );
   }
   return (
-    <div className="flex flex-col gap-1 p-2">
-      <p className="px-1 pb-1 text-[11px] text-muted-foreground">
-        {data.workflows.length} declared · each step a locked run
-      </p>
-      {data.workflows.map((w) => (
-        <div
-          key={w.name}
-          className="flex items-center gap-2 rounded-lg border border-border/50 bg-foreground/[0.02] px-3 py-2"
-        >
-          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-            <span className="truncate text-xs font-semibold text-foreground">{w.name}</span>
-            <span className="truncate text-[11px] text-muted-foreground">
-              {w.roles.join(" · ") || "no roles"} · ≤{w.max_agents} agents
+    <div className="flex flex-col">
+      <div className="flex flex-col gap-1 p-2">
+        <p className="px-1 pb-1 text-[11px] text-muted-foreground">
+          {data.workflows.length} declared · each step a locked run
+        </p>
+        {data.workflows.map((w) => (
+          <div
+            key={w.name}
+            className="flex items-center gap-2 rounded-lg border border-border/50 bg-foreground/[0.02] px-3 py-2"
+          >
+            <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+              <span className="truncate text-xs font-semibold text-foreground">{w.name}</span>
+              <span className="truncate text-[11px] text-muted-foreground">
+                {w.roles.join(" · ") || "no roles"} · ≤{w.max_agents} agents
+              </span>
+            </div>
+            <span
+              className={cn(
+                "inline-flex h-[18px] shrink-0 items-center rounded px-1.5 text-[10px] font-semibold",
+                w.trusted ? "bg-success/10 text-success" : "bg-warning/10 text-warning",
+              )}
+            >
+              {w.trusted ? "trusted" : "inert"}
+            </span>
+            <span
+              className={cn(
+                "inline-flex h-[18px] shrink-0 items-center rounded px-1.5 text-[10px] font-medium",
+                w.lock_status === "matches"
+                  ? "bg-muted-foreground/10 text-muted-foreground"
+                  : "bg-destructive/10 text-destructive",
+              )}
+            >
+              {w.lock_status === "matches" ? "locked" : w.lock_status}
             </span>
           </div>
-          <span
-            className={cn(
-              "inline-flex h-[18px] shrink-0 items-center rounded px-1.5 text-[10px] font-semibold",
-              w.trusted ? "bg-success/10 text-success" : "bg-warning/10 text-warning",
-            )}
+        ))}
+      </div>
+      <WorkflowRunHistory runs={history} />
+    </div>
+  );
+}
+
+/**
+ * Recent recorded runs — the durable history behind the live monitor, read
+ * from each run's own evidence log by `agentstack workflow runs`. Answers
+ * "did my run work?" after the fact; `interrupted` rows are resumable via
+ * `workflow run <name> --resume <id>`.
+ */
+function WorkflowRunHistory({ runs }: { runs: ReadonlyArray<AgentstackWorkflowRunSummary> }) {
+  if (runs.length === 0) return null;
+  return (
+    <div className="flex flex-col gap-1 p-2 pt-0">
+      <div className="flex items-center gap-2 px-1 py-1.5">
+        <span className="text-[11px] font-bold tracking-wide text-muted-foreground">
+          Recent runs
+        </span>
+        <span className="h-px flex-1 bg-border/60" />
+      </div>
+      {runs.map((r) => {
+        const dur = fmtDuration(r.duration_ms);
+        return (
+          <div
+            key={r.run}
+            className="flex items-center gap-2.5 rounded-lg border border-border/50 bg-foreground/[0.02] px-2.5 py-2"
           >
-            {w.trusted ? "trusted" : "inert"}
-          </span>
-          <span
-            className={cn(
-              "inline-flex h-[18px] shrink-0 items-center rounded px-1.5 text-[10px] font-medium",
-              w.lock_status === "matches"
-                ? "bg-muted-foreground/10 text-muted-foreground"
-                : "bg-destructive/10 text-destructive",
-            )}
-          >
-            {w.lock_status === "matches" ? "locked" : w.lock_status}
-          </span>
-        </div>
-      ))}
+            <span
+              className={cn(
+                "size-1.5 shrink-0 rounded-full",
+                STEP_DOT[r.outcome] ?? "bg-muted-foreground/50",
+              )}
+            />
+            <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+              <span className="truncate text-xs font-semibold text-foreground">{r.workflow}</span>
+              <span className="truncate font-mono text-[10px] text-muted-foreground">{r.run}</span>
+            </div>
+            <span className="shrink-0 text-[11px] text-muted-foreground">
+              {fmtAgo(r.started_unix)} ago{dur ? ` · ${dur}` : ""} · {r.steps} step
+              {r.steps === 1 ? "" : "s"}
+            </span>
+            <span
+              className={cn(
+                "inline-flex h-[18px] shrink-0 items-center rounded px-1.5 text-[10px] font-semibold",
+                r.outcome === "completed"
+                  ? "bg-success/10 text-success"
+                  : r.outcome === "failed"
+                    ? "bg-destructive/10 text-destructive"
+                    : "bg-warning/10 text-warning",
+              )}
+            >
+              {r.outcome}
+            </span>
+            {r.resumable ? (
+              <span className="inline-flex h-[18px] shrink-0 items-center rounded bg-warning/10 px-1.5 text-[10px] font-semibold text-warning">
+                resumable
+              </span>
+            ) : null}
+          </div>
+        );
+      })}
     </div>
   );
 }
