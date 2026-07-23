@@ -391,12 +391,28 @@ export type AgentstackDiffInput = typeof AgentstackDiffInput.Type;
 // write. snake_case verbatim from the CLI. The apply that follows presents back
 // `plan_digest`; the CLI refuses if detection no longer digests to it.
 
-/** One coding tool the CLI detected on the machine. */
+/** One coding tool the CLI detected on the machine, with its evidence:
+ *  whether the binary is on PATH and the exact native config files detection
+ *  read. Both optional so a CLI predating Stage 1.2 still decodes. */
 export const AgentstackSetupDetected = Schema.Struct({
   id: Schema.String,
   display: Schema.String,
+  bin_on_path: Schema.optionalKey(Schema.Boolean),
+  configs: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 export type AgentstackSetupDetected = typeof AgentstackSetupDetected.Type;
+
+/** One native file a follow-up apply will manage, in user terms — which CLI,
+ *  which file, which scope ("project" | "global"), and what renders there
+ *  (e.g. "MCP servers", "settings"). */
+export const AgentstackSetupDestination = Schema.Struct({
+  id: Schema.String,
+  display: Schema.String,
+  scope: Schema.String,
+  path: Schema.String,
+  writes: Schema.Array(Schema.String),
+});
+export type AgentstackSetupDestination = typeof AgentstackSetupDestination.Type;
 
 /** One MCP server the plan would import into the new manifest. */
 export const AgentstackSetupServer = Schema.Struct({
@@ -437,6 +453,8 @@ export const AgentstackSetupPlan = Schema.Struct({
   secrets: Schema.Array(AgentstackSetupSecret),
   /** Where secret values will live (e.g. `keychain`). */
   secrets_destination: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  /** Native files apply will manage after setup (absent on older CLIs). */
+  destinations: Schema.optionalKey(Schema.Array(AgentstackSetupDestination)),
   /**
    * `sha256:<hex>` over the reviewed plan. The apply presents it back as
    * `--consented-plan`; the CLI refuses if detection changed since. Optional

@@ -1768,13 +1768,21 @@ function SetupPanel({
         {plan.detected.length === 0 ? (
           <span className="text-[11px] text-muted-foreground">none detected</span>
         ) : (
-          <ul className="flex flex-wrap gap-1">
+          <ul className="flex flex-col gap-0.5 text-[11px] leading-relaxed">
             {plan.detected.map((d) => (
-              <li
-                key={d.id}
-                className="rounded bg-muted-foreground/10 px-1.5 py-0.5 text-[11px] text-foreground"
-              >
-                {d.display}
+              <li key={d.id}>
+                <span className="font-semibold text-foreground">{d.display}</span>{" "}
+                {(d.configs?.length ?? 0) > 0 ? (
+                  <code className="break-all font-mono text-muted-foreground/90">
+                    {d.configs?.join(" · ")}
+                  </code>
+                ) : (
+                  <span className="text-muted-foreground/70">
+                    {d.bin_on_path === true
+                      ? "installed — no config files found"
+                      : "no config files found"}
+                  </span>
+                )}
               </li>
             ))}
           </ul>
@@ -1808,9 +1816,28 @@ function SetupPanel({
       </SetupGroup>
 
       <SetupGroup title="Files AgentStack will manage">
-        <code className="block break-all font-mono text-[11px] text-muted-foreground/90">
-          {plan.manifest_path}
-        </code>
+        <ul className="flex flex-col gap-0.5 text-[11px] leading-relaxed">
+          <li>
+            <code className="break-all font-mono text-muted-foreground/90">
+              {plan.manifest_path}
+            </code>{" "}
+            <span className="text-muted-foreground/70">— the manifest, written by setup</span>
+          </li>
+          {(plan.destinations ?? []).map((d) => (
+            <li key={`${d.id}:${d.path}`}>
+              <code className="break-all font-mono text-muted-foreground/90">{d.path}</code>{" "}
+              <span className="text-muted-foreground/70">
+                — {d.display} · {d.writes.join(" + ")} (
+                {d.scope === "project" ? "this project" : "machine-wide"})
+              </span>
+            </li>
+          ))}
+        </ul>
+        {(plan.destinations?.length ?? 0) > 0 ? (
+          <p className="text-[10.5px] leading-relaxed text-muted-foreground/60">
+            Native files are written when you apply the setup to your tools, not by setup itself.
+          </p>
+        ) : null}
       </SetupGroup>
 
       {plan.secrets.length > 0 ? (

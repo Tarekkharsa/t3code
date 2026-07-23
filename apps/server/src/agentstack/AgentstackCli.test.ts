@@ -473,12 +473,28 @@ describe("AgentstackCli", () => {
       path: "/proj",
       manifest_path: "/proj/.agentstack/agentstack.toml",
       already_initialized: false,
-      detected: [{ id: "claude-code", display: "Claude Code" }],
+      detected: [
+        {
+          id: "claude-code",
+          display: "Claude Code",
+          bin_on_path: true,
+          configs: ["/home/u/.claude.json"],
+        },
+      ],
       servers: [{ name: "search", kind: "stdio", target: "npx search-mcp" }],
       settings_from: [],
       conflicts: [{ name: "search", other_definitions: 1 }],
       secrets: [{ reference: "SEARCH_TOKEN", origin: "server 'search' (env SEARCH_TOKEN)" }],
       secrets_destination: "keychain",
+      destinations: [
+        {
+          id: "claude-code",
+          display: "Claude Code",
+          scope: "project",
+          path: "/proj/.mcp.json",
+          writes: ["MCP servers"],
+        },
+      ],
     };
     const digest = `sha256:${"ab".repeat(32)}`;
     const withEnvelope = AgentstackCli.parseSetupPlan(
@@ -492,12 +508,30 @@ describe("AgentstackCli", () => {
     expect(withEnvelope?.plan_digest).toBe(digest);
     expect(withEnvelope?.features).toEqual(["apply-setup"]);
     expect(withEnvelope?.detected[0]?.display).toBe("Claude Code");
+    // Stage 1.2: the detection evidence and destination files survive decode.
+    expect(withEnvelope?.detected[0]?.configs).toEqual(["/home/u/.claude.json"]);
+    expect(withEnvelope?.destinations?.[0]).toMatchObject({
+      path: "/proj/.mcp.json",
+      scope: "project",
+      writes: ["MCP servers"],
+    });
     // An older CLI (no envelope, no digest) still decodes; the apply path — not
     // the decode — is what refuses a digest-less plan.
     const without = AgentstackCli.parseSetupPlan(JSON.stringify(base));
     expect(without).not.toBeNull();
     expect(without?.plan_digest).toBeUndefined();
     expect(without?.schema_version).toBeUndefined();
+    // A CLI predating Stage 1.2 (no configs/destinations) still decodes.
+    const preStage12 = AgentstackCli.parseSetupPlan(
+      JSON.stringify({
+        ...base,
+        detected: [{ id: "claude-code", display: "Claude Code" }],
+        destinations: undefined,
+      }),
+    );
+    expect(preStage12).not.toBeNull();
+    expect(preStage12?.detected[0]?.configs).toBeUndefined();
+    expect(preStage12?.destinations).toBeUndefined();
     expect(AgentstackCli.parseSetupPlan("not json")).toBeNull();
   });
 
