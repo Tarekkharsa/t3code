@@ -306,11 +306,18 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [WS_METHODS.agentstackSetupPlan, AuthOrchestrationReadScope],
   [WS_METHODS.agentstackToolsets, AuthOrchestrationReadScope],
   [WS_METHODS.agentstackRestoreInventory, AuthOrchestrationReadScope],
+  // The library browser and the profile-edit PREVIEW are pure reads (nothing
+  // resolves, renders, or executes; no secret is touched), so they take the
+  // read scope — same as every other agentstack read.
+  [WS_METHODS.agentstackLibraryIndex, AuthOrchestrationReadScope],
+  [WS_METHODS.agentstackProfileEditPreview, AuthOrchestrationReadScope],
   // Governed actions touch the AgentStack security control plane — trust
   // grant/revoke, machine guard, config writes. That decides what code a
   // repo may run on this machine, so it takes the dedicated admin scope
   // (owner sessions carry it; standard delegated clients do not), not the
-  // vcs.pull tier.
+  // vcs.pull tier. The profile-edit APPLY writes the manifest and re-renders
+  // native configs, so it takes the same admin scope.
+  [WS_METHODS.agentstackProfileEditApply, AuthAgentstackAdminScope],
   [WS_METHODS.agentstackAction, AuthAgentstackAdminScope],
   [WS_METHODS.serverRefreshProviders, AuthOrchestrationOperateScope],
   [WS_METHODS.serverUpdateProvider, AuthOrchestrationOperateScope],
@@ -1574,7 +1581,14 @@ const makeWsRpcLayer = (
           observeRpcEffect(
             WS_METHODS.agentstackSetupPlan,
             resolveAgentstackWorkspaceRoot(input).pipe(
-              Effect.flatMap((workspaceRoot) => agentstackCli.setupPlan({ workspaceRoot })),
+              Effect.flatMap((workspaceRoot) =>
+                agentstackCli.setupPlan({
+                  workspaceRoot,
+                  ...(input.secretsDestination !== undefined
+                    ? { secretsDestination: input.secretsDestination }
+                    : {}),
+                }),
+              ),
             ),
             { "rpc.aggregate": "agentstack" },
           ),
@@ -1594,6 +1608,43 @@ const makeWsRpcLayer = (
             ),
             { "rpc.aggregate": "agentstack" },
           ),
+        [WS_METHODS.agentstackLibraryIndex]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.agentstackLibraryIndex,
+            resolveAgentstackWorkspaceRoot(input).pipe(
+              Effect.flatMap((workspaceRoot) => agentstackCli.libraryIndex({ workspaceRoot })),
+            ),
+            { "rpc.aggregate": "agentstack" },
+          ),
+        [WS_METHODS.agentstackProfileEditPreview]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.agentstackProfileEditPreview,
+            resolveAgentstackWorkspaceRoot(input).pipe(
+              Effect.flatMap((workspaceRoot) =>
+                agentstackCli.profileEditPreview({ workspaceRoot, edit: input.edit }),
+              ),
+            ),
+            { "rpc.aggregate": "agentstack" },
+          ),
+        [WS_METHODS.agentstackProfileEditApply]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.agentstackProfileEditApply,
+            resolveAgentstackWorkspaceRoot(input).pipe(
+              Effect.flatMap((workspaceRoot) =>
+                agentstackCli.profileEditApply({
+                  workspaceRoot,
+                  edit: input.edit,
+                  consented: {
+                    digest: input.consentedDigest,
+                    ...(input.allowUnresolved !== undefined
+                      ? { allowUnresolved: input.allowUnresolved }
+                      : {}),
+                  },
+                }),
+              ),
+            ),
+            { "rpc.aggregate": "agentstack" },
+          ),
         [WS_METHODS.agentstackAction]: (input) =>
           observeRpcEffect(
             WS_METHODS.agentstackAction,
@@ -1608,6 +1659,9 @@ const makeWsRpcLayer = (
                   ...(input.planDigest !== undefined ? { planDigest: input.planDigest } : {}),
                   ...(input.restoreId !== undefined ? { restoreId: input.restoreId } : {}),
                   ...(input.profile !== undefined ? { profile: input.profile } : {}),
+                  ...(input.secretsDestination !== undefined
+                    ? { secretsDestination: input.secretsDestination }
+                    : {}),
                 }),
               ),
             ),

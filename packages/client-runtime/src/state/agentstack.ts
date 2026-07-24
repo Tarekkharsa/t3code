@@ -44,6 +44,18 @@ export function createAgentstackEnvironmentAtoms<R, E>(
       tag: WS_METHODS.agentstackRestoreInventory,
       label: "agentstack.restoreInventory",
     }),
+    libraryIndex: createEnvironmentRpcCommand(runtime, {
+      tag: WS_METHODS.agentstackLibraryIndex,
+      label: "agentstack.libraryIndex",
+    }),
+    profileEditPreview: createEnvironmentRpcCommand(runtime, {
+      tag: WS_METHODS.agentstackProfileEditPreview,
+      label: "agentstack.profileEditPreview",
+    }),
+    profileEditApply: createEnvironmentRpcCommand(runtime, {
+      tag: WS_METHODS.agentstackProfileEditApply,
+      label: "agentstack.profileEditApply",
+    }),
     action: createEnvironmentRpcCommand(runtime, {
       tag: WS_METHODS.agentstackAction,
       label: "agentstack.action",

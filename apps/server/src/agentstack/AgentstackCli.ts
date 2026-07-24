@@ -2,6 +2,8 @@ import {
   AgentstackCallEvent,
   AgentstackDiffReport,
   AgentstackDoctorReport,
+  AgentstackLibraryIndex,
+  AgentstackProfileEditPreview,
   AgentstackRestoreInventory,
   AgentstackSetupPlan,
   AgentstackToolsets,
@@ -14,7 +16,11 @@ import {
   type AgentstackActivity,
   type AgentstackDiffResult,
   type AgentstackIncompatible,
+  type AgentstackLibraryIndexResult,
+  type AgentstackProfileEdit,
+  type AgentstackProfileEditPreviewResult,
   type AgentstackRestoreInventoryResult,
+  type AgentstackSecretsDestination,
   type AgentstackSetupPlanResult,
   type AgentstackStatus,
   type AgentstackToolsetsResult,
@@ -77,6 +83,30 @@ export interface AgentstackDiffRequest {
   readonly scope: "global" | "project";
 }
 
+/** A setup-plan read against a resolved workspace root. */
+export interface AgentstackSetupPlanRequest {
+  readonly workspaceRoot: string;
+  /**
+   * Which secret store to read the plan for (`init --plan --secrets <choice>`).
+   * The store is bound into the returned `plan_digest`; absent → the CLI's
+   * non-interactive default (keychain).
+   */
+  readonly secretsDestination?: AgentstackSecretsDestination;
+}
+
+/**
+ * A profile-edit preview or apply against a resolved workspace root. `edit`
+ * carries the parameterized change (the discriminated union the panel composed);
+ * `consented` is present only on an apply — its digest maps to `--consented` and
+ * is refused before spawn when malformed. `allowUnresolved` maps to
+ * `--allow-unresolved` (off by default).
+ */
+export interface AgentstackProfileEditRequest {
+  readonly workspaceRoot: string;
+  readonly edit: AgentstackProfileEdit;
+  readonly consented?: { readonly digest: string; readonly allowUnresolved?: boolean };
+}
+
 /** A governed action against a resolved workspace root. */
 export interface AgentstackActionRequest {
   readonly workspaceRoot: string;
@@ -105,6 +135,13 @@ export interface AgentstackActionRequest {
    * (untrusted / unpinned / drifted) surfaces.
    */
   readonly profile?: string;
+  /**
+   * `setup-apply` only: the secret store the reviewed plan was read for,
+   * mapped to `--secrets <choice>`. Must match the store bound into
+   * `planDigest`; the CLI recomputes the digest with this store and refuses a
+   * mismatch. A value outside the closed set is refused before anything spawns.
+   */
+  readonly secretsDestination?: AgentstackSecretsDestination;
 }
 
 /**
@@ -125,6 +162,108 @@ export const RESTORE_ID_RE = /^[0-9a-f]{8,64}$/;
  * args-array, so this is shape hygiene, not injection defense).
  */
 export const PROFILE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+/**
+ * The closed set of `--secrets` values setup-apply may forward. The contract
+ * schema already constrains this to the same literal union, but re-check at the
+ * argv boundary — same fail-closed hygiene as the digest/profile shapes, and it
+ * keeps the guard honest if the type is ever widened upstream.
+ */
+export const SECRETS_DESTINATIONS: ReadonlySet<string> = new Set(["env", "keychain", "skip"]);
+
+/**
+ * The name shape allowed to reach a profile-edit argv as a toolset or capability
+ * (skill/server) identifier. Same fail-closed hygiene as the other bound shapes:
+ * spawning is args-array (no shell), so this bounds surface, not injection. The
+ * inline-all-skills wildcard `*` is accepted separately where the CLI allows it.
+ */
+export const PROFILE_EDIT_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+/** Defensive bounds for free-form profile-edit definition fields (git URL,
+ *  command, header/env pairs, …) that reach argv verbatim. The panel's browser
+ *  drives only the enroll-existing and create paths, so these are a safety net
+ *  for the full contract, not the common case. */
+const PROFILE_EDIT_MAX_FIELD_LEN = 4096;
+const PROFILE_EDIT_MAX_LIST_LEN = 128;
+
+function isPlainName(value: string): boolean {
+  return PROFILE_EDIT_NAME_RE.test(value);
+}
+
+function boundedField(value: string | undefined): boolean {
+  return value === undefined || value.length <= PROFILE_EDIT_MAX_FIELD_LEN;
+}
+
+function boundedList(list: ReadonlyArray<string> | undefined): boolean {
+  return (
+    list === undefined ||
+    (list.length <= PROFILE_EDIT_MAX_LIST_LEN &&
+      list.every((v) => v.length <= PROFILE_EDIT_MAX_FIELD_LEN))
+  );
+}
+
+/**
+ * Fail-closed shape check for a composed profile edit before any argv is built.
+ * Returns a human message when the client-supplied names/fields are out of
+ * shape (the toolset and capability identifiers must be plain names; free-form
+ * definition fields must stay within bounds), or null when the edit is safe to
+ * pass to [`profileEditArgv`]. The CLI re-validates everything; this is the
+ * cheaper boundary refusal and keeps malformed input off the argv.
+ */
+export function validateProfileEdit(edit: AgentstackProfileEdit): string | null {
+  switch (edit.kind) {
+    case "add-skill-to-profile": {
+      if (!isPlainName(edit.profile)) return "toolset name looks malformed";
+      if (!isPlainName(edit.name)) return "skill name looks malformed";
+      if (edit.git !== undefined && edit.path !== undefined) {
+        return "a skill can't have both a git source and a path";
+      }
+      if (
+        !boundedField(edit.git) ||
+        !boundedField(edit.rev) ||
+        !boundedField(edit.subpath) ||
+        !boundedField(edit.path)
+      ) {
+        return "a skill source field is too long";
+      }
+      return null;
+    }
+    case "add-server-to-profile": {
+      if (!isPlainName(edit.profile)) return "toolset name looks malformed";
+      if (!isPlainName(edit.name)) return "server name looks malformed";
+      if (
+        !boundedField(edit.url) ||
+        !boundedField(edit.command) ||
+        !boundedField(edit.cwd) ||
+        !boundedList(edit.args) ||
+        !boundedList(edit.headers) ||
+        !boundedList(edit.env)
+      ) {
+        return "a server definition field is too long";
+      }
+      return null;
+    }
+    case "create-profile": {
+      if (!isPlainName(edit.name)) return "toolset name looks malformed";
+      if (edit.skills.length === 0 && edit.servers.length === 0) {
+        return "pick at least one skill or server for the toolset";
+      }
+      if (
+        edit.skills.length > PROFILE_EDIT_MAX_LIST_LEN ||
+        edit.servers.length > PROFILE_EDIT_MAX_LIST_LEN
+      ) {
+        return "too many members for one toolset";
+      }
+      // `*` is the CLI's inline-all-skills wildcard (skills only); every other
+      // member must be a plain capability name.
+      if (!edit.skills.every((s) => s === "*" || isPlainName(s))) {
+        return "a skill name looks malformed";
+      }
+      if (!edit.servers.every((s) => isPlainName(s))) return "a server name looks malformed";
+      return null;
+    }
+  }
+}
 
 /**
  * The envelope `schema_version` this build understands. A read whose payload
@@ -256,6 +395,92 @@ export function parseRestoreInventory(stdout: string) {
   return Option.getOrNull(decodeRestoreInventory(stdout));
 }
 
+const decodeLibraryIndex = Schema.decodeUnknownOption(
+  Schema.fromJsonString(AgentstackLibraryIndex),
+);
+
+export function parseLibraryIndex(stdout: string) {
+  return Option.getOrNull(decodeLibraryIndex(stdout));
+}
+
+const decodeProfileEditPreview = Schema.decodeUnknownOption(
+  Schema.fromJsonString(AgentstackProfileEditPreview),
+);
+
+export function parseProfileEditPreview(stdout: string) {
+  return Option.getOrNull(decodeProfileEditPreview(stdout));
+}
+
+/**
+ * The fixed argv for a profile edit — the client supplies only the composed
+ * `edit` (its shape already checked by [`validateProfileEdit`]) and, on apply,
+ * the consent flags. `kind` selects the CLI verb; a bare call (no `consent`) is
+ * a `--preview` that writes nothing, while an apply presents the reviewed digest
+ * back with `--yes --consented <digest>`. The panel never supplies a command
+ * line, a scope, or a `--prune-foreign`.
+ */
+export function profileEditArgv(
+  workspaceRoot: string,
+  edit: AgentstackProfileEdit,
+  consent?: { readonly digest: string; readonly allowUnresolved?: boolean },
+): ReadonlyArray<string> {
+  const base = ["--manifest-dir", workspaceRoot];
+  // Preview is the default (nothing writes); apply is --yes + the reviewed
+  // digest, optionally allowing an unresolved ${REF} through the render.
+  const consentFlags = consent
+    ? [
+        "--yes",
+        "--consented",
+        consent.digest,
+        ...(consent.allowUnresolved ? ["--allow-unresolved"] : []),
+      ]
+    : ["--preview"];
+  switch (edit.kind) {
+    case "add-skill-to-profile": {
+      const argv = [
+        ...base,
+        "add-skill-to-profile",
+        "--profile",
+        edit.profile,
+        "--name",
+        edit.name,
+      ];
+      if (edit.git !== undefined) argv.push("--git", edit.git);
+      if (edit.rev !== undefined) argv.push("--rev", edit.rev);
+      if (edit.subpath !== undefined) argv.push("--subpath", edit.subpath);
+      if (edit.path !== undefined) argv.push("--path", edit.path);
+      return [...argv, ...consentFlags];
+    }
+    case "add-server-to-profile": {
+      const argv = [
+        ...base,
+        "add-server-to-profile",
+        "--profile",
+        edit.profile,
+        "--name",
+        edit.name,
+      ];
+      // `--type` only for a NEW definition; omitted when enrolling an existing
+      // server (the CLI's default is unused there, and both preview and apply
+      // omit it identically so the digest lines up).
+      if (edit.transport !== undefined) argv.push("--type", edit.transport);
+      if (edit.url !== undefined) argv.push("--url", edit.url);
+      if (edit.command !== undefined) argv.push("--command", edit.command);
+      for (const a of edit.args ?? []) argv.push("--arg", a);
+      for (const h of edit.headers ?? []) argv.push("--header", h);
+      for (const e of edit.env ?? []) argv.push("--env", e);
+      if (edit.cwd !== undefined) argv.push("--cwd", edit.cwd);
+      return [...argv, ...consentFlags];
+    }
+    case "create-profile": {
+      const argv = [...base, "create-profile", "--name", edit.name];
+      for (const s of edit.skills) argv.push("--skill", s);
+      for (const s of edit.servers) argv.push("--server", s);
+      return [...argv, ...consentFlags];
+    }
+  }
+}
+
 /**
  * The fixed argv for each vetted action — the client never supplies one. The
  * bound values (`consentedDigest`, `planDigest`, `restoreId`) are consulted
@@ -270,6 +495,7 @@ export function actionArgv(
     readonly planDigest?: string | undefined;
     readonly restoreId?: string | undefined;
     readonly profile?: string | undefined;
+    readonly secretsDestination?: string | undefined;
   },
 ): ReadonlyArray<string> {
   switch (action) {
@@ -311,13 +537,16 @@ export function actionArgv(
       ];
     case "trust-revoke":
       return ["--manifest-dir", workspaceRoot, "trust", workspaceRoot, "--revoke"];
-    case "setup-apply":
+    case "setup-apply": {
       // Apply the reviewed `init --plan`. --consented-plan presents back the
       // plan_digest the user saw; the CLI writes nothing if detection changed.
-      // NO --secrets flag — both the plan read and this apply default to
-      // keychain, so the digests line up. The caller refuses before spawn when
-      // the digest is absent/malformed, so the "" fallback never reaches argv.
-      return [
+      // The plan_digest also binds the secret-store choice, so forward the same
+      // --secrets value the plan was read for — the CLI recomputes the digest
+      // with this store and refuses on mismatch. Absent → the CLI's default
+      // (keychain), matching a plan read that also omitted --secrets. The caller
+      // refuses before spawn when the digest is absent/malformed or the store is
+      // outside the closed set, so the "" fallback never reaches argv.
+      const argv = [
         "--manifest-dir",
         workspaceRoot,
         "init",
@@ -325,6 +554,11 @@ export function actionArgv(
         "--consented-plan",
         bound?.planDigest ?? "",
       ];
+      if (bound?.secretsDestination !== undefined) {
+        argv.push("--secrets", bound.secretsDestination);
+      }
+      return argv;
+    }
     case "restore-write":
       // Undo one ledger entry by its full hex id (validated before spawn).
       // Never `--last` — the ledger is machine-global and the panel already
@@ -351,6 +585,22 @@ export function actionArgv(
   }
 }
 
+/**
+ * The last non-empty line of CLI output as the human outcome, with ANSI SGR
+ * colour sequences stripped so the panel never renders raw escape codes. Shared
+ * by the governed `action` and the profile-edit apply, both of which surface a
+ * text outcome line (never JSON) exactly like the terminal command.
+ */
+function lastCliLine(text: string): string {
+  return (
+    text
+      .replaceAll(/\u001b\[[0-9;]*m/g, "")
+      .split("\n")
+      .findLast((l) => l.trim().length > 0)
+      ?.trim() ?? ""
+  );
+}
+
 function isBinaryNotFound(error: ProcessRunner.ProcessRunError): boolean {
   return (
     error._tag === "ProcessSpawnError" &&
@@ -375,7 +625,7 @@ export class AgentstackCli extends Context.Service<
     ) => Effect.Effect<AgentstackTrustPreviewResult>;
     readonly diff: (input: AgentstackDiffRequest) => Effect.Effect<AgentstackDiffResult>;
     readonly setupPlan: (
-      input: AgentstackWorkspaceRequest,
+      input: AgentstackSetupPlanRequest,
     ) => Effect.Effect<AgentstackSetupPlanResult>;
     readonly toolsets: (
       input: AgentstackWorkspaceRequest,
@@ -383,6 +633,15 @@ export class AgentstackCli extends Context.Service<
     readonly restoreInventory: (
       input: AgentstackWorkspaceRequest,
     ) => Effect.Effect<AgentstackRestoreInventoryResult>;
+    readonly libraryIndex: (
+      input: AgentstackWorkspaceRequest,
+    ) => Effect.Effect<AgentstackLibraryIndexResult>;
+    readonly profileEditPreview: (
+      input: AgentstackProfileEditRequest,
+    ) => Effect.Effect<AgentstackProfileEditPreviewResult>;
+    readonly profileEditApply: (
+      input: AgentstackProfileEditRequest,
+    ) => Effect.Effect<AgentstackActionResult>;
     readonly action: (input: AgentstackActionRequest) => Effect.Effect<AgentstackActionResult>;
   }
 >()("t3/agentstack/AgentstackCli") {}
@@ -609,7 +868,14 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
 
   const setupPlan: AgentstackCli["Service"]["setupPlan"] = Effect.fn("AgentstackCli.setupPlan")(
     function* (input) {
-      const result = yield* run(["--manifest-dir", input.workspaceRoot, "init", "--plan"]).pipe(
+      // Read the plan for the requested secret store; the store is bound into
+      // the `plan_digest`, so the apply must present it back with the same
+      // `--secrets` value. Absent → the CLI's own default (keychain).
+      const planArgs = ["--manifest-dir", input.workspaceRoot, "init", "--plan"];
+      if (input.secretsDestination !== undefined) {
+        planArgs.push("--secrets", input.secretsDestination);
+      }
+      const result = yield* run(planArgs).pipe(
         Effect.match({
           onFailure: (error) =>
             isBinaryNotFound(error)
@@ -675,6 +941,109 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
     };
   });
 
+  const libraryIndex: AgentstackCli["Service"]["libraryIndex"] = Effect.fn(
+    "AgentstackCli.libraryIndex",
+  )(function* (input) {
+    const result = yield* run(["--manifest-dir", input.workspaceRoot, "library-index"]).pipe(
+      Effect.match({
+        onFailure: (error) =>
+          isBinaryNotFound(error) ? ({ _tag: "NotFound" } as const) : ({ _tag: "Failed" } as const),
+        onSuccess: (r) => ({ _tag: "Success", result: r }) as const,
+      }),
+    );
+    const index = result._tag === "Success" ? parseLibraryIndex(result.result.stdout) : null;
+    return {
+      installed: result._tag !== "NotFound",
+      index,
+      ...negotiate(index),
+      checkedAt: yield* Clock.currentTimeMillis,
+    };
+  });
+
+  const profileEditPreview: AgentstackCli["Service"]["profileEditPreview"] = Effect.fn(
+    "AgentstackCli.profileEditPreview",
+  )(function* (input) {
+    // A preview writes nothing, but it still reaches argv — refuse a malformed
+    // edit at the boundary and surface no preview (the panel treats a null
+    // preview as "can't compose this change").
+    if (validateProfileEdit(input.edit) !== null) {
+      return {
+        installed: true,
+        preview: null,
+        features: [],
+        incompatible: null,
+        checkedAt: yield* Clock.currentTimeMillis,
+      };
+    }
+    const result = yield* run(profileEditArgv(input.workspaceRoot, input.edit)).pipe(
+      Effect.match({
+        onFailure: (error) =>
+          isBinaryNotFound(error) ? ({ _tag: "NotFound" } as const) : ({ _tag: "Failed" } as const),
+        onSuccess: (r) => ({ _tag: "Success", result: r }) as const,
+      }),
+    );
+    const preview =
+      result._tag === "Success" ? parseProfileEditPreview(result.result.stdout) : null;
+    return {
+      installed: result._tag !== "NotFound",
+      preview,
+      ...negotiate(preview),
+      checkedAt: yield* Clock.currentTimeMillis,
+    };
+  });
+
+  const profileEditApply: AgentstackCli["Service"]["profileEditApply"] = Effect.fn(
+    "AgentstackCli.profileEditApply",
+  )(function* (input) {
+    // Fail closed, before anything spawns: the reviewed consent digest must be
+    // present and well-formed, and the composed edit must be in shape. Either
+    // failure refuses with a reason and never reaches a process — the CLI still
+    // re-verifies the digest against the manifest bytes as the real guarantee.
+    const consent = input.consented;
+    if (consent === undefined || !CONSENT_DIGEST_RE.test(consent.digest)) {
+      return {
+        ok: false,
+        message:
+          consent === undefined
+            ? "this change needs the reviewed digest — re-open the preview and confirm"
+            : "this change was given a malformed digest — re-open the preview and try again",
+      };
+    }
+    const shapeError = validateProfileEdit(input.edit);
+    if (shapeError !== null) {
+      return { ok: false, message: shapeError };
+    }
+    const result = yield* processRunner
+      .run({
+        command: binary,
+        args: profileEditArgv(input.workspaceRoot, input.edit, {
+          digest: consent.digest,
+          ...(consent.allowUnresolved ? { allowUnresolved: true } : {}),
+        }),
+        timeout: ACTION_TIMEOUT,
+        timeoutBehavior: "timedOutResult",
+        maxOutputBytes: MAX_STDOUT_BYTES,
+        outputMode: "truncate",
+      })
+      .pipe(
+        Effect.match({
+          onFailure: (error) =>
+            isBinaryNotFound(error)
+              ? ({ _tag: "NotFound" } as const)
+              : ({ _tag: "Failed" } as const),
+          onSuccess: (r) => ({ _tag: "Success", result: r }) as const,
+        }),
+      );
+    if (result._tag === "NotFound") return { ok: false, message: "agentstack CLI not found" };
+    if (result._tag === "Failed")
+      return { ok: false, message: "agentstack command could not be run" };
+    const r = result.result;
+    if (r.timedOut) return { ok: false, message: "timed out" };
+    const ok = r.code === 0;
+    const message = lastCliLine(r.stdout) || lastCliLine(r.stderr) || (ok ? "done" : "failed");
+    return { ok, message: message.slice(0, 200) };
+  });
+
   const action: AgentstackCli["Service"]["action"] = Effect.fn("AgentstackCli.action")(
     function* (input) {
       // Consent binding (fail closed, before anything spawns): a trust grant
@@ -707,6 +1076,13 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
                 ? "setup needs the reviewed plan digest — update the agentstack CLI (this one's plan has no plan_digest) or re-open setup"
                 : "setup was given a malformed plan digest — re-open setup and try again",
           };
+        }
+        // The secret-store choice (if the client sent one) must be a member of
+        // the closed set before it reaches `--secrets`. The digest binding is
+        // the real guarantee; this is fail-closed shape hygiene at the boundary.
+        const dest = input.secretsDestination;
+        if (dest !== undefined && !SECRETS_DESTINATIONS.has(dest)) {
+          return { ok: false, message: "setup was given an unknown secret-store choice" };
         }
       }
       // Restore-write is id-bound: refuse anything that isn't a plausible
@@ -746,6 +1122,7 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
             planDigest: input.planDigest,
             restoreId: input.restoreId,
             profile: input.profile,
+            secretsDestination: input.secretsDestination,
           }),
           timeout: ACTION_TIMEOUT,
           timeoutBehavior: "timedOutResult",
@@ -771,17 +1148,10 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
       if (r.timedOut) {
         return { ok: false, message: "timed out" };
       }
-      // Last non-empty line of stdout (or stderr) is the human outcome. The
-      // CLI colors its terminal output; strip ANSI SGR sequences so the panel
-      // never renders raw escape codes.
-      const lastLine = (text: string): string =>
-        text
-          .replaceAll(/\u001b\[[0-9;]*m/g, "")
-          .split("\n")
-          .findLast((l) => l.trim().length > 0)
-          ?.trim() ?? "";
+      // Last non-empty line of stdout (or stderr) is the human outcome (ANSI
+      // stripped) — shared with the profile-edit apply via [`lastCliLine`].
       const ok = r.code === 0;
-      const message = lastLine(r.stdout) || lastLine(r.stderr) || (ok ? "done" : "failed");
+      const message = lastCliLine(r.stdout) || lastCliLine(r.stderr) || (ok ? "done" : "failed");
       return { ok, message: message.slice(0, 200) };
     },
   );
@@ -796,6 +1166,9 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
     setupPlan,
     toolsets,
     restoreInventory,
+    libraryIndex,
+    profileEditPreview,
+    profileEditApply,
     action,
   });
 });

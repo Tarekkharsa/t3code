@@ -21,6 +21,11 @@ import {
   AgentstackActivityInput,
   AgentstackDiffInput,
   AgentstackDiffResult,
+  AgentstackLibraryIndexInput,
+  AgentstackLibraryIndexResult,
+  AgentstackProfileEditApplyInput,
+  AgentstackProfileEditPreviewInput,
+  AgentstackProfileEditPreviewResult,
   AgentstackRestoreInventoryInput,
   AgentstackRestoreInventoryResult,
   AgentstackSetupPlanInput,
@@ -204,6 +209,9 @@ export const WS_METHODS = {
   agentstackSetupPlan: "agentstack.setupPlan",
   agentstackToolsets: "agentstack.toolsets",
   agentstackRestoreInventory: "agentstack.restoreInventory",
+  agentstackLibraryIndex: "agentstack.libraryIndex",
+  agentstackProfileEditPreview: "agentstack.profileEditPreview",
+  agentstackProfileEditApply: "agentstack.profileEditApply",
   agentstackAction: "agentstack.action",
 
   // Git workflow methods
@@ -347,6 +355,24 @@ export const WsAgentstackToolsetsRpc = Rpc.make(WS_METHODS.agentstackToolsets, {
 export const WsAgentstackRestoreInventoryRpc = Rpc.make(WS_METHODS.agentstackRestoreInventory, {
   payload: AgentstackRestoreInventoryInput,
   success: AgentstackRestoreInventoryResult,
+  error: Schema.Union([AgentstackWorkspaceContextError, EnvironmentAuthorizationError]),
+});
+
+export const WsAgentstackLibraryIndexRpc = Rpc.make(WS_METHODS.agentstackLibraryIndex, {
+  payload: AgentstackLibraryIndexInput,
+  success: AgentstackLibraryIndexResult,
+  error: Schema.Union([AgentstackWorkspaceContextError, EnvironmentAuthorizationError]),
+});
+
+export const WsAgentstackProfileEditPreviewRpc = Rpc.make(WS_METHODS.agentstackProfileEditPreview, {
+  payload: AgentstackProfileEditPreviewInput,
+  success: AgentstackProfileEditPreviewResult,
+  error: Schema.Union([AgentstackWorkspaceContextError, EnvironmentAuthorizationError]),
+});
+
+export const WsAgentstackProfileEditApplyRpc = Rpc.make(WS_METHODS.agentstackProfileEditApply, {
+  payload: AgentstackProfileEditApplyInput,
+  success: AgentstackActionResult,
   error: Schema.Union([AgentstackWorkspaceContextError, EnvironmentAuthorizationError]),
 });
 
@@ -797,6 +823,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsAgentstackSetupPlanRpc,
   WsAgentstackToolsetsRpc,
   WsAgentstackRestoreInventoryRpc,
+  WsAgentstackLibraryIndexRpc,
+  WsAgentstackProfileEditPreviewRpc,
+  WsAgentstackProfileEditApplyRpc,
   WsAgentstackActionRpc,
   WsServerRefreshProvidersRpc,
   WsServerUpdateProviderRpc,

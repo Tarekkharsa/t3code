@@ -3,7 +3,11 @@ import type {
   AgentstackDiffReport,
   AgentstackDiffResult,
   AgentstackDiffTarget,
+  AgentstackLibraryIndexResult,
+  AgentstackProfileEdit,
+  AgentstackProfileEditPreviewResult,
   AgentstackRestoreInventoryResult,
+  AgentstackSecretsDestination,
   AgentstackSetupPlan,
   AgentstackSetupPlanResult,
   AgentstackStatus,
@@ -58,6 +62,9 @@ const FEATURE_APPLY_SETUP = "apply-setup";
 const FEATURE_RESTORE_LAST = "restore-last";
 const FEATURE_TRUST_CONSENT = "trust-consent";
 const FEATURE_SESSIONS = "sessions-v1";
+/** The library browser + digest-bound toolset edits (add-to-toolset, new
+ *  toolset). When the CLI doesn't advertise it, the affordances stay hidden. */
+const FEATURE_PROFILES_EDIT = "profiles-edit-v1";
 
 const LEVEL_DOT: Record<AgentstackRowLevel, string> = {
   ok: "bg-success",
@@ -184,6 +191,7 @@ export function AgentstackControl({
   const [actionState, setActionState] = useState<ActionState>({ phase: "idle" });
   const [reviewing, setReviewing] = useState(false);
   const [reviewingDrift, setReviewingDrift] = useState(false);
+  const [browsingLibrary, setBrowsingLibrary] = useState(false);
   // The 1c expanded monitor: which run it shows, and (for recorded runs) the
   // evidence fetched for it. A live target reads the polled activeRun instead.
   const [monitorTarget, setMonitorTarget] = useState<{
@@ -207,6 +215,15 @@ export function AgentstackControl({
     reportFailure: false,
   });
   const fetchToolsets = useAtomCommand(agentstackEnvironment.toolsets, { reportFailure: false });
+  const fetchLibraryIndex = useAtomCommand(agentstackEnvironment.libraryIndex, {
+    reportFailure: false,
+  });
+  const previewEdit = useAtomCommand(agentstackEnvironment.profileEditPreview, {
+    reportFailure: false,
+  });
+  const applyEdit = useAtomCommand(agentstackEnvironment.profileEditApply, {
+    reportFailure: false,
+  });
   const runAction = useAtomCommand(agentstackEnvironment.action, { reportFailure: false });
 
   const input = useMemo(
@@ -296,10 +313,15 @@ export function AgentstackControl({
     [environmentId, fetchDiff, input],
   );
 
-  const loadSetupPlan = useCallback(async () => {
-    const r = await fetchSetupPlan({ environmentId, input });
-    return r._tag === "Success" ? r.value : null;
-  }, [environmentId, fetchSetupPlan, input]);
+  const loadSetupPlan = useCallback(
+    async (secretsDestination: AgentstackSecretsDestination) => {
+      // Read the plan bound to the chosen secret store — its plan_digest
+      // includes that choice, so the apply below presents the matching digest.
+      const r = await fetchSetupPlan({ environmentId, input: { ...input, secretsDestination } });
+      return r._tag === "Success" ? r.value : null;
+    },
+    [environmentId, fetchSetupPlan, input],
+  );
 
   const loadRestoreInventory = useCallback(async () => {
     const r = await fetchRestoreInventory({ environmentId, input });
@@ -309,10 +331,10 @@ export function AgentstackControl({
   // Apply a reviewed setup plan: the plan_digest the user saw is presented
   // back, so the CLI writes nothing if detection changed since the preview.
   const onSetupApply = useCallback(
-    async (planDigest: string) => {
+    async (planDigest: string, secretsDestination: AgentstackSecretsDestination) => {
       const r = await runAction({
         environmentId,
-        input: { ...input, action: "setup-apply", planDigest },
+        input: { ...input, action: "setup-apply", planDigest, secretsDestination },
       });
       void refresh();
       return r._tag === "Success" ? r.value : { ok: false, message: "The setup could not be run." };
@@ -360,6 +382,36 @@ export function AgentstackControl({
       ? r.value
       : { ok: false, message: "The session could not be ended." };
   }, [environmentId, runAction, input, refresh]);
+
+  // The library browser catalog (skills + servers + existing toolset names).
+  const loadLibraryIndex = useCallback(async () => {
+    const r = await fetchLibraryIndex({ environmentId, input });
+    return r._tag === "Success" ? r.value : null;
+  }, [environmentId, fetchLibraryIndex, input]);
+
+  // Preview a composed toolset edit: the CLI returns the change + a consent
+  // digest the apply below must echo back. Writes nothing.
+  const previewProfileEdit = useCallback(
+    async (edit: AgentstackProfileEdit) => {
+      const r = await previewEdit({ environmentId, input: { ...input, edit } });
+      return r._tag === "Success" ? r.value : null;
+    },
+    [environmentId, previewEdit, input],
+  );
+
+  // Apply the reviewed edit with its digest. On success the caller refreshes
+  // the overview + toolsets; the ${REF}-blocked case comes back as ok:false
+  // with the CLI's own line naming the missing secret.
+  const applyProfileEdit = useCallback(
+    async (edit: AgentstackProfileEdit, consentedDigest: string) => {
+      const r = await applyEdit({ environmentId, input: { ...input, edit, consentedDigest } });
+      void refresh();
+      return r._tag === "Success"
+        ? r.value
+        : { ok: false, message: "The change could not be applied." };
+    },
+    [environmentId, applyEdit, input, refresh],
+  );
 
   const runDriftAction = useCallback(
     async (action: ActionKind) => {
@@ -415,6 +467,9 @@ export function AgentstackControl({
   const trustConsentMissing = agentstackFeatureKnownMissing(features, FEATURE_TRUST_CONSENT);
   const canSessions = hasAgentstackFeature(features, FEATURE_SESSIONS);
   const sessionsKnownMissing = agentstackFeatureKnownMissing(features, FEATURE_SESSIONS);
+  // The library/toolset-edit affordances appear only when the CLI advertises the
+  // contract — an older CLI simply doesn't show "Browse library"/"New toolset".
+  const canEditProfiles = hasAgentstackFeature(features, FEATURE_PROFILES_EDIT);
 
   const overviewRows: AgentstackOverviewRow[] = useMemo(
     () => (status?.doctor ? deriveAgentstackOverviewRows(status.doctor) : []),
@@ -432,6 +487,7 @@ export function AgentstackControl({
             setActionState({ phase: "idle" });
             setReviewing(false);
             setReviewingDrift(false);
+            setBrowsingLibrary(false);
           }
         }}
         open={open}
@@ -507,6 +563,13 @@ export function AgentstackControl({
               onAction={runDriftAction}
               onClose={() => setReviewingDrift(false)}
             />
+          ) : browsingLibrary ? (
+            <LibraryPanel
+              loadIndex={loadLibraryIndex}
+              preview={previewProfileEdit}
+              apply={applyProfileEdit}
+              onClose={() => setBrowsingLibrary(false)}
+            />
           ) : status?.installed && incompatible ? (
             <UpdateNeeded incompatible={incompatible} cliVersion={status.version} />
           ) : status?.installed && setupState === "needs_setup" ? (
@@ -539,7 +602,7 @@ export function AgentstackControl({
                 ) : status === null ? (
                   <p className="px-4 py-4 text-xs text-muted-foreground">Checking…</p>
                 ) : !status.installed ? (
-                  <NotInstalled />
+                  <NotInstalled onRecheck={refresh} />
                 ) : tab === "overview" ? (
                   <>
                     <OverviewPanel
@@ -556,6 +619,8 @@ export function AgentstackControl({
                       toolsets={toolsets}
                       canSessions={canSessions}
                       sessionsKnownMissing={sessionsKnownMissing}
+                      canEditProfiles={canEditProfiles}
+                      onManageLibrary={() => setBrowsingLibrary(true)}
                       onSessionStart={onSessionStart}
                       onSessionEnd={onSessionEnd}
                       actionState={actionState}
@@ -604,9 +669,26 @@ export function AgentstackControl({
   );
 }
 
-function NotInstalled() {
+/**
+ * Shown when the `agentstack` binary can't be spawned (absent from PATH and no
+ * `T3CODE_AGENTSTACK_BIN` override) — an install-guidance card, not a dead
+ * panel. States what happened, why it matters, and the exact next step, then a
+ * "Check again" affordance so the user can re-detect without waiting for the
+ * background poll.
+ */
+function NotInstalled({ onRecheck }: { onRecheck: () => Promise<void> | void }) {
+  const [rechecking, setRechecking] = useState(false);
+  const recheck = async () => {
+    setRechecking(true);
+    try {
+      await onRecheck();
+    } finally {
+      setRechecking(false);
+    }
+  };
   return (
     <div className="flex flex-col gap-3 px-4 py-4 text-xs leading-relaxed text-muted-foreground">
+      <p className="text-[12.5px] font-semibold text-foreground">AgentStack isn't installed</p>
       <p>
         The <code className="font-mono">agentstack</code> CLI isn't reachable on the machine running
         this project, so its sessions run ungoverned. It's a local binary — install it to get
@@ -637,10 +719,19 @@ function NotInstalled() {
           T3CODE_AGENTSTACK_BIN=/path/to/agentstack
         </pre>
       </div>
-      <p className="text-[10.5px] text-muted-foreground/60">
-        This panel re-checks every few seconds — once the CLI is reachable, it fills in
-        automatically.
-      </p>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          disabled={rechecking}
+          onClick={() => void recheck()}
+          className="inline-flex h-7 items-center rounded-lg border border-border/60 px-3 text-xs font-semibold text-muted-foreground hover:text-foreground disabled:opacity-60"
+        >
+          {rechecking ? "Checking…" : "Check again"}
+        </button>
+        <span className="text-[10.5px] text-muted-foreground/60">
+          Re-checks automatically every few seconds, too.
+        </span>
+      </div>
     </div>
   );
 }
@@ -1248,6 +1339,8 @@ function OverviewPanel({
   toolsets,
   canSessions,
   sessionsKnownMissing,
+  canEditProfiles,
+  onManageLibrary,
   onSessionStart,
   onSessionEnd,
   actionState,
@@ -1266,6 +1359,8 @@ function OverviewPanel({
   toolsets: AgentstackToolsetsResult | null;
   canSessions: boolean;
   sessionsKnownMissing: boolean;
+  canEditProfiles: boolean;
+  onManageLibrary: () => void;
   onSessionStart: (profile: string) => Promise<{ ok: boolean; message: string }>;
   onSessionEnd: () => Promise<{ ok: boolean; message: string }>;
   actionState: ActionState;
@@ -1323,6 +1418,8 @@ function OverviewPanel({
         toolsets={toolsets}
         canSessions={canSessions}
         sessionsKnownMissing={sessionsKnownMissing}
+        canEditProfiles={canEditProfiles}
+        onManageLibrary={onManageLibrary}
         onStart={onSessionStart}
         onEnd={onSessionEnd}
       />
@@ -1405,12 +1502,16 @@ function ToolsetsCard({
   toolsets,
   canSessions,
   sessionsKnownMissing,
+  canEditProfiles,
+  onManageLibrary,
   onStart,
   onEnd,
 }: {
   toolsets: AgentstackToolsetsResult | null;
   canSessions: boolean;
   sessionsKnownMissing: boolean;
+  canEditProfiles: boolean;
+  onManageLibrary: () => void;
   onStart: (profile: string) => Promise<{ ok: boolean; message: string }>;
   onEnd: () => Promise<{ ok: boolean; message: string }>;
 }) {
@@ -1439,8 +1540,11 @@ function ToolsetsCard({
     setDone(r);
   }, [onEnd]);
 
-  // Nothing to show: no declared profiles and nothing to recover.
-  if (!data || (rows.length === 0 && !session)) return null;
+  // Nothing to show: no declared profiles and nothing to recover. When the CLI
+  // supports library edits we still render the header so "Browse library" (and
+  // thus "New toolset") is reachable from a fresh project with zero toolsets.
+  const empty = !data || (rows.length === 0 && !session);
+  if (empty && !canEditProfiles) return null;
 
   return (
     <div className="mx-1 mt-1.5 border-t border-border/40 px-1.5 pt-2">
@@ -1453,7 +1557,23 @@ function ToolsetsCard({
             update agentstack to start one from here
           </span>
         ) : null}
+        {canEditProfiles ? (
+          <button
+            type="button"
+            onClick={onManageLibrary}
+            className="ml-auto shrink-0 rounded-md border border-border bg-background px-2 py-0.5 text-[10px] font-semibold text-foreground transition-colors hover:bg-accent"
+            title="Browse the skill & server library — add tools to a toolset or create a new one"
+          >
+            Browse library
+          </button>
+        ) : null}
       </div>
+
+      {empty ? (
+        <p className="px-2.5 pb-1.5 pt-0.5 text-[11px] leading-relaxed text-muted-foreground/70">
+          No toolsets yet. Browse the library to add tools and create your first one.
+        </p>
+      ) : null}
 
       {session ? (
         <div className="mb-1 flex items-center gap-2 rounded-lg border border-success/25 bg-success/[0.07] px-2.5 py-2">
@@ -1530,6 +1650,588 @@ function undoAge(unixSeconds: number): string {
   if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
   if (secs < 86_400) return `${Math.floor(secs / 3600)}h ago`;
   return `${Math.floor(secs / 86_400)}d ago`;
+}
+
+type LibLoad =
+  | { phase: "loading" }
+  | { phase: "loaded"; index: NonNullable<AgentstackLibraryIndexResult["index"]> }
+  | { phase: "error" };
+
+/** The library browser's edit lifecycle: compose → preview (digest) → confirm →
+ *  apply → result. Kept separate from the browse view so the same digest-confirm
+ *  flow serves both "add to toolset" and "new toolset". */
+type EditFlow =
+  | { phase: "idle" }
+  | { phase: "previewing"; edit: AgentstackProfileEdit; title: string }
+  | {
+      phase: "confirm";
+      edit: AgentstackProfileEdit;
+      title: string;
+      digest: string;
+      note: string | null;
+    }
+  | { phase: "unsupported"; title: string }
+  | { phase: "running"; edit: AgentstackProfileEdit; title: string }
+  | { phase: "done"; ok: boolean; message: string; title: string };
+
+type LibView =
+  | { kind: "browse" }
+  | { kind: "pick-target"; group: "skill" | "server"; name: string }
+  | { kind: "new" };
+
+/** A plain-language sentence for the change being confirmed. */
+function describeEdit(edit: AgentstackProfileEdit): string {
+  switch (edit.kind) {
+    case "add-skill-to-profile":
+      return `Add skill "${edit.name}" to toolset "${edit.profile}"`;
+    case "add-server-to-profile":
+      return `Add server "${edit.name}" to toolset "${edit.profile}"`;
+    case "create-profile": {
+      const parts: string[] = [];
+      if (edit.skills.length > 0)
+        parts.push(`${edit.skills.length} skill${edit.skills.length === 1 ? "" : "s"}`);
+      if (edit.servers.length > 0)
+        parts.push(`${edit.servers.length} server${edit.servers.length === 1 ? "" : "s"}`);
+      return `New toolset "${edit.name}"${parts.length > 0 ? ` with ${parts.join(" and ")}` : ""}`;
+    }
+  }
+}
+
+/**
+ * Recognize the fail-closed "an unresolved ${REF} blocked the render" outcome in
+ * the CLI's result line, and pull the reference name when it's there. This is a
+ * feature, not an error: the manifest kept the `${REF}` (no value leaked) and
+ * the render is blocked until the secret is set — so it gets its own
+ * what/why/next-step card instead of a red failure banner.
+ */
+function matchSecretBlock(message: string): { ref: string | null } | null {
+  if (!/unresolved secret|\$\{|not written/i.test(message)) return null;
+  const ref =
+    /\$\{([A-Za-z0-9_]+)\}/.exec(message)?.[1] ??
+    /secret set\s+([A-Za-z0-9_]+)/i.exec(message)?.[1] ??
+    /\b([A-Z][A-Z0-9_]{2,})\b/.exec(message)?.[1] ??
+    null;
+  return { ref };
+}
+
+/**
+ * The library browser (Lane B4): reads `library-index` and lets the user add a
+ * skill/server to a toolset, or create a new toolset seeded with library/inline
+ * capabilities. Both mutations go through the digest-confirm flow — a preview
+ * returns the CLI's consent digest over the intended change + manifest bytes,
+ * and the apply presents it back (`--yes --consented`), so "the user reviewed
+ * this exact change" is CLI-enforced. Activation stays fail-closed: an
+ * unresolved `${REF}` blocks the render and surfaces its own next-step card.
+ * The panel never composes a command line — it names an edit; the server maps it
+ * to fixed argv.
+ */
+function LibraryPanel({
+  loadIndex,
+  preview,
+  apply,
+  onClose,
+}: {
+  loadIndex: () => Promise<AgentstackLibraryIndexResult | null>;
+  preview: (edit: AgentstackProfileEdit) => Promise<AgentstackProfileEditPreviewResult | null>;
+  apply: (
+    edit: AgentstackProfileEdit,
+    consentedDigest: string,
+  ) => Promise<{ ok: boolean; message: string }>;
+  onClose: () => void;
+}) {
+  const [load, setLoad] = useState<LibLoad>({ phase: "loading" });
+  const [view, setView] = useState<LibView>({ kind: "browse" });
+  const [flow, setFlow] = useState<EditFlow>({ phase: "idle" });
+  // New-toolset draft (only used in the "new" view).
+  const [draftName, setDraftName] = useState("");
+  const [draftSkills, setDraftSkills] = useState<ReadonlyArray<string>>([]);
+  const [draftServers, setDraftServers] = useState<ReadonlyArray<string>>([]);
+
+  const reload = useCallback(async () => {
+    const r = await loadIndex();
+    setLoad(r?.index ? { phase: "loaded", index: r.index } : { phase: "error" });
+  }, [loadIndex]);
+
+  useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  const index = load.phase === "loaded" ? load.index : null;
+  const profiles = index?.profiles ?? [];
+
+  // Compose → preview → confirm. A preview without a digest (older CLI) can't be
+  // applied, so it lands in `unsupported` rather than offering a doomed confirm.
+  const beginEdit = useCallback(
+    async (edit: AgentstackProfileEdit) => {
+      const title = describeEdit(edit);
+      setFlow({ phase: "previewing", edit, title });
+      const result = await preview(edit);
+      const digest = result?.preview?.consent_digest ?? null;
+      if (digest) {
+        setFlow({ phase: "confirm", edit, title, digest, note: result?.preview?.note ?? null });
+      } else {
+        setFlow({ phase: "unsupported", title });
+      }
+    },
+    [preview],
+  );
+
+  const confirmEdit = useCallback(async () => {
+    if (flow.phase !== "confirm") return;
+    const { edit, title, digest } = flow;
+    setFlow({ phase: "running", edit, title });
+    const r = await apply(edit, digest);
+    setFlow({ phase: "done", ok: r.ok, message: r.message, title });
+    if (r.ok) {
+      // A successful add/create changed the manifest — refresh in_manifest flags
+      // and the toolset list. (A ${REF}-blocked apply also wrote the manifest, so
+      // reload there too to reflect the partial state honestly.)
+      await reload();
+    } else if (matchSecretBlock(r.message)) {
+      await reload();
+    }
+  }, [flow, apply, reload]);
+
+  // Reset the browse view + draft after a flow finishes.
+  const backToBrowse = useCallback(() => {
+    setFlow({ phase: "idle" });
+    setView({ kind: "browse" });
+    setDraftName("");
+    setDraftSkills([]);
+    setDraftServers([]);
+  }, []);
+
+  const toggle = (list: ReadonlyArray<string>, name: string): ReadonlyArray<string> =>
+    list.includes(name) ? list.filter((n) => n !== name) : [...list, name];
+
+  return (
+    <div className="max-h-[460px] overflow-y-auto">
+      <div className="flex items-center gap-2 border-b border-border/60 px-3.5 py-2">
+        <button
+          type="button"
+          onClick={onClose}
+          className="text-xs font-medium text-muted-foreground hover:text-foreground"
+        >
+          ← Back
+        </button>
+        <span className="text-xs font-semibold text-foreground">Library</span>
+      </div>
+
+      {/* The edit flow takes over the body while active. */}
+      {flow.phase !== "idle" ? (
+        <EditFlowCard flow={flow} onConfirm={confirmEdit} onBack={backToBrowse} />
+      ) : load.phase === "loading" ? (
+        <p className="px-4 py-4 text-xs text-muted-foreground">Loading library…</p>
+      ) : load.phase === "error" || index === null ? (
+        <p className="px-4 py-4 text-xs leading-relaxed text-muted-foreground">
+          Couldn't read the library — <code className="font-mono">agentstack library-index</code>{" "}
+          didn't return a catalog for this project.
+        </p>
+      ) : view.kind === "pick-target" ? (
+        <div className="flex flex-col gap-2 px-4 py-3">
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            Add the {view.group} <span className="font-semibold text-foreground">{view.name}</span>{" "}
+            to which toolset?
+          </p>
+          {profiles.length === 0 ? (
+            <p className="text-[11px] leading-relaxed text-muted-foreground/70">
+              No toolsets yet — create one first, then add tools to it.
+            </p>
+          ) : (
+            <div className="flex flex-col gap-1">
+              {profiles.map((p) => (
+                <button
+                  key={p}
+                  type="button"
+                  onClick={() =>
+                    void beginEdit(
+                      view.group === "skill"
+                        ? { kind: "add-skill-to-profile", profile: p, name: view.name }
+                        : { kind: "add-server-to-profile", profile: p, name: view.name },
+                    )
+                  }
+                  className="flex items-center gap-2 rounded-lg border border-border/50 px-2.5 py-1.5 text-left text-xs font-semibold text-foreground transition-colors hover:border-border hover:bg-accent"
+                >
+                  <span className="size-1.5 rounded-full bg-muted-foreground/40" />
+                  {p}
+                </button>
+              ))}
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={() => setView({ kind: "browse" })}
+            className="self-start text-[11px] font-medium text-muted-foreground hover:text-foreground"
+          >
+            Cancel
+          </button>
+        </div>
+      ) : view.kind === "new" ? (
+        <div className="flex flex-col gap-3 px-4 py-3 text-xs">
+          <p className="text-[12.5px] leading-relaxed text-muted-foreground">
+            Name a new toolset and pick the tools it bundles. You can activate it afterward from the
+            Toolsets list.
+          </p>
+          <label className="flex flex-col gap-1">
+            <span className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
+              Toolset name
+            </span>
+            <input
+              value={draftName}
+              onChange={(e) => setDraftName(e.target.value)}
+              placeholder="e.g. web"
+              spellCheck={false}
+              className="rounded-lg border border-border/60 bg-background px-2.5 py-1.5 text-xs text-foreground outline-none focus:border-border"
+            />
+          </label>
+
+          <LibrarySelectGroup
+            title="Skills"
+            items={index.skills.map((s) => ({ name: s.name, hint: s.origin }))}
+            selected={draftSkills}
+            onToggle={(name) => setDraftSkills((l) => toggle(l, name))}
+          />
+          <LibrarySelectGroup
+            title="Servers"
+            items={index.servers.map((s) => ({ name: s.name, hint: s.origin }))}
+            selected={draftServers}
+            onToggle={(name) => setDraftServers((l) => toggle(l, name))}
+          />
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={
+                !PROFILE_NAME_INPUT_RE.test(draftName) ||
+                (draftSkills.length === 0 && draftServers.length === 0)
+              }
+              onClick={() =>
+                void beginEdit({
+                  kind: "create-profile",
+                  name: draftName,
+                  skills: [...draftSkills],
+                  servers: [...draftServers],
+                })
+              }
+              className="inline-flex h-8 items-center rounded-lg border border-success/40 bg-success/10 px-3.5 text-xs font-semibold text-success disabled:opacity-50"
+            >
+              Create toolset
+            </button>
+            <button
+              type="button"
+              onClick={() => setView({ kind: "browse" })}
+              className="text-[11px] font-medium text-muted-foreground hover:text-foreground"
+            >
+              Cancel
+            </button>
+          </div>
+          {draftName.length > 0 && !PROFILE_NAME_INPUT_RE.test(draftName) ? (
+            <p className="text-[10.5px] text-warning">
+              Use letters, numbers, dot, dash or underscore (no spaces).
+            </p>
+          ) : null}
+        </div>
+      ) : (
+        <div className="flex flex-col gap-3 px-4 py-3">
+          <div className="flex items-center gap-2">
+            <p className="min-w-0 flex-1 text-[11px] leading-relaxed text-muted-foreground">
+              Tools available to bundle into a toolset. Adding one enrolls it and re-locks the
+              toolset.
+            </p>
+            <button
+              type="button"
+              onClick={() => setView({ kind: "new" })}
+              className="shrink-0 rounded-md border border-success/40 bg-success/10 px-2 py-0.5 text-[10px] font-semibold text-success transition-colors hover:bg-success/20"
+            >
+              + New toolset
+            </button>
+          </div>
+
+          <LibraryBrowseGroup
+            title="Skills"
+            emptyLabel="No skills in the library yet."
+            items={index.skills.map((s) => ({
+              name: s.name,
+              origin: s.origin,
+              detail: s.description,
+              inManifest: s.in_manifest,
+            }))}
+            hasToolsets={profiles.length > 0}
+            onAdd={(name) => setView({ kind: "pick-target", group: "skill", name })}
+          />
+          <LibraryBrowseGroup
+            title="Servers"
+            emptyLabel="No servers in the library yet."
+            items={index.servers.map((s) => ({
+              name: s.name,
+              origin: s.origin,
+              detail: s.provenance ?? null,
+              inManifest: s.in_manifest,
+            }))}
+            hasToolsets={profiles.length > 0}
+            onAdd={(name) => setView({ kind: "pick-target", group: "server", name })}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Toolset-name input shape, mirrored from the server's PROFILE-name guard so
+ *  the create button disables before a doomed round-trip. */
+const PROFILE_NAME_INPUT_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+/** One browsable group (skills or servers) in the library browser. */
+function LibraryBrowseGroup({
+  title,
+  emptyLabel,
+  items,
+  hasToolsets,
+  onAdd,
+}: {
+  title: string;
+  emptyLabel: string;
+  items: ReadonlyArray<{
+    name: string;
+    origin: string;
+    detail: string | null;
+    inManifest: boolean;
+  }>;
+  hasToolsets: boolean;
+  onAdd: (name: string) => void;
+}) {
+  return (
+    <div className="flex flex-col gap-1">
+      <p className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
+        {title}
+      </p>
+      {items.length === 0 ? (
+        <span className="text-[11px] text-muted-foreground/70">{emptyLabel}</span>
+      ) : (
+        <div className="flex flex-col gap-0.5">
+          {items.map((it) => (
+            <div
+              key={`${it.origin}:${it.name}`}
+              className="flex items-center gap-2 rounded-lg px-1.5 py-[6px]"
+            >
+              <span className="size-1.5 shrink-0 rounded-full bg-muted-foreground/40" />
+              <div className="flex min-w-0 flex-1 flex-col">
+                <span className="truncate text-[12px] font-semibold text-foreground">
+                  {it.name}
+                  {it.inManifest ? (
+                    <span className="ml-1.5 text-[10px] font-normal text-muted-foreground/60">
+                      in project
+                    </span>
+                  ) : null}
+                </span>
+                {it.detail ? (
+                  <span className="truncate text-[10.5px] text-muted-foreground" title={it.detail}>
+                    {it.detail}
+                  </span>
+                ) : null}
+              </div>
+              <button
+                type="button"
+                disabled={!hasToolsets}
+                onClick={() => onAdd(it.name)}
+                title={
+                  hasToolsets
+                    ? "Add this to a toolset"
+                    : "Create a toolset first, then add tools to it"
+                }
+                className="shrink-0 rounded-md border border-border bg-background px-2 py-0.5 text-[10px] font-semibold text-foreground transition-colors hover:bg-accent disabled:opacity-40"
+              >
+                Add
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** One multi-select group for the new-toolset form. */
+function LibrarySelectGroup({
+  title,
+  items,
+  selected,
+  onToggle,
+}: {
+  title: string;
+  items: ReadonlyArray<{ name: string; hint: string }>;
+  selected: ReadonlyArray<string>;
+  onToggle: (name: string) => void;
+}) {
+  return (
+    <div className="flex flex-col gap-1">
+      <p className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
+        {title}
+      </p>
+      {items.length === 0 ? (
+        <span className="text-[11px] text-muted-foreground/70">none available</span>
+      ) : (
+        <div className="flex flex-col gap-0.5">
+          {items.map((it) => {
+            const on = selected.includes(it.name);
+            return (
+              <button
+                key={`${it.hint}:${it.name}`}
+                type="button"
+                onClick={() => onToggle(it.name)}
+                className={cn(
+                  "flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-left transition-colors",
+                  on
+                    ? "border-success/40 bg-success/[0.07]"
+                    : "border-border/50 hover:border-border",
+                )}
+              >
+                <span
+                  className={cn(
+                    "size-2 shrink-0 rounded-full",
+                    on ? "bg-success" : "bg-muted-foreground/30",
+                  )}
+                />
+                <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-foreground">
+                  {it.name}
+                </span>
+                <span className="shrink-0 text-[10px] text-muted-foreground/60">{it.hint}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The digest-confirm card for one library edit — the load-bearing consent step.
+ * A preview without a digest disables the confirm (`unsupported`); the applied
+ * result shows a plain success line, or — when an unresolved `${REF}` blocked
+ * the render — a what/why/next-step card naming the exact `agentstack secret
+ * set` command, never a bare red failure.
+ */
+function EditFlowCard({
+  flow,
+  onConfirm,
+  onBack,
+}: {
+  flow: Exclude<EditFlow, { phase: "idle" }>;
+  onConfirm: () => void;
+  onBack: () => void;
+}) {
+  if (flow.phase === "previewing") {
+    return (
+      <div className="px-4 py-4">
+        <p className="text-xs text-muted-foreground">Preparing "{flow.title}"…</p>
+      </div>
+    );
+  }
+  if (flow.phase === "unsupported") {
+    return (
+      <div className="flex flex-col gap-3 px-4 py-4">
+        <p className="text-[12.5px] font-semibold text-foreground">{flow.title}</p>
+        <p className="text-[11px] leading-relaxed text-warning">
+          This agentstack CLI's preview has no digest to confirm against, so this change can't be
+          applied from here. Update agentstack, or make the change in a terminal.
+        </p>
+        <button
+          type="button"
+          onClick={onBack}
+          className="self-start text-[11px] font-medium text-muted-foreground hover:text-foreground"
+        >
+          ← Back to library
+        </button>
+      </div>
+    );
+  }
+  if (flow.phase === "done") {
+    const secretBlock = flow.ok ? null : matchSecretBlock(flow.message);
+    return (
+      <div className="flex flex-col gap-3 px-4 py-4">
+        <p className="text-[12.5px] font-semibold text-foreground">{flow.title}</p>
+        {secretBlock ? (
+          <div className="flex flex-col gap-2 rounded-lg border border-warning/30 bg-warning/[0.06] px-3 py-2.5 text-[11px] leading-relaxed">
+            <span className="font-semibold text-warning">Set a secret to finish</span>
+            <span className="text-muted-foreground">
+              The toolset was written, but a value it needs isn't set yet, so AgentStack kept the{" "}
+              <code className="font-mono">
+                {secretBlock.ref ? `\${${secretBlock.ref}}` : "${…}"}
+              </code>{" "}
+              placeholder and didn't render the config — nothing leaked.
+            </span>
+            <span className="text-muted-foreground">
+              Set it, then activate the toolset:
+              <code className="mt-1 block break-all font-mono text-foreground">
+                agentstack secret set {secretBlock.ref ?? "<REF>"}
+              </code>
+            </span>
+          </div>
+        ) : (
+          <div
+            className={cn(
+              "rounded-lg border px-3 py-2 text-[11px] leading-relaxed",
+              flow.ok
+                ? "border-success/30 bg-success/[0.06]"
+                : "border-destructive/30 bg-destructive/[0.06]",
+            )}
+          >
+            <span className={cn("font-semibold", flow.ok ? "text-success" : "text-destructive")}>
+              {flow.ok ? "Done" : "Couldn't apply"}
+            </span>
+            {" — "}
+            <span className="break-words font-mono text-muted-foreground">{flow.message}</span>
+          </div>
+        )}
+        <button
+          type="button"
+          onClick={onBack}
+          className="self-start text-[11px] font-medium text-muted-foreground hover:text-foreground"
+        >
+          ← Back to library
+        </button>
+      </div>
+    );
+  }
+  // confirm | running
+  const running = flow.phase === "running";
+  return (
+    <div className="flex flex-col gap-3 px-4 py-4">
+      <p className="text-[12.5px] font-semibold text-foreground">{flow.title}</p>
+      <p className="text-[11px] leading-relaxed text-muted-foreground">
+        Applying re-locks and re-renders the toolset. An unresolved{" "}
+        <code className="font-mono">${"{REF}"}</code> secret blocks the render (set it, then
+        re-apply) — nothing is written until you confirm.
+      </p>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          disabled={running}
+          onClick={onConfirm}
+          className="inline-flex h-8 items-center rounded-lg border border-success/40 bg-success/10 px-3.5 text-xs font-semibold text-success disabled:opacity-60"
+        >
+          {running ? "Applying…" : "Confirm"}
+        </button>
+        <button
+          type="button"
+          disabled={running}
+          onClick={onBack}
+          className="inline-flex h-8 items-center rounded-lg px-2.5 text-xs font-medium text-muted-foreground disabled:opacity-60"
+        >
+          Cancel
+        </button>
+      </div>
+      {flow.phase === "confirm" ? (
+        <details className="text-[10.5px] text-muted-foreground/60">
+          <summary className="cursor-pointer select-none">Details</summary>
+          <code className="mt-1 block break-all font-mono">
+            change {shortDigest(flow.digest) ?? flow.digest}
+          </code>
+        </details>
+      ) : null}
+    </div>
+  );
 }
 
 /**
@@ -1699,6 +2401,37 @@ type SetupAct =
   | { phase: "done"; ok: boolean; message: string };
 
 /**
+ * The secret-store choices offered when the plan lifts token values out of
+ * imported configs. `.env` is the default (product principle: the simplest
+ * local path), with the plain-language trade-off stated. The plan_digest binds
+ * the choice, so switching re-reads the plan for a matching digest.
+ */
+const SECRETS_CHOICES: ReadonlyArray<{
+  value: AgentstackSecretsDestination;
+  label: string;
+  detail: string;
+}> = [
+  {
+    value: "env",
+    label: ".env file",
+    detail:
+      "Store token values in a .env file in this project (gitignored). Simplest for local work; the file holds them in plain text.",
+  },
+  {
+    value: "keychain",
+    label: "System keychain",
+    detail:
+      "Store token values in your operating system's keychain, kept out of the project folder.",
+  },
+  {
+    value: "skip",
+    label: "Don't store yet",
+    detail:
+      "Write only ${REF} placeholders now — provide each value later with agentstack secret set.",
+  },
+];
+
+/**
  * The first-run setup card, shown when the project has no manifest yet. It
  * renders `init --plan` in plain language — the tools found, what would be
  * imported, the file AgentStack will manage, and the secret names the user
@@ -1713,34 +2446,60 @@ function SetupPanel({
   onApply,
   canApply,
 }: {
-  loadPlan: () => Promise<AgentstackSetupPlanResult | null>;
-  onApply: (planDigest: string) => Promise<{ ok: boolean; message: string }>;
+  loadPlan: (
+    secretsDestination: AgentstackSecretsDestination,
+  ) => Promise<AgentstackSetupPlanResult | null>;
+  onApply: (
+    planDigest: string,
+    secretsDestination: AgentstackSecretsDestination,
+  ) => Promise<{ ok: boolean; message: string }>;
   canApply: boolean;
 }) {
+  // `.env` by default (product principle); the picker below appears only when
+  // the plan actually lifts secrets, so when nothing is lifted this choice is
+  // applied silently and never shown.
+  const [secretsChoice, setSecretsChoice] = useState<AgentstackSecretsDestination>("env");
   const [load, setLoad] = useState<SetupLoad>({ phase: "loading" });
+  // A choice change re-reads the plan (for a digest bound to the new store)
+  // while keeping the prior plan on screen; the first read shows `loading`.
+  const [reloading, setReloading] = useState(false);
   const [act, setAct] = useState<SetupAct>({ phase: "idle" });
 
   useEffect(() => {
     let alive = true;
-    void loadPlan().then((result) => {
+    setReloading(true);
+    void loadPlan(secretsChoice).then((result) => {
       if (!alive) return;
       setLoad(result?.plan ? { phase: "loaded", plan: result.plan } : { phase: "error" });
+      setReloading(false);
     });
     return () => {
       alive = false;
     };
-  }, [loadPlan]);
+  }, [loadPlan, secretsChoice]);
+
+  // Switching the store invalidates the reviewed digest and any prior result,
+  // so reset the confirm/done state; the effect above re-reads for the new one.
+  const pickSecrets = (choice: AgentstackSecretsDestination) => {
+    if (choice === secretsChoice) return;
+    setAct({ phase: "idle" });
+    setSecretsChoice(choice);
+  };
 
   const plan = load.phase === "loaded" ? load.plan : null;
   const planDigest = plan?.plan_digest ?? null;
-  // Setup can proceed only when the CLI advertises the contract AND the plan
-  // carried a digest to bind the apply to.
-  const canSetUp = canApply && planDigest !== null;
+  // The genuine "can't set up from here" cases — no apply feature, or a plan
+  // with no digest to bind — as opposed to a transient re-read. Drives the
+  // explanatory warning so a brief re-read never flashes a misleading reason.
+  const setupUnsupported = !canApply || planDigest === null;
+  // Setup can proceed only when supported AND not mid-re-read, when the
+  // on-screen digest may not yet match the selected store.
+  const canSetUp = !setupUnsupported && !reloading;
 
   const run = async () => {
     if (planDigest === null) return;
     setAct({ phase: "running" });
-    const r = await onApply(planDigest);
+    const r = await onApply(planDigest, secretsChoice);
     setAct({ phase: "done", ok: r.ok, message: r.message });
   };
 
@@ -1853,7 +2612,50 @@ function SetupPanel({
         </SetupGroup>
       ) : null}
 
-      {!canSetUp ? (
+      {/* Where those lifted values are stored. Shown only when the plan lifts
+          secrets — no decision to surface otherwise (the default applies
+          silently). Changing it re-reads the plan for a matching digest. */}
+      {plan.secrets.length > 0 ? (
+        <SetupGroup title="Where token values are stored">
+          <div className="flex flex-col gap-1">
+            {SECRETS_CHOICES.map((c) => {
+              const selected = secretsChoice === c.value;
+              return (
+                <button
+                  key={c.value}
+                  type="button"
+                  disabled={reloading || act.phase === "running"}
+                  onClick={() => pickSecrets(c.value)}
+                  className={cn(
+                    "flex flex-col gap-0.5 rounded-lg border px-2.5 py-1.5 text-left transition-colors disabled:opacity-60",
+                    selected
+                      ? "border-success/40 bg-success/[0.07]"
+                      : "border-border/50 hover:border-border",
+                  )}
+                >
+                  <span className="flex items-center gap-1.5 text-[11px] font-semibold text-foreground">
+                    <span
+                      className={cn(
+                        "h-2 w-2 rounded-full",
+                        selected ? "bg-success" : "bg-muted-foreground/30",
+                      )}
+                    />
+                    {c.label}
+                  </span>
+                  <span className="pl-3.5 text-[10.5px] leading-relaxed text-muted-foreground">
+                    {c.detail}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+          {reloading ? (
+            <p className="text-[10.5px] text-muted-foreground/60">Updating the plan…</p>
+          ) : null}
+        </SetupGroup>
+      ) : null}
+
+      {setupUnsupported ? (
         <p className="text-[11px] leading-relaxed text-warning">
           {canApply
             ? "This agentstack CLI's plan has no digest to confirm against, so setup from here is disabled. Update agentstack, or run agentstack init in a terminal."

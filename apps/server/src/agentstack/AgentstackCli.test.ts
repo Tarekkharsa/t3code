@@ -2,6 +2,7 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as PlatformError from "effect/PlatformError";
+import { ChildProcessSpawner } from "effect/unstable/process";
 import { vi } from "vite-plus/test";
 
 import * as ProcessRunner from "../processRunner.ts";
@@ -54,7 +55,7 @@ describe("AgentstackCli", () => {
     ({
       stdout,
       stderr: "",
-      code: 0,
+      code: ChildProcessSpawner.ExitCode(0),
       timedOut: false,
       stdoutTruncated: false,
       stderrTruncated: false,
@@ -309,6 +310,58 @@ describe("AgentstackCli", () => {
     },
   );
 
+  it.effect("setup-apply forwards the chosen secret store and refuses one outside the set", () => {
+    const run = vi.fn<ProcessRunner.ProcessRunner["Service"]["run"]>(() =>
+      Effect.succeed(okOutput("initialized")),
+    );
+    const ProcessRunnerTest = Layer.succeed(
+      ProcessRunner.ProcessRunner,
+      ProcessRunner.ProcessRunner.of({ run }),
+    );
+    const digest = `sha256:${"ab".repeat(32)}`;
+
+    return Effect.gen(function* () {
+      const agentstack = yield* AgentstackCli.make();
+
+      // A valid store is appended as --secrets after --consented-plan, so the
+      // CLI recomputes the plan_digest against the same store the plan was
+      // read for (it refuses on mismatch).
+      const applied = yield* agentstack.action({
+        workspaceRoot: "/proj",
+        action: "setup-apply",
+        planDigest: digest,
+        secretsDestination: "env",
+      });
+      expect(applied.ok).toBe(true);
+      expect(run).toHaveBeenCalledWith(
+        expect.objectContaining({
+          args: [
+            "--manifest-dir",
+            "/proj",
+            "init",
+            "--yes",
+            "--consented-plan",
+            digest,
+            "--secrets",
+            "env",
+          ],
+        }),
+      );
+
+      // A store outside the closed set is refused BEFORE anything spawns —
+      // fail-closed boundary hygiene (the digest binding is the real guard).
+      run.mockClear();
+      const bad = yield* agentstack.action({
+        workspaceRoot: "/proj",
+        action: "setup-apply",
+        planDigest: digest,
+        secretsDestination: "bogus" as never,
+      });
+      expect(bad.ok).toBe(false);
+      expect(run).not.toHaveBeenCalled();
+    }).pipe(Effect.provide(ProcessRunnerTest));
+  });
+
   it.effect("restore-write undoes by id and refuses a malformed id before spawning", () => {
     const run = vi.fn<ProcessRunner.ProcessRunner["Service"]["run"]>(() =>
       Effect.succeed(okOutput('{"performed":true}')),
@@ -420,33 +473,229 @@ describe("AgentstackCli", () => {
     }),
   );
 
-  it.effect("toolsets runs use --list --json and surfaces profiles, session, and features", () =>
-    Effect.gen(function* () {
-      const wire = JSON.stringify({
-        path: "/proj",
-        trust: "trusted",
-        profiles: [
-          {
-            name: "dev",
-            skills: ["review"],
-            servers: ["github"],
-            harness: "codex",
-            pinned: true,
-            active: true,
-            blockers: [],
-          },
-        ],
-        session: { profile: "dev", scope: "project", started_unix: 1_753_000_000 },
-        schema_version: 1,
-        features: ["profiles-v1", "sessions-v1"],
+  it("profileEditArgv builds preview and apply argv for each verb", () => {
+    const digest = `sha256:${"cd".repeat(32)}`;
+
+    // Enroll an existing library skill: preview is a bare --preview (writes
+    // nothing); apply presents the reviewed digest back with --yes --consented.
+    expect(
+      AgentstackCli.profileEditArgv("/proj", {
+        kind: "add-skill-to-profile",
+        profile: "web",
+        name: "pdf",
+      }),
+    ).toEqual([
+      "--manifest-dir",
+      "/proj",
+      "add-skill-to-profile",
+      "--profile",
+      "web",
+      "--name",
+      "pdf",
+      "--preview",
+    ]);
+    expect(
+      AgentstackCli.profileEditArgv(
+        "/proj",
+        { kind: "add-skill-to-profile", profile: "web", name: "pdf" },
+        { digest },
+      ),
+    ).toEqual([
+      "--manifest-dir",
+      "/proj",
+      "add-skill-to-profile",
+      "--profile",
+      "web",
+      "--name",
+      "pdf",
+      "--yes",
+      "--consented",
+      digest,
+    ]);
+
+    // Enroll an existing server: no --type is emitted (both preview and apply
+    // omit it identically, so the CLI's digest lines up).
+    expect(
+      AgentstackCli.profileEditArgv("/proj", {
+        kind: "add-server-to-profile",
+        profile: "web",
+        name: "github",
+      }),
+    ).not.toContain("--type");
+
+    // create-profile repeats --skill/--server per member and allows unresolved
+    // to pass through only when asked.
+    expect(
+      AgentstackCli.profileEditArgv(
+        "/proj",
+        { kind: "create-profile", name: "web", skills: ["pdf", "sql"], servers: ["github"] },
+        { digest, allowUnresolved: true },
+      ),
+    ).toEqual([
+      "--manifest-dir",
+      "/proj",
+      "create-profile",
+      "--name",
+      "web",
+      "--skill",
+      "pdf",
+      "--skill",
+      "sql",
+      "--server",
+      "github",
+      "--yes",
+      "--consented",
+      digest,
+      "--allow-unresolved",
+    ]);
+  });
+
+  it("validateProfileEdit refuses malformed names and out-of-shape edits", () => {
+    expect(
+      AgentstackCli.validateProfileEdit({
+        kind: "add-skill-to-profile",
+        profile: "web",
+        name: "pdf",
+      }),
+    ).toBeNull();
+    // A shell-ish or spaced name is refused before any argv is built.
+    expect(
+      AgentstackCli.validateProfileEdit({
+        kind: "add-skill-to-profile",
+        profile: "../evil",
+        name: "pdf",
+      }),
+    ).not.toBeNull();
+    // git + path together is refused (the CLI would too).
+    expect(
+      AgentstackCli.validateProfileEdit({
+        kind: "add-skill-to-profile",
+        profile: "web",
+        name: "pdf",
+        git: "https://x",
+        path: "./skills/pdf",
+      }),
+    ).not.toBeNull();
+    // create-profile needs at least one member; `*` is the legal skill wildcard.
+    expect(
+      AgentstackCli.validateProfileEdit({
+        kind: "create-profile",
+        name: "web",
+        skills: [],
+        servers: [],
+      }),
+    ).not.toBeNull();
+    expect(
+      AgentstackCli.validateProfileEdit({
+        kind: "create-profile",
+        name: "web",
+        skills: ["*"],
+        servers: [],
+      }),
+    ).toBeNull();
+  });
+
+  it.effect("profileEditApply refuses a missing or malformed digest before spawning", () => {
+    const run = vi.fn<ProcessRunner.ProcessRunner["Service"]["run"]>(() =>
+      Effect.succeed(okOutput("applied")),
+    );
+    const ProcessRunnerTest = Layer.succeed(
+      ProcessRunner.ProcessRunner,
+      ProcessRunner.ProcessRunner.of({ run }),
+    );
+
+    return Effect.gen(function* () {
+      const agentstack = yield* AgentstackCli.make();
+      const edit = { kind: "add-skill-to-profile", profile: "web", name: "pdf" } as const;
+
+      const missing = yield* agentstack.profileEditApply({ workspaceRoot: "/proj", edit });
+      expect(missing.ok).toBe(false);
+      const malformed = yield* agentstack.profileEditApply({
+        workspaceRoot: "/proj",
+        edit,
+        consented: { digest: "sha256:nope" },
       });
-      const run = vi.fn<ProcessRunner.ProcessRunner["Service"]["run"]>(() =>
-        Effect.succeed(okOutput(wire)),
+      expect(malformed.ok).toBe(false);
+      // A malformed COMPOSED edit is also refused before spawn.
+      const badShape = yield* agentstack.profileEditApply({
+        workspaceRoot: "/proj",
+        edit: { kind: "add-skill-to-profile", profile: "a b", name: "pdf" },
+        consented: { digest: `sha256:${"cd".repeat(32)}` },
+      });
+      expect(badShape.ok).toBe(false);
+      expect(run).not.toHaveBeenCalled();
+    }).pipe(Effect.provide(ProcessRunnerTest));
+  });
+
+  it.effect("libraryIndex reads the fixed catalog argv and surfaces the feature", () => {
+    const wire = JSON.stringify({
+      skills: [
+        { name: "sql-review", description: "reviews SQL", origin: "library", in_manifest: false },
+      ],
+      servers: [
+        {
+          name: "github",
+          provenance: "consolidated:github",
+          origin: "library",
+          in_manifest: false,
+        },
+      ],
+      profiles: ["web"],
+      schema_version: 1,
+      features: ["profiles-v1", "profiles-edit-v1"],
+    });
+    const run = vi.fn<ProcessRunner.ProcessRunner["Service"]["run"]>(() =>
+      Effect.succeed(okOutput(wire)),
+    );
+    const ProcessRunnerTest = Layer.succeed(
+      ProcessRunner.ProcessRunner,
+      ProcessRunner.ProcessRunner.of({ run }),
+    );
+
+    return Effect.gen(function* () {
+      const agentstack = yield* AgentstackCli.make().pipe(Effect.provide(ProcessRunnerTest));
+
+      const result = yield* agentstack.libraryIndex({ workspaceRoot: "/proj" });
+      expect(run).toHaveBeenCalledWith(
+        expect.objectContaining({ args: ["--manifest-dir", "/proj", "library-index"] }),
       );
-      const ProcessRunnerTest = Layer.succeed(
-        ProcessRunner.ProcessRunner,
-        ProcessRunner.ProcessRunner.of({ run }),
-      );
+      expect(result.installed).toBe(true);
+      expect(result.features).toContain("profiles-edit-v1");
+      expect(result.index?.skills[0]?.name).toBe("sql-review");
+      expect(result.index?.profiles).toEqual(["web"]);
+    });
+  });
+
+  it.effect("toolsets runs use --list --json and surfaces profiles, session, and features", () => {
+    const wire = JSON.stringify({
+      path: "/proj",
+      trust: "trusted",
+      profiles: [
+        {
+          name: "dev",
+          skills: ["review"],
+          servers: ["github"],
+          harness: "codex",
+          pinned: true,
+          active: true,
+          blockers: [],
+        },
+      ],
+      session: { profile: "dev", scope: "project", started_unix: 1_753_000_000 },
+      schema_version: 1,
+      features: ["profiles-v1", "sessions-v1"],
+    });
+    // An older CLI without the session fields still decodes (fields absent).
+    const olderWire = JSON.stringify({ path: "/p", trust: "untrusted", profiles: [] });
+    const run = vi.fn<ProcessRunner.ProcessRunner["Service"]["run"]>(() =>
+      Effect.succeed(okOutput(wire)),
+    );
+    const ProcessRunnerTest = Layer.succeed(
+      ProcessRunner.ProcessRunner,
+      ProcessRunner.ProcessRunner.of({ run }),
+    );
+
+    return Effect.gen(function* () {
       const agentstack = yield* AgentstackCli.make().pipe(Effect.provide(ProcessRunnerTest));
 
       const result = yield* agentstack.toolsets({ workspaceRoot: "/proj" });
@@ -458,15 +707,12 @@ describe("AgentstackCli", () => {
       expect(result.toolsets?.profiles[0]).toMatchObject({ name: "dev", active: true });
       expect(result.toolsets?.session?.profile).toBe("dev");
 
-      // An older CLI without the session fields still decodes (fields absent).
-      const older = AgentstackCli.parseToolsets(
-        JSON.stringify({ path: "/p", trust: "untrusted", profiles: [] }),
-      );
+      const older = AgentstackCli.parseToolsets(olderWire);
       expect(older?.profiles).toEqual([]);
       expect(older?.session).toBeUndefined();
       expect(AgentstackCli.parseToolsets("not json")).toBeNull();
-    }),
-  );
+    });
+  });
 
   it("parses the setup plan with and without the envelope", () => {
     const base = {

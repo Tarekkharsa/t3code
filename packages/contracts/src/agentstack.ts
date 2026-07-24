@@ -440,6 +440,18 @@ export const AgentstackSetupSecret = Schema.Struct({
 });
 export type AgentstackSetupSecret = typeof AgentstackSetupSecret.Type;
 
+/**
+ * Where setup stores the token values it lifts out of imported configs:
+ * `env` (a gitignored `.env` next to the manifest), `keychain` (the OS
+ * keychain), or `skip` (write only `${REF}` placeholders — the user provides
+ * values later). Mirrors the CLI's `--secrets` enum. The plan's `plan_digest`
+ * binds this choice, so a change re-reads the plan (to get a digest bound to
+ * the new choice) and the apply presents that digest back with the same
+ * `--secrets` value — the CLI refuses a mismatch.
+ */
+export const AgentstackSecretsDestination = Schema.Literals(["env", "keychain", "skip"]);
+export type AgentstackSecretsDestination = typeof AgentstackSecretsDestination.Type;
+
 export const AgentstackSetupPlan = Schema.Struct({
   path: Schema.String,
   /** The manifest file the setup would create/manage. */
@@ -477,6 +489,13 @@ export type AgentstackSetupPlanResult = typeof AgentstackSetupPlanResult.Type;
 export const AgentstackSetupPlanInput = Schema.Struct({
   projectId: ProjectId,
   threadId: Schema.optionalKey(ThreadId),
+  /**
+   * Which secret store the plan should be read for (mapped to `init --plan
+   * --secrets <choice>`). The store is bound into the returned `plan_digest`,
+   * so the panel re-reads when the user changes it. Absent → the CLI's own
+   * non-interactive default (keychain), for older clients that don't send it.
+   */
+  secretsDestination: Schema.optionalKey(AgentstackSecretsDestination),
 });
 export type AgentstackSetupPlanInput = typeof AgentstackSetupPlanInput.Type;
 
@@ -588,6 +607,211 @@ export const AgentstackToolsetsInput = Schema.Struct({
 });
 export type AgentstackToolsetsInput = typeof AgentstackToolsetsInput.Type;
 
+// ── library index (read) ─────────────────────────────────────────────────────
+// `agentstack library-index` — the central-library catalog (skills + servers)
+// plus the existing toolset names, for the panel's library browser. A pure read:
+// nothing resolves, renders, or executes and no secret is touched, so it is safe
+// regardless of project trust (adding and activating are separately digest-gated
+// and fail closed). snake_case verbatim from the CLI; rides the versioned
+// envelope carrying the `profiles-edit-v1` feature.
+
+export const AgentstackLibrarySkill = Schema.Struct({
+  name: Schema.String,
+  /** Best-effort one-liner from the user's own central-library SKILL.md; null
+   *  for inline manifest skills (names only — their bodies are project content,
+   *  which the panel can `explain` for detail rather than surface here). */
+  description: Schema.NullOr(Schema.String),
+  /** `library` (central library) | `manifest` (inline in this project). */
+  origin: Schema.String,
+  /** True when the current manifest already defines this skill. */
+  in_manifest: Schema.Boolean,
+});
+export type AgentstackLibrarySkill = typeof AgentstackLibrarySkill.Type;
+
+export const AgentstackLibraryServer = Schema.Struct({
+  name: Schema.String,
+  /** Where a library server came from (e.g. `consolidated:github`); null for an
+   *  inline manifest server or when unknown. Optional for version tolerance. */
+  provenance: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  origin: Schema.String,
+  in_manifest: Schema.Boolean,
+});
+export type AgentstackLibraryServer = typeof AgentstackLibraryServer.Type;
+
+export const AgentstackLibraryIndex = Schema.Struct({
+  skills: Schema.Array(AgentstackLibrarySkill),
+  servers: Schema.Array(AgentstackLibraryServer),
+  /** Existing toolset (profile) names — the "add to toolset" targets. */
+  profiles: Schema.Array(Schema.String),
+  ...AgentstackEnvelopeFields,
+});
+export type AgentstackLibraryIndex = typeof AgentstackLibraryIndex.Type;
+
+export const AgentstackLibraryIndexResult = Schema.Struct({
+  installed: Schema.Boolean,
+  index: Schema.NullOr(AgentstackLibraryIndex),
+  checkedAt: Schema.Number,
+  ...AgentstackNegotiationFields,
+});
+export type AgentstackLibraryIndexResult = typeof AgentstackLibraryIndexResult.Type;
+
+export const AgentstackLibraryIndexInput = Schema.Struct({
+  projectId: ProjectId,
+  threadId: Schema.optionalKey(ThreadId),
+});
+export type AgentstackLibraryIndexInput = typeof AgentstackLibraryIndexInput.Type;
+
+// ── profile edits (preview + apply) ──────────────────────────────────────────
+// The parameterized, digest-bound toolset mutations behind the panel's library
+// browser: enroll a skill/server into a toolset, or create a new toolset from
+// existing/library capabilities. Each follows the apply-setup two-phase shape —
+// a `--preview` read returns an enveloped `consent_digest` over the intended
+// change AND the current manifest bytes; the apply presents it back with
+// `--yes --consented <digest>` and the CLI refuses on any drift before writing a
+// byte. The server maps each `kind` to a fixed argv (the client never supplies a
+// command line); `kind` is both the discriminator and the CLI verb name. Every
+// mutation runs manifest → re-lock → re-render and fails closed on an unresolved
+// `${REF}` (the manifest keeps the `${REF}`, never a value; the render blocks).
+
+/**
+ * Enroll or define a skill in a toolset. `git` or `path` (mutually exclusive)
+ * define a new `[skills.<name>]`; with neither, an existing library/inline skill
+ * is enrolled by bare `name`. The target toolset must already exist.
+ */
+export const AgentstackAddSkillEdit = Schema.Struct({
+  kind: Schema.Literal("add-skill-to-profile"),
+  profile: Schema.String,
+  name: Schema.String,
+  git: Schema.optionalKey(Schema.String),
+  rev: Schema.optionalKey(Schema.String),
+  subpath: Schema.optionalKey(Schema.String),
+  path: Schema.optionalKey(Schema.String),
+});
+export type AgentstackAddSkillEdit = typeof AgentstackAddSkillEdit.Type;
+
+/**
+ * Enroll or define a server in a toolset. Any wire field (`url`/`command`/…)
+ * defines a new `[servers.<name>]`; with none, an existing library/inline server
+ * is enrolled by bare `name`. Header/env `Key=Value` values may carry `${REF}`
+ * (never resolved in the panel — secrets never serialize).
+ */
+export const AgentstackAddServerEdit = Schema.Struct({
+  kind: Schema.Literal("add-server-to-profile"),
+  profile: Schema.String,
+  name: Schema.String,
+  /** stdio | http — the transport for a NEW server definition (`--type`).
+   *  Omitted when enrolling an existing server (the CLI default is unused). */
+  transport: Schema.optionalKey(Schema.Literals(["http", "stdio"])),
+  url: Schema.optionalKey(Schema.String),
+  command: Schema.optionalKey(Schema.String),
+  args: Schema.optionalKey(Schema.Array(Schema.String)),
+  headers: Schema.optionalKey(Schema.Array(Schema.String)),
+  env: Schema.optionalKey(Schema.Array(Schema.String)),
+  cwd: Schema.optionalKey(Schema.String),
+});
+export type AgentstackAddServerEdit = typeof AgentstackAddServerEdit.Type;
+
+/**
+ * Create a new toolset from existing/library skills and servers (bare names;
+ * `*` is the inline-all-skills wildcard the CLI accepts). At least one member.
+ */
+export const AgentstackCreateProfileEdit = Schema.Struct({
+  kind: Schema.Literal("create-profile"),
+  name: Schema.String,
+  skills: Schema.Array(Schema.String),
+  servers: Schema.Array(Schema.String),
+});
+export type AgentstackCreateProfileEdit = typeof AgentstackCreateProfileEdit.Type;
+
+export const AgentstackProfileEdit = Schema.Union([
+  AgentstackAddSkillEdit,
+  AgentstackAddServerEdit,
+  AgentstackCreateProfileEdit,
+]);
+export type AgentstackProfileEdit = typeof AgentstackProfileEdit.Type;
+
+/**
+ * One decoded profile-edit preview: the CLI's enveloped change description plus
+ * the `consent_digest` the apply must echo back. Per-verb detail rides in
+ * `skill`/`server`/`skills`/`servers` (all optionalKey), so one shape decodes
+ * every verb's preview and older CLIs that omit a block still decode.
+ */
+export const AgentstackProfileEditPreview = Schema.Struct({
+  /** The verb this preview is for, echoed by the CLI. */
+  action: Schema.String,
+  /** The target toolset (add-*), or the new toolset name (create). */
+  profile: Schema.optionalKey(Schema.String),
+  /**
+   * `sha256:<hex>` over the intended change + current manifest bytes. Absent
+   * (older CLI) means the apply must be refused, not downgraded to a bare
+   * `--yes` — the confirm button disables when it's null.
+   */
+  consent_digest: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  /** The CLI's plain-language apply note (names the ${REF}-blocks-render rule). */
+  note: Schema.optionalKey(Schema.String),
+  skill: Schema.optionalKey(
+    Schema.Struct({
+      name: Schema.String,
+      /** git | path | existing */
+      source: Schema.String,
+      creates_manifest_entry: Schema.Boolean,
+      git: Schema.optionalKey(Schema.NullOr(Schema.String)),
+      rev: Schema.optionalKey(Schema.NullOr(Schema.String)),
+      subpath: Schema.optionalKey(Schema.NullOr(Schema.String)),
+      path: Schema.optionalKey(Schema.NullOr(Schema.String)),
+    }),
+  ),
+  server: Schema.optionalKey(
+    Schema.Struct({
+      name: Schema.String,
+      creates_manifest_entry: Schema.Boolean,
+      transport: Schema.optionalKey(Schema.NullOr(Schema.String)),
+      url: Schema.optionalKey(Schema.NullOr(Schema.String)),
+      command: Schema.optionalKey(Schema.NullOr(Schema.String)),
+      args: Schema.optionalKey(Schema.Array(Schema.String)),
+    }),
+  ),
+  /** create-profile: the seeded members. */
+  skills: Schema.optionalKey(Schema.Array(Schema.String)),
+  servers: Schema.optionalKey(Schema.Array(Schema.String)),
+  ...AgentstackEnvelopeFields,
+});
+export type AgentstackProfileEditPreview = typeof AgentstackProfileEditPreview.Type;
+
+export const AgentstackProfileEditPreviewResult = Schema.Struct({
+  installed: Schema.Boolean,
+  preview: Schema.NullOr(AgentstackProfileEditPreview),
+  checkedAt: Schema.Number,
+  ...AgentstackNegotiationFields,
+});
+export type AgentstackProfileEditPreviewResult = typeof AgentstackProfileEditPreviewResult.Type;
+
+export const AgentstackProfileEditPreviewInput = Schema.Struct({
+  projectId: ProjectId,
+  threadId: Schema.optionalKey(ThreadId),
+  edit: AgentstackProfileEdit,
+});
+export type AgentstackProfileEditPreviewInput = typeof AgentstackProfileEditPreviewInput.Type;
+
+/**
+ * Apply a reviewed profile edit. The `consentedDigest` from the preview is
+ * mapped to `--consented`; the server refuses before spawning without a
+ * well-formed one, and the CLI refuses when the manifest or the change moved
+ * since the preview. The apply returns a human outcome line (`AgentstackAction
+ * Result`), exactly like `setup-apply` — not JSON; the panel re-reads state
+ * after.
+ */
+export const AgentstackProfileEditApplyInput = Schema.Struct({
+  projectId: ProjectId,
+  threadId: Schema.optionalKey(ThreadId),
+  edit: AgentstackProfileEdit,
+  consentedDigest: Schema.String,
+  /** Let activation proceed past an unresolved `${REF}` (`--allow-unresolved`).
+   *  Off by default — an unresolved secret blocking the render is a feature. */
+  allowUnresolved: Schema.optionalKey(Schema.Boolean),
+});
+export type AgentstackProfileEditApplyInput = typeof AgentstackProfileEditApplyInput.Type;
+
 // ── governed actions (write) ─────────────────────────────────────────────────
 
 /**
@@ -674,6 +898,15 @@ export const AgentstackActionInput = Schema.Struct({
    * and unready surfaces. Ignored for every other action.
    */
   profile: Schema.optionalKey(Schema.String),
+  /**
+   * `setup-apply` only: the secret store the reviewed plan was read for,
+   * mapped to `--secrets <choice>`. Must match the store bound into the
+   * `planDigest` above — the CLI recomputes the digest with this store and
+   * refuses on mismatch, so it is defense in depth, not the only guard.
+   * Absent → the CLI's non-interactive default (keychain). Ignored for every
+   * other action.
+   */
+  secretsDestination: Schema.optionalKey(AgentstackSecretsDestination),
 });
 export type AgentstackActionInput = typeof AgentstackActionInput.Type;
 
