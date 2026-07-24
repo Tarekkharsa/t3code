@@ -4756,6 +4756,139 @@ function ChatViewContent(props: ChatViewProps) {
     ],
   );
 
+  // Sends one of the exact blueprint-review template messages (Approve / Reject
+  // / Edit) into the CURRENT thread as a plain user turn. The text is sent
+  // VERBATIM — never through formatOutgoingPrompt — because the coding-CLI skill
+  // recognizes the templates byte-for-byte. Nothing here runs a workflow: the
+  // model, which authored the blueprint and is waiting, does the running once it
+  // reads the message. Modeled on onSubmitPlanFollowUp (same-thread send +
+  // optimistic row + anchoring), minus the plan-mode semantics.
+  const handleSendBlueprintReviewMessage = useCallback(
+    (text: string) => {
+      void (async () => {
+        if (
+          !activeThread ||
+          !isServerThread ||
+          isSendBusy ||
+          isConnecting ||
+          activeEnvironmentUnavailable ||
+          sendInFlightRef.current
+        ) {
+          return;
+        }
+        const trimmed = text.trim();
+        if (!trimmed) {
+          return;
+        }
+
+        const sendCtx = composerRef.current?.getSendContext();
+        if (!sendCtx?.providerAvailable) {
+          return;
+        }
+        const { selectedModelSelection: ctxSelectedModelSelection } = sendCtx;
+
+        const threadIdForSend = activeThread.id;
+        const messageIdForSend = newMessageId();
+        const messageCreatedAt = new Date().toISOString();
+
+        sendInFlightRef.current = true;
+        beginLocalDispatch({ preparingWorktree: false });
+        setThreadError(threadIdForSend, null);
+
+        // Position this sent row once LegendList has measured the anchored tail.
+        isAtEndRef.current = true;
+        timelineScrollModeRef.current = "anchoring-new-turn";
+        liveFollowUserScrollGenerationRef.current = anchorUserScrollGenerationRef.current;
+        pendingTimelineAnchorRef.current = messageIdForSend;
+        activeTimelineAnchorIndexRef.current = null;
+        showScrollDebouncer.current.cancel();
+        setShowScrollToBottom(false);
+        setTimelineAnchor({
+          threadKey: scopedThreadKey(scopeThreadRef(activeThread.environmentId, threadIdForSend)),
+          messageId: messageIdForSend,
+        });
+
+        setOptimisticUserMessages((existing) => [
+          ...existing,
+          {
+            id: messageIdForSend,
+            role: "user",
+            text: trimmed,
+            turnId: null,
+            createdAt: messageCreatedAt,
+            updatedAt: messageCreatedAt,
+            streaming: false,
+          },
+        ]);
+
+        const settingsResult = await persistThreadSettingsForNextTurn({
+          threadId: threadIdForSend,
+          createdAt: messageCreatedAt,
+          modelSelection: ctxSelectedModelSelection,
+          runtimeMode,
+          interactionMode,
+        });
+        let failure: AtomCommandResult<unknown, unknown> | null =
+          settingsResult._tag === "Failure" ? settingsResult : null;
+
+        if (failure === null) {
+          const startResult = await startThreadTurn({
+            environmentId,
+            input: {
+              threadId: threadIdForSend,
+              message: {
+                messageId: messageIdForSend,
+                role: "user",
+                text: trimmed,
+                attachments: [],
+              },
+              modelSelection: ctxSelectedModelSelection,
+              titleSeed: activeThread.title,
+              runtimeMode,
+              interactionMode,
+              createdAt: messageCreatedAt,
+            },
+          });
+          failure = startResult._tag === "Failure" ? startResult : null;
+        }
+
+        if (failure === null) {
+          sendInFlightRef.current = false;
+          return;
+        }
+
+        setOptimisticUserMessages((existing) =>
+          existing.filter((message) => message.id !== messageIdForSend),
+        );
+        if (!isAtomCommandInterrupted(failure)) {
+          const error = squashAtomCommandFailure(failure);
+          setThreadError(
+            threadIdForSend,
+            error instanceof Error ? error.message : "Failed to send workflow review.",
+          );
+        }
+        sendInFlightRef.current = false;
+        resetLocalDispatch();
+      })();
+    },
+    [
+      activeThread,
+      activeEnvironmentUnavailable,
+      beginLocalDispatch,
+      composerRef,
+      environmentId,
+      interactionMode,
+      isConnecting,
+      isSendBusy,
+      isServerThread,
+      persistThreadSettingsForNextTurn,
+      resetLocalDispatch,
+      runtimeMode,
+      setThreadError,
+      startThreadTurn,
+    ],
+  );
+
   const onImplementPlanInNewThread = useCallback(async () => {
     if (
       !activeThread ||
@@ -5282,6 +5415,7 @@ function ChatViewContent(props: ChatViewProps) {
                 onIsAtEndChange={onIsAtEndChange}
                 onManualNavigation={cancelTimelineLiveFollowForUserNavigation}
                 hideEmptyPlaceholder={isDraftHeroState}
+                onSendUserMessage={handleSendBlueprintReviewMessage}
               />
 
               {/* scroll to end pill — shown when user has scrolled away from the live edge */}

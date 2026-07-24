@@ -40,6 +40,8 @@ import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { renderSkillInlineMarkdownChildren } from "./chat/SkillInlineText";
+import { BlueprintReviewCard } from "./agentstack/BlueprintReviewCard";
+import { parseWorkflowBlueprint } from "./agentstack/workflow-blueprint";
 import { CHAT_FILE_TAG_CHIP_CLASS_NAME, FileTagChipContent } from "./chat/FileTagChip";
 import { PierreEntryIcon } from "./chat/PierreEntryIcon";
 import {
@@ -120,6 +122,46 @@ interface ChatMarkdownProps {
   className?: string;
   /** Treat single newlines as hard breaks — chat-style user input. */
   lineBreaks?: boolean;
+  /**
+   * Sends a plain-text user message into the current thread. Wired only for
+   * live assistant messages; when present, an `agentstack-blueprint` fence
+   * renders an interactive review card whose Approve/Reject/Edit actions send
+   * their template messages through this callback.
+   */
+  onSendUserMessage?: ((text: string) => void) | undefined;
+}
+
+const AGENTSTACK_BLUEPRINT_FENCE_LANGUAGE = "agentstack-blueprint";
+
+/**
+ * Parse an `agentstack-blueprint` fence body and, if it is a valid blueprint,
+ * render the review card wrapped in an error boundary. Returns null when the
+ * blueprint is invalid/oversized (parse fails closed) so the caller falls
+ * through to the ordinary, inert code block. No exception escapes this path.
+ */
+function renderBlueprintReviewCard({
+  code,
+  theme,
+  onSendUserMessage,
+  fallback,
+}: {
+  code: string;
+  theme: "light" | "dark";
+  onSendUserMessage: ((text: string) => void) | undefined;
+  fallback: ReactNode;
+}): ReactNode | null {
+  const blueprint = parseWorkflowBlueprint(code);
+  if (blueprint === null) return null;
+  return (
+    <CodeHighlightErrorBoundary fallback={fallback}>
+      <BlueprintReviewCard
+        blueprint={blueprint}
+        theme={theme}
+        isStreaming={false}
+        onSendUserMessage={onSendUserMessage}
+      />
+    </CodeHighlightErrorBoundary>
+  );
 }
 
 const EMPTY_MARKDOWN_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
@@ -1250,6 +1292,7 @@ function ChatMarkdown({
   skills = EMPTY_MARKDOWN_SKILLS,
   className,
   lineBreaks = false,
+  onSendUserMessage,
 }: ChatMarkdownProps) {
   const { resolvedTheme } = useTheme();
   const createAssetUrl = useAtomQueryRunner(assetEnvironment.createUrl, {
@@ -1503,6 +1546,21 @@ function ChatMarkdown({
         }
 
         const language = extractFenceLanguage(codeBlock.className);
+
+        // AgentStack workflow blueprint: while the fence is still streaming its
+        // JSON is incomplete, so render the plain code block; once complete,
+        // parse it and — if valid — replace it with the interactive review
+        // card. Invalid/oversized blueprints fall through to the inert block.
+        if (language === AGENTSTACK_BLUEPRINT_FENCE_LANGUAGE && !isStreaming) {
+          const card = renderBlueprintReviewCard({
+            code: codeBlock.code,
+            theme: resolvedTheme,
+            onSendUserMessage,
+            fallback: <pre {...props}>{children}</pre>,
+          });
+          if (card) return card;
+        }
+
         const fenceTitle = extractFenceTitle(extractPreCodeMeta(node));
         return (
           <MarkdownCodeBlock
@@ -1531,6 +1589,7 @@ function ChatMarkdown({
       isStreaming,
       markdownFileLinkMetaByHref,
       onTaskListChange,
+      onSendUserMessage,
       openInPreferredEditor,
       openExternalLinkInPreview,
       openMarkdownFileInPreview,

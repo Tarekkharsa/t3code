@@ -822,6 +822,94 @@ describe("AgentstackCli", () => {
     });
   });
 
+  const workflowSummary = (name: string) => ({
+    name,
+    declared: true,
+    trusted: true,
+    lock_status: "matches",
+    roles: ["mapper", "reducer"],
+    max_agents: 4,
+    max_wall_seconds: 600,
+  });
+
+  // Route the workflow()'s three reads by argv: `runs` and `report` get inert
+  // (empty / null) payloads so only the LIST read — the negotiation source —
+  // varies per test. No running run means `report` is never reached.
+  const workflowRun = (list: string) =>
+    vi.fn<ProcessRunner.ProcessRunner["Service"]["run"]>((input) =>
+      Effect.succeed(okOutput(input.args.includes("runs") ? JSON.stringify({ runs: [] }) : list)),
+    );
+
+  it.effect("workflow surfaces the enveloped list features and stays compatible", () => {
+    const list = JSON.stringify({
+      workflows: [workflowSummary("mapreduce")],
+      schema_version: 1,
+      features: ["workflow-observe-v1"],
+    });
+    const run = workflowRun(list);
+    const ProcessRunnerTest = Layer.succeed(
+      ProcessRunner.ProcessRunner,
+      ProcessRunner.ProcessRunner.of({ run }),
+    );
+
+    return Effect.gen(function* () {
+      const agentstack = yield* AgentstackCli.make();
+      const result = yield* agentstack.workflow({ workspaceRoot: "/proj" });
+      expect(run).toHaveBeenCalledWith(
+        expect.objectContaining({
+          args: ["--manifest-dir", "/proj", "workflow", "list", "--json"],
+        }),
+      );
+      expect(result.installed).toBe(true);
+      expect(result.workflows).toHaveLength(1);
+      expect(result.workflows[0]?.name).toBe("mapreduce");
+      expect(result.features).toEqual(["workflow-observe-v1"]);
+      expect(result.incompatible).toBeNull();
+    }).pipe(Effect.provide(ProcessRunnerTest));
+  });
+
+  it.effect("workflow reports incompatibility when the list schema outruns support", () => {
+    const list = JSON.stringify({
+      workflows: [workflowSummary("mapreduce")],
+      schema_version: 2,
+      features: ["workflow-observe-v1"],
+    });
+    const run = workflowRun(list);
+    const ProcessRunnerTest = Layer.succeed(
+      ProcessRunner.ProcessRunner,
+      ProcessRunner.ProcessRunner.of({ run }),
+    );
+
+    return Effect.gen(function* () {
+      const agentstack = yield* AgentstackCli.make();
+      const result = yield* agentstack.workflow({ workspaceRoot: "/proj" });
+      // Features still surface; the panel gates on `incompatible` and shows the
+      // upgrade notice rather than a half-read monitor.
+      expect(result.incompatible).toEqual({ cliSchema: 2, supported: 1 });
+      expect(result.features).toEqual(["workflow-observe-v1"]);
+      expect(result.workflows).toHaveLength(1);
+    }).pipe(Effect.provide(ProcessRunnerTest));
+  });
+
+  it.effect("workflow treats a legacy un-enveloped list as no features, still parsing", () => {
+    // An older binary emits the same objects WITHOUT the envelope keys.
+    const list = JSON.stringify({ workflows: [workflowSummary("mapreduce")] });
+    const run = workflowRun(list);
+    const ProcessRunnerTest = Layer.succeed(
+      ProcessRunner.ProcessRunner,
+      ProcessRunner.ProcessRunner.of({ run }),
+    );
+
+    return Effect.gen(function* () {
+      const agentstack = yield* AgentstackCli.make();
+      const result = yield* agentstack.workflow({ workspaceRoot: "/proj" });
+      expect(result.installed).toBe(true);
+      expect(result.workflows).toHaveLength(1);
+      expect(result.features).toEqual([]);
+      expect(result.incompatible).toBeNull();
+    }).pipe(Effect.provide(ProcessRunnerTest));
+  });
+
   it.effect("status surfaces schema incompatibility and the feature list from doctor", () => {
     const doctor = JSON.stringify({
       errors: 0,

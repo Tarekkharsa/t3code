@@ -217,6 +217,31 @@ export const AgentstackWorkflowRunSummary = Schema.Struct({
 });
 export type AgentstackWorkflowRunSummary = typeof AgentstackWorkflowRunSummary.Type;
 
+/**
+ * The raw `agentstack workflow list --json` payload wrapper. The list is the
+ * project-scoped primary workflow read, so it carries the versioned envelope —
+ * this is the read the monitor negotiates `features`/`schema_version` off of.
+ * Envelope keys are `optionalKey`, so an older binary that emits `{workflows}`
+ * alone still decodes (envelope read as absent).
+ */
+export const AgentstackWorkflowList = Schema.Struct({
+  workflows: Schema.Array(AgentstackWorkflowSummary),
+  ...AgentstackEnvelopeFields,
+});
+export type AgentstackWorkflowList = typeof AgentstackWorkflowList.Type;
+
+/**
+ * The raw `agentstack workflow runs --json` payload wrapper. Carries the
+ * versioned envelope for tolerance/parity with the list read; the monitor
+ * negotiates off the list, not this. Envelope keys are `optionalKey` so an
+ * older binary's `{runs}`-only payload still decodes.
+ */
+export const AgentstackWorkflowRuns = Schema.Struct({
+  runs: Schema.Array(AgentstackWorkflowRunSummary),
+  ...AgentstackEnvelopeFields,
+});
+export type AgentstackWorkflowRuns = typeof AgentstackWorkflowRuns.Type;
+
 export const AgentstackWorkflowData = Schema.Struct({
   installed: Schema.Boolean,
   /** Every declared `[workflows.*]` entry with its admission status. */
@@ -230,6 +255,7 @@ export const AgentstackWorkflowData = Schema.Struct({
    */
   runs: Schema.optionalKey(Schema.Array(AgentstackWorkflowRunSummary)),
   checkedAt: Schema.Number,
+  ...AgentstackNegotiationFields,
 });
 export type AgentstackWorkflowData = typeof AgentstackWorkflowData.Type;
 

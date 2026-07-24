@@ -8,8 +8,9 @@ import {
   AgentstackSetupPlan,
   AgentstackToolsets,
   AgentstackTrustPreview,
+  AgentstackWorkflowList,
   AgentstackWorkflowRun,
-  AgentstackWorkflowRunSummary,
+  AgentstackWorkflowRuns,
   AgentstackWorkflowSummary,
   type AgentstackActionKind,
   type AgentstackActionResult,
@@ -26,6 +27,7 @@ import {
   type AgentstackToolsetsResult,
   type AgentstackTrustPreviewResult,
   type AgentstackWorkflowData,
+  type AgentstackWorkflowRunSummary,
 } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
 import * as Clock from "effect/Clock";
@@ -330,14 +332,21 @@ export function parseCallEvents(stdout: string): ReadonlyArray<AgentstackCallEve
 }
 
 const decodeWorkflowList = Schema.decodeUnknownOption(
-  Schema.fromJsonString(Schema.Struct({ workflows: Schema.Array(AgentstackWorkflowSummary) })),
+  Schema.fromJsonString(AgentstackWorkflowList),
 );
 
+/**
+ * The full decoded list payload (workflows + versioned envelope), or null when
+ * the read is missing/unparseable. The workflow monitor negotiates
+ * `features`/`schema_version` off this — the project-scoped primary read — so
+ * the whole object (not just the array) has to survive decode.
+ */
+export function parseWorkflowListPayload(stdout: string): AgentstackWorkflowList | null {
+  return Option.getOrNull(decodeWorkflowList(stdout));
+}
+
 export function parseWorkflowList(stdout: string): ReadonlyArray<AgentstackWorkflowSummary> {
-  return Option.match(decodeWorkflowList(stdout), {
-    onNone: () => [],
-    onSome: (r) => r.workflows,
-  });
+  return parseWorkflowListPayload(stdout)?.workflows ?? [];
 }
 
 const decodeWorkflowRun = Schema.decodeUnknownOption(Schema.fromJsonString(AgentstackWorkflowRun));
@@ -351,7 +360,7 @@ export function parseWorkflowRun(stdout: string): AgentstackWorkflowRun | null {
 // already joined by the CLI. An older binary without the subcommand (or a
 // malformed payload) degrades to [].
 const decodeWorkflowRuns = Schema.decodeUnknownOption(
-  Schema.fromJsonString(Schema.Struct({ runs: Schema.Array(AgentstackWorkflowRunSummary) })),
+  Schema.fromJsonString(AgentstackWorkflowRuns),
 );
 
 export function parseWorkflowRuns(stdout: string): ReadonlyArray<AgentstackWorkflowRunSummary> {
@@ -763,11 +772,16 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
           workflows: [],
           activeRun: null,
           runs: [],
+          ...negotiate(null),
           checkedAt: yield* Clock.currentTimeMillis,
         };
       }
-      const workflows =
-        listResult._tag === "Success" ? parseWorkflowList(listResult.result.stdout) : [];
+      // The list is the project-scoped primary read: negotiate features and
+      // schema compatibility off its payload. A failed or unparseable list
+      // (older binary, malformed output) negotiates as absent -> features [].
+      const listPayload =
+        listResult._tag === "Success" ? parseWorkflowListPayload(listResult.result.stdout) : null;
+      const workflows = listPayload?.workflows ?? [];
 
       // The durable run history — identity, outcome, and liveness already
       // joined by the CLI from each run's own evidence log. A failure (e.g.
@@ -799,6 +813,7 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
         workflows,
         activeRun,
         runs,
+        ...negotiate(listPayload),
         checkedAt: yield* Clock.currentTimeMillis,
       };
     },

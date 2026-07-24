@@ -141,6 +141,8 @@ interface TimelineRowSharedState {
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
   onToggleTurnFold: (turnId: TurnId) => void;
   onToggleWorkGroup: (groupId: string, anchorElement?: HTMLElement) => void;
+  /** Sends a plain-text user message into the current thread (blueprint review). */
+  onSendUserMessage: ((text: string) => void) | undefined;
 }
 
 interface TimelineRowActivityState {
@@ -187,6 +189,8 @@ interface MessagesTimelineProps {
   onIsAtEndChange: (isAtEnd: boolean) => void;
   onManualNavigation: () => void;
   hideEmptyPlaceholder?: boolean;
+  /** Sends a plain-text user message into the current thread (blueprint review). */
+  onSendUserMessage?: ((text: string) => void) | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -221,6 +225,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onIsAtEndChange,
   onManualNavigation,
   hideEmptyPlaceholder = false,
+  onSendUserMessage,
 }: MessagesTimelineProps) {
   const [expandedTurnIds, setExpandedTurnIds] = useState<ReadonlySet<TurnId>>(new Set());
   const [expandedWorkGroupIds, setExpandedWorkGroupIds] = useState<ReadonlySet<string>>(new Set());
@@ -432,6 +437,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onOpenTurnDiff,
       onToggleTurnFold,
       onToggleWorkGroup,
+      onSendUserMessage,
     }),
     [
       timestampFormat,
@@ -446,6 +452,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onOpenTurnDiff,
       onToggleTurnFold,
       onToggleWorkGroup,
+      onSendUserMessage,
     ],
   );
   const activityState = useMemo<TimelineRowActivityState>(
@@ -1026,6 +1033,7 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
           threadRef={ctx.threadRef ?? undefined}
           isStreaming={Boolean(row.message.streaming)}
           skills={ctx.skills}
+          onSendUserMessage={ctx.onSendUserMessage}
         />
         <AssistantChangedFilesSection
           turnSummary={row.assistantTurnDiffSummary}

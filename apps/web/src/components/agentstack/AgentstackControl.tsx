@@ -3,6 +3,7 @@ import type {
   AgentstackDiffReport,
   AgentstackDiffResult,
   AgentstackDiffTarget,
+  AgentstackIncompatible,
   AgentstackLibraryIndexResult,
   AgentstackProfileEdit,
   AgentstackProfileEditPreviewResult,
@@ -65,6 +66,11 @@ const FEATURE_SESSIONS = "sessions-v1";
 /** The library browser + digest-bound toolset edits (add-to-toolset, new
  *  toolset). When the CLI doesn't advertise it, the affordances stay hidden. */
 const FEATURE_PROFILES_EDIT = "profiles-edit-v1";
+/** Structured workflow observation — the enveloped `workflow list`/`runs` reads
+ *  the monitor consumes. Absent on legacy binaries (monitor still renders from
+ *  whatever the reads return); a CLI that positively advertises other contracts
+ *  but not this one is surfaced as "observation unavailable" in the section. */
+const FEATURE_WORKFLOW_OBSERVE = "workflow-observe-v1";
 
 const LEVEL_DOT: Record<AgentstackRowLevel, string> = {
   ok: "bg-success",
@@ -470,6 +476,15 @@ export function AgentstackControl({
   // The library/toolset-edit affordances appear only when the CLI advertises the
   // contract — an older CLI simply doesn't show "Browse library"/"New toolset".
   const canEditProfiles = hasAgentstackFeature(features, FEATURE_PROFILES_EDIT);
+  // The workflow monitor negotiates off its OWN enveloped read, not the doctor
+  // status: a newer CLI's workflow reads can be schema-incompatible even when
+  // the status read is fine, and vice versa. Legacy binaries (no envelope) leave
+  // both null/false, so the monitor renders exactly as it did before C1.3.
+  const workflowIncompatible = workflow?.incompatible ?? null;
+  const workflowObserveKnownMissing = agentstackFeatureKnownMissing(
+    workflow?.features,
+    FEATURE_WORKFLOW_OBSERVE,
+  );
 
   const overviewRows: AgentstackOverviewRow[] = useMemo(
     () => (status?.doctor ? deriveAgentstackOverviewRows(status.doctor) : []),
@@ -634,6 +649,9 @@ export function AgentstackControl({
                 ) : tab === "workflow" ? (
                   <WorkflowPanel
                     data={workflow}
+                    incompatible={workflowIncompatible}
+                    observeKnownMissing={workflowObserveKnownMissing}
+                    cliVersion={status.version}
                     onOpenRun={(r) => setMonitorTarget({ runId: r.run, summary: r })}
                   />
                 ) : tab === "activity" ? (
@@ -2797,20 +2815,46 @@ function ActionConfirm({
 
 function WorkflowPanel({
   data,
+  incompatible,
+  observeKnownMissing,
+  cliVersion,
   onOpenRun,
 }: {
   data: AgentstackWorkflowData | null;
+  /** Non-null when the workflow read's schema outruns this build — takes over
+   *  the section with the same upgrade notice other reads use. */
+  incompatible: AgentstackIncompatible | null;
+  /** True only when the CLI positively advertises its contracts but not
+   *  workflow observation. False for legacy binaries (empty features), so the
+   *  monitor renders exactly as before. */
+  observeKnownMissing: boolean;
+  cliVersion: string | null;
   onOpenRun: (run: AgentstackWorkflowRunSummary) => void;
 }) {
   if (data === null) {
     return <p className="px-4 py-4 text-xs text-muted-foreground">Checking workflows…</p>;
   }
+  // A workflow read whose schema outruns this build: don't render a half-read
+  // monitor — show the same upgrade notice the panel uses for other reads.
+  if (incompatible) {
+    return <UpdateNeeded incompatible={incompatible} cliVersion={cliVersion} />;
+  }
   // The live run renders as the full monitor; the history below excludes it
   // so a run never appears twice.
   const history = (data.runs ?? []).filter((r) => r.outcome !== "running");
+  // The CLI advertises its contracts but not workflow observation: what the
+  // monitor shows below may be partial. Legacy binaries (empty features) never
+  // hit this, so the section is byte-for-byte unchanged for them.
+  const observeNote = observeKnownMissing ? (
+    <p className="border-b border-border/60 px-4 py-2 text-[11px] leading-relaxed text-muted-foreground">
+      This project's <code className="font-mono">agentstack</code> CLI doesn't report structured
+      workflow observation. Update it for the full monitor; run details below may be limited.
+    </p>
+  ) : null;
   if (data.activeRun && data.activeRun.outcome === "running") {
     return (
       <div className="flex flex-col">
+        {observeNote}
         <WorkflowMonitor run={data.activeRun} />
         <WorkflowRunHistory runs={history} onOpenRun={onOpenRun} />
       </div>
@@ -2819,6 +2863,7 @@ function WorkflowPanel({
   if (data.workflows.length === 0) {
     return (
       <div className="flex flex-col">
+        {observeNote}
         <p className="px-4 py-4 text-xs leading-relaxed text-muted-foreground">
           No workflows declared. A <code className="font-mono">[workflows.*]</code> entry in the
           manifest defines a governed, pinned workflow — each step a locked run.
@@ -2829,6 +2874,7 @@ function WorkflowPanel({
   }
   return (
     <div className="flex flex-col">
+      {observeNote}
       <div className="flex flex-col gap-1 p-2">
         <p className="px-1 pb-1 text-[11px] text-muted-foreground">
           {data.workflows.length} declared · each step a locked run
