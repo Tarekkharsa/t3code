@@ -27,6 +27,13 @@ export interface AgentstackProtection {
 export interface AgentstackDoctorReport {
   errors: number;
   warnings: number;
+  /**
+   * Findings that are true and worth stating but are NOT something this
+   * project must repair — the CLI excludes them from `warnings`, `state`, and
+   * `next_action`. Absent on binaries predating `doctor-advisories-v1`, so
+   * gate the display on that feature rather than on this field being defined.
+   */
+  advisories?: number | null;
   /** trusted | drifted | untrusted, when the CLI emits it (else undefined). */
   trust?: string | null;
   /** needs_setup | needs_attention | ready, when the CLI emits it. */

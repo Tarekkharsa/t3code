@@ -79,6 +79,14 @@ export type AgentstackProtection = typeof AgentstackProtection.Type;
 export const AgentstackDoctorReport = Schema.Struct({
   errors: Schema.Number,
   warnings: Schema.Number,
+  /**
+   * Findings that are true and worth stating but are NOT something this
+   * project must repair — the CLI keeps them out of `warnings`, `state`, and
+   * `next_action`, so a healthy setup carrying advisories still reads `ready`.
+   * Absent on CLIs predating `doctor-advisories-v1`; gate the display on that
+   * feature name rather than on this key being present.
+   */
+  advisories: Schema.optionalKey(Schema.NullOr(Schema.Number)),
   /** trusted | drifted | untrusted — the project's trust state, when a
    *  project was checked. Absent on older CLIs (fall back to gateway prose). */
   trust: Schema.optionalKey(Schema.NullOr(Schema.String)),

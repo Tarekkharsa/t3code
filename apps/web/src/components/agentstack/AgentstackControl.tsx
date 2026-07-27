@@ -71,6 +71,13 @@ const FEATURE_PROFILES_EDIT = "profiles-edit-v1";
  *  whatever the reads return); a CLI that positively advertises other contracts
  *  but not this one is surfaced as "observation unavailable" in the section. */
 const FEATURE_WORKFLOW_OBSERVE = "workflow-observe-v1";
+/** Advisory findings: true and worth stating, but nothing this project must
+ *  repair — the CLI keeps them out of `warnings`/`state`/`next_action`.
+ *  Without this gate the panel drops them silently (our level match falls
+ *  through to `ok`), so the CLI would report "1 note" while the panel showed
+ *  nothing — two surfaces telling different amounts of truth about one
+ *  project. Gated on the name, never sniffed off the field being present. */
+const FEATURE_DOCTOR_ADVISORIES = "doctor-advisories-v1";
 
 const LEVEL_DOT: Record<AgentstackRowLevel, string> = {
   ok: "bg-success",
@@ -476,6 +483,7 @@ export function AgentstackControl({
   // The library/toolset-edit affordances appear only when the CLI advertises the
   // contract — an older CLI simply doesn't show "Browse library"/"New toolset".
   const canEditProfiles = hasAgentstackFeature(features, FEATURE_PROFILES_EDIT);
+  const canReadAdvisories = hasAgentstackFeature(features, FEATURE_DOCTOR_ADVISORIES);
   // The workflow monitor negotiates off its OWN enveloped read, not the doctor
   // status: a newer CLI's workflow reads can be schema-incompatible even when
   // the status read is fine, and vice versa. Legacy binaries (no envelope) leave
@@ -628,6 +636,7 @@ export function AgentstackControl({
                         protection: status.doctor?.protection,
                       })}
                       nextAction={status.doctor?.next_action ?? null}
+                      advisories={canReadAdvisories ? (status.doctor?.advisories ?? null) : null}
                       loadRestoreInventory={loadRestoreInventory}
                       onUndo={onUndo}
                       canRestore={canRestore}
@@ -1351,6 +1360,7 @@ function OverviewPanel({
   doctorAvailable,
   chip,
   nextAction,
+  advisories,
   loadRestoreInventory,
   onUndo,
   canRestore,
@@ -1371,6 +1381,7 @@ function OverviewPanel({
   doctorAvailable: boolean;
   chip: ReturnType<typeof deriveAgentstackStatusChip>;
   nextAction: string | null;
+  advisories: number | null;
   loadRestoreInventory: () => Promise<AgentstackRestoreInventoryResult | null>;
   onUndo: (restoreId: string) => Promise<{ ok: boolean; message: string }>;
   canRestore: boolean;
@@ -1397,7 +1408,7 @@ function OverviewPanel({
   }
   return (
     <div className="flex flex-col p-1.5">
-      {chip ? <StatusSummary chip={chip} nextAction={nextAction} /> : null}
+      {chip ? <StatusSummary chip={chip} nextAction={nextAction} advisories={advisories} /> : null}
       {rows.map((row) => (
         <div key={row.key} className="flex items-center gap-2.5 rounded-lg px-2.5 py-[7px]">
           <span className={cn("size-1.5 shrink-0 rounded-full", LEVEL_DOT[row.level])} />
@@ -1459,9 +1470,12 @@ function OverviewPanel({
 function StatusSummary({
   chip,
   nextAction,
+  advisories,
 }: {
   chip: NonNullable<ReturnType<typeof deriveAgentstackStatusChip>>;
   nextAction: string | null;
+  /** Null when the CLI doesn't advertise `doctor-advisories-v1`, or none exist. */
+  advisories: number | null;
 }) {
   return (
     <div className="mx-1 mb-1.5 flex flex-col gap-1.5 rounded-lg border border-border/50 bg-foreground/[0.02] px-2.5 py-2">
@@ -1477,6 +1491,19 @@ function StatusSummary({
         >
           {chip.label}
         </span>
+        {advisories && advisories > 0 ? (
+          // Deliberately beside the chip and deliberately muted: an advisory
+          // must be visible without competing with readiness. "Ready · 2 notes"
+          // is the honest reading — the CLI already excluded these from the
+          // state, so styling them as a fault would re-introduce exactly the
+          // permanent-orange problem the advisory tier removed.
+          <span
+            className="text-[11px] text-muted-foreground"
+            title="Notes worth knowing that this project does not have to fix. Run `agentstack doctor` for the detail."
+          >
+            · {advisories} {advisories === 1 ? "note" : "notes"}
+          </span>
+        ) : null}
       </div>
       {nextAction ? (
         <div className="flex items-baseline gap-1.5">
