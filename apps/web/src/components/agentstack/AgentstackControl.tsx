@@ -6,6 +6,7 @@ import type {
   AgentstackIncompatible,
   AgentstackLibraryIndexResult,
   AgentstackProfileEdit,
+  AgentstackProfileEditPreview,
   AgentstackProfileEditPreviewResult,
   AgentstackRestoreInventoryResult,
   AgentstackSecretsDestination,
@@ -21,7 +22,7 @@ import type {
   ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { useAgentstackPanelStore } from "~/agentstackPanelStore";
 import { agentstackEnvironment } from "~/state/agentstack";
@@ -66,6 +67,10 @@ const FEATURE_SESSIONS = "sessions-v1";
 /** The library browser + digest-bound toolset edits (add-to-toolset, new
  *  toolset). When the CLI doesn't advertise it, the affordances stay hidden. */
 const FEATURE_PROFILES_EDIT = "profiles-edit-v1";
+/** Removing a capability from the machine-wide central library (recoverable —
+ *  the CLI moves it to the library trash). Advertised separately from the
+ *  toolset edits, so the Remove affordance only appears on a CLI that has it. */
+const FEATURE_LIBRARY_REMOVE = "library-remove-v1";
 /** Structured workflow observation — the enveloped `workflow list`/`runs` reads
  *  the monitor consumes. Absent on legacy binaries (monitor still renders from
  *  whatever the reads return); a CLI that positively advertises other contracts
@@ -483,6 +488,9 @@ export function AgentstackControl({
   // The library/toolset-edit affordances appear only when the CLI advertises the
   // contract — an older CLI simply doesn't show "Browse library"/"New toolset".
   const canEditProfiles = hasAgentstackFeature(features, FEATURE_PROFILES_EDIT);
+  // Removal is its own contract: a CLI that can add to toolsets may predate it,
+  // and a Remove button it can't honor is worse than no button.
+  const canRemoveFromLibrary = hasAgentstackFeature(features, FEATURE_LIBRARY_REMOVE);
   const canReadAdvisories = hasAgentstackFeature(features, FEATURE_DOCTOR_ADVISORIES);
   // The workflow monitor negotiates off its OWN enveloped read, not the doctor
   // status: a newer CLI's workflow reads can be schema-incompatible even when
@@ -591,6 +599,7 @@ export function AgentstackControl({
               loadIndex={loadLibraryIndex}
               preview={previewProfileEdit}
               apply={applyProfileEdit}
+              canRemove={canRemoveFromLibrary}
               onClose={() => setBrowsingLibrary(false)}
             />
           ) : status?.installed && incompatible ? (
@@ -1718,6 +1727,10 @@ type EditFlow =
       title: string;
       digest: string;
       note: string | null;
+      /** remove-from-library only: what leaves the machine-wide library, where
+       *  it goes, and whether this project depends on it. Read straight from
+       *  the CLI preview so the card warns with the CLI's own facts. */
+      removal: NonNullable<AgentstackProfileEditPreview["removal"]> | null;
     }
   | { phase: "unsupported"; title: string }
   | { phase: "running"; edit: AgentstackProfileEdit; title: string }
@@ -1743,6 +1756,10 @@ function describeEdit(edit: AgentstackProfileEdit): string {
         parts.push(`${edit.servers.length} server${edit.servers.length === 1 ? "" : "s"}`);
       return `New toolset "${edit.name}"${parts.length > 0 ? ` with ${parts.join(" and ")}` : ""}`;
     }
+    case "remove-from-library":
+      // "from your library" — not "from this project". The scope is the whole
+      // point of this confirmation.
+      return `Remove ${edit.group} "${edit.name}" from your library`;
   }
 }
 
@@ -1778,6 +1795,7 @@ function LibraryPanel({
   loadIndex,
   preview,
   apply,
+  canRemove,
   onClose,
 }: {
   loadIndex: () => Promise<AgentstackLibraryIndexResult | null>;
@@ -1786,6 +1804,8 @@ function LibraryPanel({
     edit: AgentstackProfileEdit,
     consentedDigest: string,
   ) => Promise<{ ok: boolean; message: string }>;
+  /** Whether this CLI advertises `library-remove-v1`. */
+  canRemove: boolean;
   onClose: () => void;
 }) {
   const [load, setLoad] = useState<LibLoad>({ phase: "loading" });
@@ -1817,7 +1837,14 @@ function LibraryPanel({
       const result = await preview(edit);
       const digest = result?.preview?.consent_digest ?? null;
       if (digest) {
-        setFlow({ phase: "confirm", edit, title, digest, note: result?.preview?.note ?? null });
+        setFlow({
+          phase: "confirm",
+          edit,
+          title,
+          digest,
+          note: result?.preview?.note ?? null,
+          removal: result?.preview?.removal ?? null,
+        });
       } else {
         setFlow({ phase: "unsupported", title });
       }
@@ -2007,6 +2034,11 @@ function LibraryPanel({
             }))}
             hasToolsets={profiles.length > 0}
             onAdd={(name) => setView({ kind: "pick-target", group: "skill", name })}
+            onRemove={
+              canRemove
+                ? (name) => void beginEdit({ kind: "remove-from-library", group: "skill", name })
+                : null
+            }
           />
           <LibraryBrowseGroup
             title="Servers"
@@ -2019,6 +2051,11 @@ function LibraryPanel({
             }))}
             hasToolsets={profiles.length > 0}
             onAdd={(name) => setView({ kind: "pick-target", group: "server", name })}
+            onRemove={
+              canRemove
+                ? (name) => void beginEdit({ kind: "remove-from-library", group: "server", name })
+                : null
+            }
           />
         </div>
       )}
@@ -2037,6 +2074,7 @@ function LibraryBrowseGroup({
   items,
   hasToolsets,
   onAdd,
+  onRemove,
 }: {
   title: string;
   emptyLabel: string;
@@ -2048,6 +2086,11 @@ function LibraryBrowseGroup({
   }>;
   hasToolsets: boolean;
   onAdd: (name: string) => void;
+  /** Remove from the machine-wide central library. Offered only on
+   *  `library`-origin rows — a `manifest`-origin row is this project's own
+   *  inline capability, which the library has no copy of to remove. `null` when
+   *  the CLI doesn't advertise `library-remove-v1`. */
+  onRemove: ((name: string) => void) | null;
 }) {
   return (
     <div className="flex flex-col gap-1">
@@ -2092,6 +2135,17 @@ function LibraryBrowseGroup({
               >
                 Add
               </button>
+              {onRemove !== null && it.origin === "library" ? (
+                <button
+                  type="button"
+                  onClick={() => onRemove(it.name)}
+                  title="Remove from your library (all projects) — recoverable"
+                  aria-label={`Remove ${it.name} from your library`}
+                  className="shrink-0 rounded-md border border-transparent px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground/70 transition-colors hover:border-destructive/30 hover:bg-destructive/10 hover:text-destructive"
+                >
+                  Remove
+                </button>
+              ) : null}
             </div>
           ))}
         </div>
@@ -2245,22 +2299,33 @@ function EditFlowCard({
   }
   // confirm | running
   const running = flow.phase === "running";
+  const removing = flow.edit.kind === "remove-from-library";
+  const removal = flow.phase === "confirm" ? flow.removal : null;
   return (
     <div className="flex flex-col gap-3 px-4 py-4">
       <p className="text-[12.5px] font-semibold text-foreground">{flow.title}</p>
-      <p className="text-[11px] leading-relaxed text-muted-foreground">
-        Applying re-locks and re-renders the toolset. An unresolved{" "}
-        <code className="font-mono">${"{REF}"}</code> secret blocks the render (set it, then
-        re-apply) — nothing is written until you confirm.
-      </p>
+      {removing ? (
+        <RemovalConfirmBody removal={removal} />
+      ) : (
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          Applying re-locks and re-renders the toolset. An unresolved{" "}
+          <code className="font-mono">${"{REF}"}</code> secret blocks the render (set it, then
+          re-apply) — nothing is written until you confirm.
+        </p>
+      )}
       <div className="flex items-center gap-2">
         <button
           type="button"
           disabled={running}
           onClick={onConfirm}
-          className="inline-flex h-8 items-center rounded-lg border border-success/40 bg-success/10 px-3.5 text-xs font-semibold text-success disabled:opacity-60"
+          className={cn(
+            "inline-flex h-8 items-center rounded-lg border px-3.5 text-xs font-semibold disabled:opacity-60",
+            removing
+              ? "border-destructive/40 bg-destructive/10 text-destructive"
+              : "border-success/40 bg-success/10 text-success",
+          )}
         >
-          {running ? "Applying…" : "Confirm"}
+          {running ? (removing ? "Removing…" : "Applying…") : removing ? "Remove" : "Confirm"}
         </button>
         <button
           type="button"
@@ -2279,6 +2344,85 @@ function EditFlowCard({
           </code>
         </details>
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * A shell command rendered so it stays both readable and copyable in a narrow
+ * card: it wraps at spaces, and never inside a token.
+ *
+ * Plain wrapping is not enough — CSS takes a break opportunity after a hyphen,
+ * so `--write` splits into `-` + `-write` and reads as a typo; `nowrap` with a
+ * scrollbar hides the tail of the command instead. Each token therefore gets
+ * its own `nowrap` span, with the separating spaces left as text between them
+ * so they remain the only break opportunities — and a copy still yields the
+ * exact command.
+ */
+function CommandLine({ text }: { text: string }) {
+  // Key each token by where it starts in the command: a real property of the
+  // token (two identical flags at different positions stay distinct), so the
+  // list needs no index key.
+  const tokens = useMemo(() => {
+    let offset = 0;
+    return text.split(" ").map((token) => {
+      const at = offset;
+      offset += token.length + 1;
+      return { key: `${at}:${token}`, token, isFirst: at === 0 };
+    });
+  }, [text]);
+  return (
+    <code className="mt-1 block font-mono text-[10.5px] text-foreground">
+      {tokens.map(({ key, token, isFirst }) => (
+        <Fragment key={key}>
+          {isFirst ? null : " "}
+          <span className="whitespace-nowrap">{token}</span>
+        </Fragment>
+      ))}
+    </code>
+  );
+}
+
+/**
+ * The body of the removal confirmation: scope first (this is machine-wide, not
+ * project-local), then the in-use warning when this project actually references
+ * the name, then the recovery line. Removal edits no manifest and re-renders
+ * nothing, so a project that depends on the name keeps working until its next
+ * lock/activate — saying that plainly is the difference between an informed
+ * click and a surprise.
+ */
+function RemovalConfirmBody({
+  removal,
+}: {
+  removal: NonNullable<AgentstackProfileEditPreview["removal"]> | null;
+}) {
+  const usedHere = removal?.used_by_this_project === true;
+  const profiles = removal?.profiles ?? [];
+  return (
+    <div className="flex flex-col gap-2">
+      <p className="text-[11px] leading-relaxed text-muted-foreground">
+        This removes it from your library on this machine — every project that uses it by name is
+        affected. Nothing in this project's files changes right now.
+      </p>
+      {usedHere ? (
+        <div className="rounded-lg border border-warning/30 bg-warning/[0.06] px-3 py-2 text-[11px] leading-relaxed">
+          <span className="font-semibold text-warning">This project uses it</span>
+          <span className="text-muted-foreground">
+            {profiles.length > 0
+              ? ` — toolset${profiles.length === 1 ? "" : "s"} ${profiles.join(", ")}. `
+              : " — it's referenced here. "}
+            {removal?.defined_inline_here
+              ? "This project defines its own copy, so it keeps working."
+              : "Activating that toolset again will fail until you re-add or restore it."}
+          </span>
+        </div>
+      ) : null}
+      <p className="text-[11px] leading-relaxed text-muted-foreground">
+        It moves to the library trash, so you can put it back:
+        <CommandLine
+          text={removal?.restore_command ?? "agentstack lib trash --restore <id> --write"}
+        />
+      </p>
     </div>
   );
 }

@@ -548,6 +548,45 @@ describe("AgentstackCli", () => {
       digest,
       "--allow-unresolved",
     ]);
+
+    // remove-from-library: machine-wide, so no --profile and no scope. `--kind`
+    // is a closed enum on both sides, and `--allow-unresolved` is never emitted
+    // even when asked — nothing renders, so the flag would be meaningless and
+    // an extra flag would move the CLI's digest.
+    expect(
+      AgentstackCli.profileEditArgv("/proj", {
+        kind: "remove-from-library",
+        group: "server",
+        name: "github",
+      }),
+    ).toEqual([
+      "--manifest-dir",
+      "/proj",
+      "remove-from-library",
+      "--kind",
+      "server",
+      "--name",
+      "github",
+      "--preview",
+    ]);
+    expect(
+      AgentstackCli.profileEditArgv(
+        "/proj",
+        { kind: "remove-from-library", group: "skill", name: "pdf" },
+        { digest, allowUnresolved: true },
+      ),
+    ).toEqual([
+      "--manifest-dir",
+      "/proj",
+      "remove-from-library",
+      "--kind",
+      "skill",
+      "--name",
+      "pdf",
+      "--yes",
+      "--consented",
+      digest,
+    ]);
   });
 
   it("validateProfileEdit refuses malformed names and out-of-shape edits", () => {
@@ -593,6 +632,29 @@ describe("AgentstackCli", () => {
         servers: [],
       }),
     ).toBeNull();
+    // remove-from-library takes one plain capability name — never a traversal,
+    // and never the `*` wildcard (there is no "remove everything" here).
+    expect(
+      AgentstackCli.validateProfileEdit({
+        kind: "remove-from-library",
+        group: "skill",
+        name: "pdf",
+      }),
+    ).toBeNull();
+    expect(
+      AgentstackCli.validateProfileEdit({
+        kind: "remove-from-library",
+        group: "skill",
+        name: "../../etc/passwd",
+      }),
+    ).not.toBeNull();
+    expect(
+      AgentstackCli.validateProfileEdit({
+        kind: "remove-from-library",
+        group: "server",
+        name: "*",
+      }),
+    ).not.toBeNull();
   });
 
   it.effect("profileEditApply refuses a missing or malformed digest before spawning", () => {

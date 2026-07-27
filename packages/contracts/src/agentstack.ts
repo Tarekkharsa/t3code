@@ -757,10 +757,29 @@ export const AgentstackCreateProfileEdit = Schema.Struct({
 });
 export type AgentstackCreateProfileEdit = typeof AgentstackCreateProfileEdit.Type;
 
+/**
+ * Remove a skill or MCP server from the MACHINE-WIDE central library — the
+ * curation half of the library browser. Unlike the `add-*` edits this touches no
+ * manifest, no lockfile, and renders nothing: it drops the library's copy, which
+ * every project referencing that name shares. It is recoverable by construction
+ * (the CLI moves the entry to `~/.agentstack/lib/.trash`, restorable with
+ * `agentstack lib trash --restore <id> --write`), and still digest-bound — here
+ * the digest covers the library index bytes, since that is the state that moves.
+ * `group` is the library collection; only `library`-origin rows may be removed
+ * (an inline manifest capability is project content, removed a different way).
+ */
+export const AgentstackRemoveFromLibraryEdit = Schema.Struct({
+  kind: Schema.Literal("remove-from-library"),
+  group: Schema.Literals(["skill", "server"]),
+  name: Schema.String,
+});
+export type AgentstackRemoveFromLibraryEdit = typeof AgentstackRemoveFromLibraryEdit.Type;
+
 export const AgentstackProfileEdit = Schema.Union([
   AgentstackAddSkillEdit,
   AgentstackAddServerEdit,
   AgentstackCreateProfileEdit,
+  AgentstackRemoveFromLibraryEdit,
 ]);
 export type AgentstackProfileEdit = typeof AgentstackProfileEdit.Type;
 
@@ -808,6 +827,33 @@ export const AgentstackProfileEditPreview = Schema.Struct({
   /** create-profile: the seeded members. */
   skills: Schema.optionalKey(Schema.Array(Schema.String)),
   servers: Schema.optionalKey(Schema.Array(Schema.String)),
+  /**
+   * remove-from-library: what leaves the machine-wide library, where it goes,
+   * and this project's stake in it. `used_by_this_project` is what turns a
+   * routine tidy-up into a warning — the removal itself never edits the project,
+   * so a referenced name only breaks at the next lock/activate.
+   */
+  removal: Schema.optionalKey(
+    Schema.Struct({
+      kind: Schema.String,
+      name: Schema.String,
+      /** `path` | `git` for a skill; `file` for a server definition. */
+      source: Schema.optionalKey(Schema.NullOr(Schema.String)),
+      /** The body that moves to the trash; null for a git-backed skill (the
+       *  shared store cache is never touched by a removal). */
+      body: Schema.optionalKey(Schema.NullOr(Schema.String)),
+      trash_id: Schema.optionalKey(Schema.String),
+      trash_path: Schema.optionalKey(Schema.String),
+      /** The exact `lib trash --restore …` line to undo it. */
+      restore_command: Schema.optionalKey(Schema.String),
+      /** `machine` — this is not a project-scoped change. */
+      scope: Schema.optionalKey(Schema.String),
+      used_by_this_project: Schema.optionalKey(Schema.Boolean),
+      defined_inline_here: Schema.optionalKey(Schema.Boolean),
+      /** Toolsets in this project that list the name. */
+      profiles: Schema.optionalKey(Schema.Array(Schema.String)),
+    }),
+  ),
   ...AgentstackEnvelopeFields,
 });
 export type AgentstackProfileEditPreview = typeof AgentstackProfileEditPreview.Type;

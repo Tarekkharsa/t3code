@@ -264,6 +264,12 @@ export function validateProfileEdit(edit: AgentstackProfileEdit): string | null 
       if (!edit.servers.every((s) => isPlainName(s))) return "a server name looks malformed";
       return null;
     }
+    case "remove-from-library": {
+      // The name is the only free value: a plain capability name, never the
+      // `*` wildcard (there is no "remove everything" in this closed set).
+      if (!isPlainName(edit.name)) return "capability name looks malformed";
+      return null;
+    }
   }
 }
 
@@ -486,6 +492,15 @@ export function profileEditArgv(
       for (const s of edit.skills) argv.push("--skill", s);
       for (const s of edit.servers) argv.push("--server", s);
       return [...argv, ...consentFlags];
+    }
+    case "remove-from-library": {
+      // Machine-wide: no toolset, no scope, and nothing renders — so
+      // `--allow-unresolved` (which only governs a render) is never emitted
+      // here, even when the caller passes it. The only client-supplied value
+      // reaching argv is the validated capability name; `--kind` is a closed
+      // enum on both sides.
+      const argv = [...base, "remove-from-library", "--kind", edit.group, "--name", edit.name];
+      return [...argv, ...(consent ? ["--yes", "--consented", consent.digest] : ["--preview"])];
     }
   }
 }
