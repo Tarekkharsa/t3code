@@ -109,7 +109,25 @@ export function BlueprintReviewCard({
         ))}
       </ul>
 
-      <div className="flex flex-col gap-2 border-t border-border/50 px-3.5 py-2.5">
+      {/*
+        What Approve actually does, said BEFORE the button rather than
+        discovered after it. It is not "run this": the model declares the
+        workflow — pinning this graph beside the script it writes, so changing
+        either one re-gates — and the user still reviews the real bytes at the
+        trust step. Leaving that implicit is what made the later consent prompt
+        read as duplicate ceremony, which is how a gate gets clicked through
+        (review finding F13). Stated without over-claiming: the pin binds the
+        two artifacts, it does not prove the code implements the graph.
+      */}
+      <p className="border-t border-border/50 px-3.5 pt-2.5 text-[11.5px] leading-relaxed text-muted-foreground/80">
+        Approving does not run it. The model writes the workflow and pins this graph together with
+        the script, then{" "}
+        <strong className="font-medium text-foreground/80">you review the real code</strong> before
+        anything executes — changing either one asks you again. The graph shows the intended shape;
+        it is not proof the code matches it.
+      </p>
+
+      <div className="flex flex-col gap-2 px-3.5 py-2.5">
         <div className="flex flex-wrap items-center gap-2">
           <Button
             size="sm"
