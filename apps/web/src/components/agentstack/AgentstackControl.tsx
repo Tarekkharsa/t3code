@@ -1466,8 +1466,12 @@ function OverviewPanel({
  * `state`, plus the single recommended next step. "Protected" (ready + guard +
  * machine policy) is the strongest posture — its title spells out that these
  * are cooperative host protections, not a sandbox.
+ *
+ * Exported for its own render test: this is the one place the panel makes a
+ * readiness CLAIM, so what it draws for a given doctor payload is worth
+ * asserting directly rather than only through the logic that feeds it.
  */
-function StatusSummary({
+export function StatusSummary({
   chip,
   nextAction,
   advisories,
