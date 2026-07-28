@@ -233,6 +233,12 @@ export function AgentstackControl({
   const [reviewingDrift, setReviewingDrift] = useState(false);
   const [browsingLibrary, setBrowsingLibrary] = useState(false);
   const [settingUp, setSettingUp] = useState(false);
+
+  /** Open a reading screen: the popover yields so only one surface is up. */
+  const openReader = useCallback((show: (v: true) => void) => {
+    setOpen(false);
+    show(true);
+  }, []);
   // The 1c expanded monitor: which run it shows, and (for recorded runs) the
   // evidence fetched for it. A live target reads the polled activeRun instead.
   const [monitorTarget, setMonitorTarget] = useState<{
@@ -537,12 +543,10 @@ export function AgentstackControl({
       <Popover
         onOpenChange={(next) => {
           setOpen(next);
-          if (!next) {
-            setActionState({ phase: "idle" });
-            setReviewing(false);
-            setReviewingDrift(false);
-            setBrowsingLibrary(false);
-          }
+          // Only the popover's own transient state resets here. The dialogs
+          // below are siblings with their own lifetime — clearing them here
+          // meant dismissing the popover silently killed an open review.
+          if (!next) setActionState({ phase: "idle" });
         }}
         open={open}
       >
@@ -566,7 +570,7 @@ export function AgentstackControl({
             ) : null}
             {trust && trustBadge ? (
               <Badge
-                render={<button type="button" onClick={() => setReviewing(true)} />}
+                render={<button type="button" onClick={() => openReader(setReviewing)} />}
                 variant={trustBadge.variant}
                 size="sm"
                 title="Review this repo's trust surface"
@@ -609,7 +613,7 @@ export function AgentstackControl({
           {status?.installed && incompatible ? (
             <UpdateNeeded incompatible={incompatible} cliVersion={status.version} />
           ) : status?.installed && setupState === "needs_setup" ? (
-            <NeedsSetup onOpen={() => setSettingUp(true)} />
+            <NeedsSetup onOpen={() => openReader(setSettingUp)} />
           ) : (
             <>
               {/* Advanced views carry a back row (like the review panels) so
@@ -657,12 +661,12 @@ export function AgentstackControl({
                       canSessions={canSessions}
                       sessionsKnownMissing={sessionsKnownMissing}
                       canEditProfiles={canEditProfiles}
-                      onManageLibrary={() => setBrowsingLibrary(true)}
+                      onManageLibrary={() => openReader(setBrowsingLibrary)}
                       onSessionStart={onSessionStart}
                       onSessionEnd={onSessionEnd}
                       actionState={actionState}
                       onRequestAction={(a) => setActionState({ phase: "confirm", action: a })}
-                      onReviewDrift={() => setReviewingDrift(true)}
+                      onReviewDrift={() => openReader(setReviewingDrift)}
                       onConfirm={onAction}
                       onCancel={() => setActionState({ phase: "idle" })}
                       onRecheck={refresh}
