@@ -2884,12 +2884,14 @@ function SetupPanel({
   const settingsFrom = plan.settings_from ?? [];
   return (
     <div className="flex flex-col gap-3 px-4 py-3 text-xs">
-      <p className="text-[12.5px] leading-relaxed text-muted-foreground">
-        Set up AgentStack for this project — it unifies the tools you already have. Here's what it
-        will do:
+      <p className="text-xs leading-relaxed text-muted-foreground">
+        Setup reads the {plan.detected.length} coding{" "}
+        {plan.detected.length === 1 ? "tool" : "tools"} on this machine and writes{" "}
+        <span className="font-semibold text-foreground">one manifest</span> your CLIs render from.
+        Nothing is written until you confirm.
       </p>
 
-      <SetupGroup title="Coding tools found">
+      <SetupGroup title="Coding tools found" count={{ n: plan.detected.length, noun: "tool" }}>
         {plan.detected.length === 0 ? (
           <span className="text-[11px] text-muted-foreground">none detected</span>
         ) : (
@@ -2914,7 +2916,7 @@ function SetupPanel({
         )}
       </SetupGroup>
 
-      <SetupGroup title="What will be imported">
+      <SetupGroup title="What will be imported" count={{ n: plan.servers.length, noun: "server" }}>
         {plan.servers.length === 0 && settingsFrom.length === 0 && plan.conflicts.length === 0 ? (
           <span className="text-[11px] text-muted-foreground">nothing to import</span>
         ) : (
@@ -2933,16 +2935,30 @@ function SetupPanel({
             {settingsFrom.length > 0 ? (
               <li className="text-muted-foreground">Settings from {settingsFrom.join(", ")}</li>
             ) : null}
-            {plan.conflicts.map((c) => (
-              <li key={c.name} className="text-warning-foreground">
-                {c.name} is defined by {c.other_definitions + 1} tools — one will be used
-              </li>
-            ))}
           </ul>
         )}
       </SetupGroup>
 
-      <SetupGroup title="Files AgentStack will manage">
+      {plan.conflicts.length > 0 ? (
+        <div className="flex flex-col gap-1 rounded-lg border border-warning/30 bg-warning/8 px-2.5 py-2 dark:bg-warning/16">
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-warning-foreground/80">
+            Defined more than once
+          </p>
+          <ul className="flex flex-col gap-0.5 text-xs leading-relaxed text-warning-foreground">
+            {plan.conflicts.map((c) => (
+              <li key={c.name}>
+                <span className="font-semibold">{c.name}</span> is defined by{" "}
+                {c.other_definitions + 1} tools — one will be used
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      <SetupGroup
+        title="Files AgentStack will manage"
+        count={{ n: (plan.destinations?.length ?? 0) + 1, noun: "file" }}
+      >
         <ul className="flex flex-col gap-0.5 text-[11px] leading-relaxed">
           <li>
             <code className="wrap-break-word font-mono text-muted-foreground/90">
@@ -3120,14 +3136,46 @@ function PanelSection({
   );
 }
 
-function SetupGroup({ title, children }: { title: string; children: ReactNode }) {
+function SetupGroup({
+  title,
+  children,
+  count,
+}: {
+  title: string;
+  children: ReactNode;
+  /**
+   * When given, the group collapses and this is what the summary reports.
+   * The inventory lists are reference material — worth having, not worth
+   * making someone scroll past to reach the button that does the work.
+   */
+  count?: { readonly n: number; readonly noun: string } | undefined;
+}) {
+  const label = (
+    <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
+      {title}
+    </span>
+  );
+  if (!count) {
+    return (
+      <div className="flex flex-col gap-1">
+        {label}
+        {children}
+      </div>
+    );
+  }
   return (
-    <div className="flex flex-col gap-1">
-      <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
-        {title}
-      </p>
-      {children}
-    </div>
+    <details className="group flex flex-col gap-1 border-t border-border/50 pt-2.5">
+      <summary className="flex cursor-pointer select-none items-center gap-2 [&::-webkit-details-marker]:hidden">
+        {label}
+        <span className="text-[11px] text-muted-foreground">
+          {count.n} {count.n === 1 ? count.noun : `${count.noun}s`}
+        </span>
+        <span className="ml-auto text-[10px] text-muted-foreground/60 transition-transform group-open:rotate-90">
+          ›
+        </span>
+      </summary>
+      <div className="pt-1.5">{children}</div>
+    </details>
   );
 }
 
