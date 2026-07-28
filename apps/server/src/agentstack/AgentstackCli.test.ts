@@ -61,6 +61,41 @@ describe("AgentstackCli", () => {
       stderrTruncated: false,
     }) as const;
 
+  it.effect("reports a refusal's own reason, not the tail of what it printed first", () => {
+    // `trust` prints the whole review to stdout and then bails to stderr with
+    // the remedy. Reading stdout first left the user staring at a review line
+    // with no way forward.
+    const run = vi.fn<ProcessRunner.ProcessRunner["Service"]["run"]>(() =>
+      Effect.succeed({
+        stdout: "  · rust-best-practices          [git, pinned]\n",
+        stderr:
+          "cannot trust /proj: its loadable surface isn't fully pinned — 1 item(s) need locking or review:\n" +
+          "  figma  not pinned\n" +
+          "Run `agentstack lock`, review the result, then `agentstack trust` again.\n",
+        code: ChildProcessSpawner.ExitCode(1),
+        timedOut: false,
+        stdoutTruncated: false,
+        stderrTruncated: false,
+      } as const),
+    );
+    const ProcessRunnerTest = Layer.succeed(
+      ProcessRunner.ProcessRunner,
+      ProcessRunner.ProcessRunner.of({ run }),
+    );
+
+    return Effect.gen(function* () {
+      const agentstack = yield* AgentstackCli.make();
+      const r = yield* agentstack.action({
+        workspaceRoot: "/proj",
+        action: "trust-grant",
+        consentedDigest: `sha256:${"a".repeat(64)}`,
+      });
+      expect(r.ok).toBe(false);
+      expect(r.message).toContain("agentstack lock");
+      expect(r.message).not.toContain("rust-best-practices");
+    }).pipe(Effect.provide(ProcessRunnerTest));
+  });
+
   it.effect("diff runs the scoped diff --json and parses the report", () => {
     const run = vi.fn<ProcessRunner.ProcessRunner["Service"]["run"]>(() =>
       Effect.succeed(
@@ -364,7 +399,11 @@ describe("AgentstackCli", () => {
 
   it.effect("restore-write undoes by id and refuses a malformed id before spawning", () => {
     const run = vi.fn<ProcessRunner.ProcessRunner["Service"]["run"]>(() =>
-      Effect.succeed(okOutput('{"performed":true}')),
+      Effect.succeed(
+        okOutput(
+          "✓ undone — reverted files show up as pending again; re-run `agentstack apply` to re-render.",
+        ),
+      ),
     );
     const ProcessRunnerTest = Layer.succeed(
       ProcessRunner.ProcessRunner,
@@ -384,10 +423,14 @@ describe("AgentstackCli", () => {
       // Undoes one entry by id — never a blind --last.
       expect(run).toHaveBeenCalledWith(
         expect.objectContaining({
-          args: ["--manifest-dir", "/proj", "restore", id, "--write", "--json"],
+          args: ["--manifest-dir", "/proj", "restore", id, "--write"],
         }),
       );
       expect(run.mock.calls[0]?.[0].args).not.toContain("--last");
+      // Not `--json`: that suppresses the human sentence, and the outcome is
+      // the last stdout line — which would be the closing brace of an object.
+      expect(run.mock.calls[0]?.[0].args).not.toContain("--json");
+      expect(undone.message).toContain("undone");
 
       run.mockClear();
       const missing = yield* agentstack.action({ workspaceRoot: "/proj", action: "restore-write" });

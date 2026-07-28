@@ -1587,6 +1587,12 @@ function DriftScopeSection({
   const changed = report.targets.filter((t) => t.changed);
   const kept = keptServers(report);
   if (changed.length === 0 && kept.length === 0) return null;
+  // `changed` alone is not evidence of an edit: it is also true when the
+  // manifest moved ahead of a file nobody touched. Only `hand_edited` says
+  // somebody wrote to the file outside agentstack, so only that may be
+  // narrated as an edit. Absent on older CLIs → we describe the difference
+  // without claiming a cause.
+  const edited = changed.filter((t) => t.hand_edited === true).length;
 
   const where = scope === "global" ? "global configs (~)" : "this repo";
   const adopt: ActionKind = scope === "global" ? "adopt-global" : "adopt-project";
@@ -1602,7 +1608,9 @@ function DriftScopeSection({
             <DriftTarget key={`${scope}-${t.id}`} target={t} />
           ))}
           <p className="text-[11px] leading-relaxed text-muted-foreground">
-            The on-disk config in {where} was hand-edited. Pick which one is the truth.
+            {edited > 0
+              ? `The on-disk config in ${where} was edited outside agentstack. Pick which one is the truth.`
+              : `${where === "this repo" ? "This repo" : "Your global configs"} no longer match the manifest. Pick which one is the truth.`}
           </p>
           {/* Ranked, not paired: "Keep edits" only writes agentstack.toml, so
               it is the non-destructive answer and reads as the default.
@@ -1616,10 +1624,11 @@ function DriftScopeSection({
                 onClick={() => onPick(adopt)}
                 className="inline-flex h-7 shrink-0 items-center rounded-lg border border-success/40 bg-success/10 px-3 text-xs font-semibold text-success-foreground disabled:opacity-60"
               >
-                Keep edits
+                {edited > 0 ? "Keep edits" : "Keep what's on disk"}
               </button>
               <span className="text-[11px] leading-relaxed text-muted-foreground">
-                Pull the hand-edit into this project's manifest. Only writes agentstack.toml.
+                Pull what&apos;s on disk into this project&apos;s manifest. Only writes
+                agentstack.toml.
               </span>
             </div>
             <div className="flex items-baseline gap-2.5">
@@ -1632,7 +1641,7 @@ function DriftScopeSection({
                 Re-render
               </button>
               <span className="text-[11px] leading-relaxed text-muted-foreground">
-                Overwrite the hand-edit from the manifest. Other setups' servers are kept, never
+                Overwrite the file from the manifest. Other setups&apos; servers are kept, never
                 pruned; reversible with <code className="font-mono">agentstack restore</code>.
               </span>
             </div>
@@ -2094,6 +2103,7 @@ function ToolsetsTab(props: ManageProps) {
             draft={draft}
             onToggleDraft={toggleDraft}
             canRemove={props.canRemoveFromLibrary}
+            untrusted={data !== null && data.trust !== "trusted"}
             busy={flow.phase !== "idle"}
             onAdd={(group, name, profile) =>
               void beginEdit(
@@ -2237,6 +2247,30 @@ function ToolsetRail({
           </div>
         ) : null}
 
+        {/* A session whose profile is no longer among the rows — renamed or
+            removed from the manifest while it was live — has no row to carry
+            its Stop, and the glance's "Stop using" is hidden whenever a concern
+            is showing. Without this, the only way to end it is a terminal.
+            Keyed off the session, not a row, precisely because no row matches. */}
+        {session != null && canSessions && rows.every((r) => r.name !== session.profile) ? (
+          <div className="mb-1.5 flex items-center gap-2 rounded-lg border border-success/30 bg-success/[0.06] px-2.5 py-2">
+            <span className="size-1.5 shrink-0 rounded-full bg-success" />
+            <span className="min-w-0 flex-1 text-[11px] leading-snug text-muted-foreground">
+              <span className="font-semibold text-foreground">{session.profile}</span> is in use but
+              is no longer a declared toolset here.
+            </span>
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={busy !== null}
+              onClick={onEnd}
+              className="shrink-0"
+            >
+              {busy === "__end__" ? "Stopping…" : "Stop"}
+            </Button>
+          </div>
+        ) : null}
+
         {rows.length === 0 && draft === null ? (
           // A toolset has to exist before anything in the library can be added
           // to one — which is why every Add button on the right is disabled
@@ -2263,7 +2297,16 @@ function ToolsetRail({
 
         {rows.map((row) => {
           const profile = members.get(row.name);
-          const inUse = row.active || session?.profile === row.name;
+          // Two different things read as "in use" here and only one of them can
+          // be stopped: `held` is the temporary session (what `session end`
+          // reverts), `row.active` is the toolset the manifest already points
+          // at. Offering Stop on a merely-active row hands the user a verb the
+          // state cannot honour — `session end` finds no session to end.
+          const held = session != null && session.profile === row.name;
+          const inUse = row.active || held;
+          // Sessions are one-at-a-time, so every other ready row loses Use
+          // while one is open. Say why rather than silently dropping the verb.
+          const sessionElsewhere = session != null && !held ? session : null;
           return (
             <div
               key={row.name}
@@ -2282,7 +2325,7 @@ function ToolsetRail({
                 <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-foreground">
                   {row.name}
                 </span>
-                {inUse && canSessions ? (
+                {held && canSessions ? (
                   <Button
                     size="xs"
                     variant="outline"
@@ -2307,11 +2350,19 @@ function ToolsetRail({
               </div>
               <span className="text-[11px] text-muted-foreground">
                 {row.summary}
-                {inUse && session ? ` · in use ${fmtAgo(session.started_unix)}` : ""}
+                {/* The clock belongs to the session, so only the row holding it
+                    may show an age — otherwise an active row borrows another
+                    row's start time and claims a duration it never had. */}
+                {held && session ? ` · in use ${fmtAgo(session.started_unix)}` : ""}
+                {row.active && !held ? " · active" : ""}
               </span>
               {row.blockedBecause ? (
                 <span className="text-[10.5px] leading-snug text-warning-foreground">
                   {row.blockedBecause}
+                </span>
+              ) : row.ready && sessionElsewhere !== null && canSessions ? (
+                <span className="text-[10.5px] leading-snug text-muted-foreground/70">
+                  {`ready — stop ${sessionElsewhere.profile} to use this one instead`}
                 </span>
               ) : null}
               {profile && profile.servers.length + profile.skills.length > 0 ? (
@@ -2356,6 +2407,7 @@ function LibraryPane({
   draft,
   onToggleDraft,
   canRemove,
+  untrusted,
   busy,
   onAdd,
   onRemove,
@@ -2369,6 +2421,13 @@ function LibraryPane({
   draft: { name: string; skills: ReadonlyArray<string>; servers: ReadonlyArray<string> } | null;
   onToggleDraft: (group: "skill" | "server", name: string) => void;
   canRemove: boolean;
+  /**
+   * The project has not been reviewed. Adding still writes the manifest, but
+   * the render that would follow is refused target by target — so the verb is
+   * left enabled and its real consequence is stated once, here, rather than
+   * discovered as a half-applied edit.
+   */
+  untrusted: boolean;
   /** An edit is mid-flight; the rows stop offering new ones. */
   busy: boolean;
   onAdd: (group: "skill" | "server", name: string, profile: string) => void;
@@ -2399,6 +2458,20 @@ function LibraryPane({
           className="h-7 min-w-0 flex-1 rounded-lg border border-border/60 bg-background px-2.5 text-[11px] text-foreground placeholder:text-muted-foreground/60"
         />
       </div>
+      {untrusted ? (
+        // Precise about which paths the review gates. Adding is an explicit,
+        // user-initiated static apply, and that is NOT one of them — it writes
+        // the manifest and renders your CLI configs today. What stays inert
+        // until review is the automatic surface: the auto-mode gateway won't
+        // spawn or contact these servers or resolve their secrets, and
+        // declared extensions don't land. Saying "nothing renders" here would
+        // promise a gate the CLI does not implement.
+        <p className="mx-3 mb-2 rounded-lg border border-warning/25 bg-warning/[0.07] px-2.5 py-1.5 text-[10.5px] leading-relaxed text-warning-foreground">
+          This project isn&apos;t reviewed yet. Adding still writes the manifest and renders your
+          CLI configs — but until you review it, auto mode won&apos;t run or contact these servers,
+          and declared extensions stay unapplied.
+        </p>
+      ) : null}
       <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
         {load.phase === "loading" ? (
           <p className="py-2 text-xs text-muted-foreground">Loading library…</p>
@@ -2630,7 +2703,25 @@ export function CheckupFindings({
               >
                 {finding.message}
               </span>
-              {finding.fix !== null ? <CommandLine text={finding.fix} muted /> : null}
+              {/* One line per remedy doctor offered. Several are a choice of
+                  two ("keep them: … · prune them: …"), and a single copyable
+                  line there is not a command anyone can run. Prose
+                  alternatives stay prose — typesetting them as code invites a
+                  paste that does nothing. */}
+              {finding.fixOptions.map((option) => (
+                <div key={`${option.label ?? ""}:${option.text}`} className="flex flex-col">
+                  {option.label !== null ? (
+                    <span className="text-[10px] text-muted-foreground/70">{option.label}</span>
+                  ) : null}
+                  {option.isCommand ? (
+                    <CommandLine text={option.text} muted />
+                  ) : (
+                    <span className="text-[10.5px] leading-snug text-muted-foreground">
+                      {option.text}
+                    </span>
+                  )}
+                </div>
+              ))}
             </div>
             {action !== null ? (
               <RowAction onClick={() => onRequestAction(action)}>
@@ -2868,7 +2959,14 @@ function describeEdit(edit: AgentstackProfileEdit): string {
  * what/why/next-step card instead of a red failure banner.
  */
 function matchSecretBlock(message: string): { ref: string | null } | null {
-  if (!/unresolved secret|\$\{|not written/i.test(message)) return null;
+  // Narrow on purpose. This predicate does two things — it picks the calm card
+  // over the red banner, and it tells the caller the edit landed well enough to
+  // reload — so a false positive presents a real failure as a routine next
+  // step. `not written` and a bare `${` appear in failures that have nothing to
+  // do with secrets; the blocked-render path always names the condition
+  // ("unresolved secret(s) blocked N target(s)") or the remedy
+  // ("agentstack secret set NAME"), so match only those.
+  if (!/unresolved secret|secret set\s+[A-Za-z0-9_]+/i.test(message)) return null;
   const ref =
     /\$\{([A-Za-z0-9_]+)\}/.exec(message)?.[1] ??
     /secret set\s+([A-Za-z0-9_]+)/i.exec(message)?.[1] ??
@@ -3055,20 +3153,25 @@ function LibraryRow({
 
         {canRemove && !composing && !choosing && item.origin === "library" ? (
           // `Add` enrolls this capability in a toolset for THIS project;
-          // `Remove` deletes it from the machine-wide library, for every
-          // project. Two very different blast radii, so they do not sit side by
-          // side as equals: the destructive one appears on row hover or
-          // keyboard focus and carries destructive colour the moment it is
-          // visible.
+          // `Remove from library` deletes it from the machine-wide library, for
+          // every project. Two very different blast radii, so they do not sit
+          // side by side as equals — this one is quieter and carries
+          // destructive colour on hover.
+          //
+          // The scope is in the visible label, not only the tooltip: a verb
+          // that needs a hover to say what it destroys is a verb the reader has
+          // to guess at. For the same reason the control is always visible
+          // rather than revealed on hover — a destructive action you discover
+          // by accident is worse than one you can see and decline.
           <button
             type="button"
             disabled={busy}
             onClick={() => onRemove(group, item.name)}
-            title="Remove from your library (all projects) — recoverable"
+            title="Removes it for every project — recoverable from the library trash"
             aria-label={`Remove ${item.name} from your library`}
-            className="shrink-0 rounded-md border border-transparent px-1.5 py-0.5 text-[10px] font-semibold text-destructive-foreground/80 opacity-0 transition-all hover:border-destructive/30 hover:bg-destructive/10 hover:text-destructive-foreground focus-visible:opacity-100 group-hover:opacity-100 disabled:opacity-0"
+            className="shrink-0 rounded-md border border-transparent px-1.5 py-0.5 text-[10px] font-semibold text-destructive-foreground/70 transition-all hover:border-destructive/30 hover:bg-destructive/10 hover:text-destructive-foreground disabled:opacity-40"
           >
-            Remove
+            Remove from library
           </button>
         ) : null}
       </div>
@@ -3198,6 +3301,15 @@ function EditFlowCard({
       <p className="text-[12.5px] font-semibold text-foreground">{flow.title}</p>
       {removing ? (
         <RemovalConfirmBody removal={removal} />
+      ) : flow.edit.kind === "create-profile" ? (
+        // Naming a toolset is not switching to it: the CLI writes the manifest
+        // entry and pins the members, then stops — no native config file moves
+        // and no `${REF}` is resolved. Promising a render here would describe
+        // a write that never happens.
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          Creating writes the toolset and pins what&apos;s in it. Nothing is rendered — your CLIs
+          stay as they are until you use it. Nothing is written until you confirm.
+        </p>
       ) : (
         <p className="text-[11px] leading-relaxed text-muted-foreground">
           Applying re-locks and re-renders the toolset. An unresolved{" "}
@@ -4222,7 +4334,8 @@ function WorkflowMonitorDialog({
   const pinned = shortDigest(run?.workflow_digest ?? undefined);
   const dur = fmtDuration(run?.duration_ms ?? summary?.duration_ms);
   const counts = run ? deriveWorkflowCounts(run.steps) : null;
-  const stages = run ? deriveWorkflowStages(run.steps).stages : [];
+  const grouping = run ? deriveWorkflowStages(run.steps) : null;
+  const stages = grouping?.stages ?? [];
   const steps = run?.steps ?? [];
   const stepName = new Map(steps.map((s) => [s.step, s.label ?? `step ${s.step}`]));
   const totalToolCalls = steps.reduce((n, s) => n + (s.tool_calls ?? 0), 0);
@@ -4259,12 +4372,18 @@ function WorkflowMonitorDialog({
             </span>
           </DialogTitle>
           <div className="flex items-center gap-2 pt-1">
+            {/* The badge is the run's own integrity claim, so it may only
+                appear when the run reports a digest. No step carries a
+                posture of its own — "every step" was asserting something the
+                evidence does not contain. */}
             {pinned ? (
-              <code className="font-mono text-[10px] text-muted-foreground">pinned {pinned}</code>
+              <>
+                <code className="font-mono text-[10px] text-muted-foreground">pinned {pinned}</code>
+                <span className="inline-flex h-[17px] items-center rounded bg-success/10 px-1.5 text-[10px] font-semibold text-success-foreground">
+                  locked run
+                </span>
+              </>
             ) : null}
-            <span className="inline-flex h-[17px] items-center rounded bg-success/10 px-1.5 text-[10px] font-semibold text-success-foreground">
-              every step: locked run
-            </span>
             {run ? (
               <span className="ml-auto text-[10px] tabular-nums text-muted-foreground/70">
                 agents {steps.length}/{run.max_agents}
@@ -4400,6 +4519,14 @@ function WorkflowMonitorDialog({
                 </div>
               );
             })}
+            {/* The same caveat the inline monitor carries. This is the larger,
+                more authoritative surface, so it is the one that must not
+                present a script convention as enforced structure. */}
+            {grouping && !grouping.labelled ? (
+              <p className="pt-1 text-[10px] text-muted-foreground/60">
+                Stage grouping follows step labels — a script convention, not enforced structure.
+              </p>
+            ) : null}
             {summary?.resumable ? (
               <div className="mt-1 flex flex-col gap-1 rounded-lg border border-warning/25 bg-warning/[0.07] px-2.5 py-2">
                 <span className="text-[11px] font-semibold text-warning-foreground">Resumable</span>
@@ -4448,12 +4575,16 @@ function WorkflowMonitor({ run }: { run: AgentstackWorkflowRun }) {
       <div className="flex items-center gap-2 px-3 pb-2 pt-2.5">
         <span className="size-[7px] rounded-full bg-warning animate-pulse" />
         <span className="text-[13px] font-semibold text-foreground">{run.workflow}</span>
+        {/* Same rule as the dialog: the claim is the run's, and only when the
+            run actually reports a digest. */}
         {pinned ? (
-          <code className="font-mono text-[10px] text-muted-foreground">{pinned}</code>
+          <>
+            <code className="font-mono text-[10px] text-muted-foreground">{pinned}</code>
+            <span className="ml-auto inline-flex h-[18px] items-center rounded bg-success/10 px-1.5 text-[10px] font-semibold text-success-foreground">
+              locked run
+            </span>
+          </>
         ) : null}
-        <span className="ml-auto inline-flex h-[18px] items-center rounded bg-success/10 px-1.5 text-[10px] font-semibold text-success-foreground">
-          every step: locked run
-        </span>
       </div>
       <div className="flex flex-col gap-1 px-3 pb-2">
         {stages.map((stage) => (

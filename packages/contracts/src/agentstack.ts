@@ -383,6 +383,16 @@ export const AgentstackDiffTarget = Schema.Struct({
   /** Unified-diff text of the pending change; "" when unchanged. */
   diff: Schema.String,
   /**
+   * True when this file changed *outside* agentstack since our last write —
+   * the CLI's own "hand-edited" signal, and the same one `doctor` reports as
+   * "edited on disk since last apply". Distinct from `changed`, which is also
+   * true when the manifest simply moved ahead of a rendered file. Only the
+   * former is somebody's edit; saying so about the latter accuses the user of
+   * something they did not do. `optionalKey` so payloads from CLIs that
+   * predate the field still decode (absent → we make no claim about cause).
+   */
+  hand_edited: Schema.optionalKey(Schema.Boolean),
+  /**
    * Servers on disk that a default render *keeps* (spares) because another
    * setup applied them — `apply` never removes these without `--prune-foreign`,
    * which this integration never runs.

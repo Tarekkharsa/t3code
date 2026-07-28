@@ -588,14 +588,12 @@ export function actionArgv(
       // Undo one ledger entry by its full hex id (validated before spawn).
       // Never `--last` — the ledger is machine-global and the panel already
       // picked the newest project-touching entry.
-      return [
-        "--manifest-dir",
-        workspaceRoot,
-        "restore",
-        bound?.restoreId ?? "",
-        "--write",
-        "--json",
-      ];
+      //
+      // No `--json` here, deliberately: an action's outcome is reduced by
+      // [`lastCliLine`], and `restore --write --json` suppresses the human
+      // sentence in favour of a pretty-printed object — whose last line is
+      // `}`. The panel wants the sentence the terminal would have printed.
+      return ["--manifest-dir", workspaceRoot, "restore", bound?.restoreId ?? "", "--write"];
     case "session-start":
       // Temporary activation of one declared toolset. The CLI's session gate
       // is fail-closed (refuses untrusted projects and unpinned/drifted
@@ -624,6 +622,24 @@ function lastCliLine(text: string): string {
       .findLast((l) => l.trim().length > 0)
       ?.trim() ?? ""
   );
+}
+
+/**
+ * The one line the panel shows as a command's outcome — taken from the stream
+ * that actually carries it.
+ *
+ * On success that is stdout: the CLI's closing sentence. On a refusal it is
+ * stderr, where the reason and the remedy live, while stdout still holds
+ * whatever the command printed before it gave up. `trust` prints an entire
+ * review to stdout and then bails with "…run `agentstack lock`, review the
+ * result, then `agentstack trust` again"; preferring stdout there hands the
+ * user the tail of a review instead of the sentence that says how to proceed.
+ * The same is true of a render blocked by an unresolved `${REF}`.
+ */
+function outcomeLine(stdout: string, stderr: string, ok: boolean): string {
+  return ok
+    ? lastCliLine(stdout) || lastCliLine(stderr) || "done"
+    : lastCliLine(stderr) || lastCliLine(stdout) || "failed";
 }
 
 function isBinaryNotFound(error: ProcessRunner.ProcessRunError): boolean {
@@ -1074,8 +1090,7 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
     const r = result.result;
     if (r.timedOut) return { ok: false, message: "timed out" };
     const ok = r.code === 0;
-    const message = lastCliLine(r.stdout) || lastCliLine(r.stderr) || (ok ? "done" : "failed");
-    return { ok, message: message.slice(0, 200) };
+    return { ok, message: outcomeLine(r.stdout, r.stderr, ok).slice(0, 200) };
   });
 
   const action: AgentstackCli["Service"]["action"] = Effect.fn("AgentstackCli.action")(
@@ -1182,11 +1197,8 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
       if (r.timedOut) {
         return { ok: false, message: "timed out" };
       }
-      // Last non-empty line of stdout (or stderr) is the human outcome (ANSI
-      // stripped) — shared with the profile-edit apply via [`lastCliLine`].
       const ok = r.code === 0;
-      const message = lastCliLine(r.stdout) || lastCliLine(r.stderr) || (ok ? "done" : "failed");
-      return { ok, message: message.slice(0, 200) };
+      return { ok, message: outcomeLine(r.stdout, r.stderr, ok).slice(0, 200) };
     },
   );
 

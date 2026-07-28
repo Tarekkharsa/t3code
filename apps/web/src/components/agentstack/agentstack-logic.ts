@@ -1021,6 +1021,16 @@ export function summarizeAgentstackHealthyRows(
 
 // ── checkup findings ─────────────────────────────────────────────────────────
 
+/** One of the remedies doctor named, split from any `label:` prefix. */
+export interface AgentstackFixOption {
+  /** The words before the colon ("keep them"), or null when there were none. */
+  readonly label: string | null;
+  /** The remedy itself — a command when `isCommand`, otherwise prose. */
+  readonly text: string;
+  /** True when `text` is something the user can actually run. */
+  readonly isCommand: boolean;
+}
+
 export interface AgentstackFinding {
   readonly key: string;
   readonly level: AgentstackRowLevel;
@@ -1028,6 +1038,18 @@ export interface AgentstackFinding {
   readonly message: string;
   /** The command doctor named as the fix, when it named one. */
   readonly fix: string | null;
+  /**
+   * The fix split into the separate choices doctor offered. Several remedies
+   * are two alternatives joined by " · " ("keep them: agentstack adopt ·
+   * prune them: agentstack apply --prune-foreign") — rendering that whole
+   * string as one copyable command produces a line no shell will run.
+   *
+   * Each option carries its own label ("keep them") apart from its body, and
+   * says whether that body is actually runnable: doctor also offers prose
+   * alternatives ("· or reinstall the skill it points at"), and typesetting
+   * prose as a command invites the user to paste it.
+   */
+  readonly fixOptions: ReadonlyArray<AgentstackFixOption>;
   /** Set when that fix is a fixed action this panel can run directly. */
   readonly action: AgentstackActionKind | null;
   /** Which doctor section it came from, for grouping. */
@@ -1049,6 +1071,39 @@ const FINDING_MAX = 240;
 
 function clamp(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+/**
+ * Split a doctor remedy into the alternatives it offered.
+ *
+ * Doctor composes them with " · " and usually prefixes each with a short label
+ * ("keep them: agentstack adopt --scope global"). It also mixes in prose
+ * alternatives that are not commands at all ("or reinstall the skill it points
+ * at"), so each part is classified rather than assumed runnable.
+ *
+ * Every part is clamped on its own, so one long option cannot swallow the
+ * other and the display bound still holds per rendered line.
+ */
+function splitFixOptions(fix: string): AgentstackFixOption[] {
+  return fix
+    .split(" · ")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0)
+    .map((part) => {
+      // A label is a few plain words before a colon. Bounded deliberately: a
+      // command can contain a colon of its own (a URL, a digest), and that
+      // must not be mistaken for a label and hidden from the command line.
+      const labelled = /^([A-Za-z][A-Za-z ']{0,23}):\s+(.+)$/.exec(part);
+      const label = labelled?.[1] ?? null;
+      const text = labelled?.[2] ?? part;
+      return {
+        label: label === null ? null : clamp(label, FINDING_MAX),
+        text: clamp(text, FINDING_MAX),
+        // Only agentstack's own verbs and the handful of shell commands doctor
+        // actually suggests count as runnable; anything else is prose.
+        isCommand: /^(agentstack|rm|mkdir|ln|brew|npx|git)\s/.test(text),
+      };
+    });
 }
 
 /**
@@ -1075,6 +1130,7 @@ export function deriveAgentstackFindings(
         level: line.level === "error" ? "error" : "warn",
         message: clamp((message ?? line.msg).trim().replace(/\s+/g, " "), FINDING_MAX),
         fix: fix.length > 0 ? clamp(fix, FINDING_MAX) : null,
+        fixOptions: fix.length > 0 ? splitFixOptions(fix) : [],
         // Match the action on the UNCLAMPED command: clipping is a display
         // concern and must not change which fixed action a fix maps to.
         action: fix.length > 0 ? matchAgentstackNextAction(fix) : null,
@@ -1278,8 +1334,12 @@ const CONCERN_COPY: Record<string, { readonly title: string; readonly detail: st
       "Something this project pinned was edited since you approved it, so it is inert again until you review the new bytes.",
   },
   drift: {
-    title: "A CLI config was hand-edited",
-    detail: "Keep the edit or re-render from the manifest — you choose which truth to keep.",
+    // Not "hand-edited": drift is also what a manifest change ahead of a
+    // rendered file looks like, and the glance cannot tell the two apart. The
+    // drift review can — it reads the CLI's per-target `hand_edited` — so the
+    // cause is named there, and the concern states the choice instead.
+    title: "A CLI config no longer matches the manifest",
+    detail: "Keep what's on disk or re-render from the manifest — you choose which truth to keep.",
   },
 };
 
@@ -1324,7 +1384,11 @@ export function selectAgentstackPrimaryConcern(input: {
     return {
       key: driftRow.key,
       title: copy.title,
-      detail: driftRow.summary || copy.detail,
+      // The row summary is a status fragment ("changes pending on disk") and is
+      // never empty, so preferring it made the curated line unreachable. The
+      // concern card's job is to state the choice waiting for you, which is
+      // what `copy.detail` says; the row's own summary still shows in the list.
+      detail: copy.detail,
       act: { kind: "review-drift" },
       label: "Review",
       note: null,

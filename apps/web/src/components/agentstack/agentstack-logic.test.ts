@@ -695,8 +695,58 @@ describe("deriveAgentstackFindings", () => {
     );
     expect(f?.message).toBe("Codex CLI 10 change(s) pending");
     expect(f?.fix).toBe("agentstack apply --write");
+    expect(f?.fixOptions).toEqual([
+      { label: null, text: "agentstack apply --write", isCommand: true },
+    ]);
     expect(f?.action).toBe("apply-project");
     expect(f?.section).toBe("Drift");
+  });
+
+  it("keeps a two-option remedy as two options, not one unrunnable line", () => {
+    const [f] = deriveAgentstackFindings(
+      report([
+        {
+          title: "Drift",
+          lines: [
+            {
+              level: "warn",
+              msg: "Claude Code would REMOVE figma ↳ keep them: agentstack adopt --scope global · prune them: agentstack apply --prune-foreign --scope global",
+            },
+          ],
+        },
+      ]),
+    );
+    expect(f?.fixOptions).toEqual([
+      { label: "keep them", text: "agentstack adopt --scope global", isCommand: true },
+      {
+        label: "prune them",
+        text: "agentstack apply --prune-foreign --scope global",
+        isCommand: true,
+      },
+    ]);
+  });
+
+  it("does not typeset a prose alternative as a command to paste", () => {
+    // doctor mixes a command and prose in one remedy; only the first is
+    // runnable, and offering the second as copyable code invites a paste that
+    // does nothing.
+    const [f] = deriveAgentstackFindings(
+      report([
+        {
+          title: "Skills",
+          lines: [
+            {
+              level: "warn",
+              msg: "Claude Code broken skill link 'x' → /p (target missing) ↳ remove it: rm /p/x · or reinstall the skill it points at",
+            },
+          ],
+        },
+      ]),
+    );
+    expect(f?.fixOptions).toEqual([
+      { label: "remove it", text: "rm /p/x", isCommand: true },
+      { label: null, text: "or reinstall the skill it points at", isCommand: false },
+    ]);
   });
 
   it("maps the explicitly global apply to the global action", () => {
@@ -940,6 +990,7 @@ describe("selectAgentstackFindingsView", () => {
     level: "warn",
     message: "m",
     fix: null,
+    fixOptions: [],
     action: null,
     section: "S",
     ...over,
@@ -1018,6 +1069,7 @@ describe("agentstackFindingAction", () => {
     level: "warn",
     message: "guard hook missing",
     fix: "agentstack guard install",
+    fixOptions: [{ label: null, text: "agentstack guard install", isCommand: true }],
     action: "guard-install",
     section: "t3code (supervisor)",
   };
@@ -1050,6 +1102,7 @@ describe("agentstackFindingAction", () => {
           level: "warn",
           message: "Codex CLI 2 change(s) pending",
           fix: "agentstack apply --write",
+          fixOptions: [{ label: null, text: "agentstack apply --write", isCommand: true }],
           action: "apply-project",
           section: "Drift",
         },
@@ -1137,6 +1190,13 @@ describe("selectAgentstackPrimaryConcern", () => {
     });
     expect(concern?.act).toEqual({ kind: "review-drift" });
     expect(concern?.others).toBe(1);
+    // The card states the choice waiting for the user, not the row's status
+    // fragment — and never asserts a hand-edit the glance cannot see.
+    expect(concern?.detail).toBe(
+      "Keep what's on disk or re-render from the manifest — you choose which truth to keep.",
+    );
+    expect(concern?.detail).not.toBe(driftRow.summary);
+    expect(concern?.title).not.toMatch(/hand-edited/i);
   });
 
   it("states an action as its consequence, and promises what the button promises", () => {
@@ -1169,6 +1229,7 @@ describe("selectAgentstackPrimaryConcern", () => {
       level: "warn",
       message: "Codex CLI 2 change(s) pending",
       fix: "agentstack apply --write",
+      fixOptions: [{ label: null, text: "agentstack apply --write", isCommand: true }],
       action: "apply-project",
       section: "Drift",
     };
