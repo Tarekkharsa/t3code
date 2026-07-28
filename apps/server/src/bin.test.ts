@@ -394,6 +394,10 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
         "access:read",
         "access:write",
         "relay:write",
+        // Fork-only: administrative sessions carry the AgentStack panel's
+        // write scope (added with the consent-bound trust grants). Delegated
+        // and bearer clients still have to be granted it explicitly.
+        "agentstack:admin",
       ]);
       assert.equal(listed.length, 1);
       assert.equal(listed[0]?.sessionId, issued.sessionId);
@@ -406,6 +410,9 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
         "access:read",
         "access:write",
         "relay:write",
+        // Fork-only, as above — the listing must show the same scope set the
+        // issue call returned, redaction aside.
+        "agentstack:admin",
       ]);
       assert.equal("token" in (listed[0] ?? {}), false);
     }),

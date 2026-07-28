@@ -711,6 +711,33 @@ describe("deriveWorkLogEntries", () => {
     expect(entries.map((entry) => entry.id)).toEqual(["tool-complete"]);
   });
 
+  it("captures failure text from a completed call whose result is an error", () => {
+    // Hook/policy denials in bypass mode (observed live): the lifecycle
+    // status never says "failed" — only the tool result carries the error.
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "tool-denied",
+        kind: "tool.completed",
+        summary: "Tool call complete",
+        payload: {
+          itemType: "dynamic_tool_call",
+          detail: 'Read: {"file_path":"/repo/.env"}',
+          data: {
+            toolName: "Read",
+            result: {
+              type: "tool_result",
+              content: "agentstack guard blocked this: /repo/.env",
+              is_error: true,
+            },
+          },
+        },
+      }),
+    ];
+
+    const entries = deriveWorkLogEntries(activities);
+    expect(entries[0]?.failureText).toBe("agentstack guard blocked this: /repo/.env");
+  });
+
   it("omits task.started but shows task.progress and task.completed", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

@@ -12,6 +12,7 @@ import {
   AuthAccessReadScope,
   AuthAccessWriteScope,
   AuthAdministrativeScopes,
+  AuthAgentstackAdminScope,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   AuthRelayReadScope,
@@ -203,6 +204,11 @@ const PAIRING_SCOPE_OPTIONS: ReadonlyArray<{
     scope: AuthRelayWriteScope,
     title: "Manage relay",
     description: "Change managed tunnel connectivity.",
+  },
+  {
+    scope: AuthAgentstackAdminScope,
+    title: "Administer AgentStack",
+    description: "Grant or revoke repo trust, install the guard, and rewrite CLI configs.",
   },
 ];
 

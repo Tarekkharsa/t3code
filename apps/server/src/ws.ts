@@ -11,6 +11,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import {
   DEFAULT_AUTOMATIC_GIT_FETCH_INTERVAL,
+  AuthAgentstackAdminScope,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   AuthReviewWriteScope,
@@ -49,6 +50,7 @@ import {
   OrchestrationReplayEventsError,
   type FilesystemBrowseFailure,
   FilesystemBrowseError,
+  AgentstackWorkspaceContextError,
   AssetWorkspaceContextNotFoundError,
   AssetWorkspaceContextResolutionError,
   EnvironmentAuthorizationError,
@@ -112,6 +114,7 @@ import * as BitbucketApi from "./sourceControl/BitbucketApi.ts";
 import * as GitHubCli from "./sourceControl/GitHubCli.ts";
 import * as GitLabCli from "./sourceControl/GitLabCli.ts";
 import * as SourceControlProviderRegistry from "./sourceControl/SourceControlProviderRegistry.ts";
+import * as AgentstackCli from "./agentstack/AgentstackCli.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "./vcs/VcsDriverRegistry.ts";
 import * as VcsProjectConfig from "./vcs/VcsProjectConfig.ts";
@@ -308,6 +311,28 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [ORCHESTRATION_WS_METHODS.subscribeThread, AuthOrchestrationReadScope],
   [WS_METHODS.serverProbe, AuthOrchestrationReadScope],
   [WS_METHODS.serverGetConfig, AuthOrchestrationReadScope],
+  [WS_METHODS.agentstackStatus, AuthOrchestrationReadScope],
+  [WS_METHODS.agentstackActivity, AuthOrchestrationReadScope],
+  [WS_METHODS.agentstackWorkflow, AuthOrchestrationReadScope],
+  [WS_METHODS.agentstackWorkflowRun, AuthOrchestrationReadScope],
+  [WS_METHODS.agentstackTrustPreview, AuthOrchestrationReadScope],
+  [WS_METHODS.agentstackDiff, AuthOrchestrationReadScope],
+  [WS_METHODS.agentstackSetupPlan, AuthOrchestrationReadScope],
+  [WS_METHODS.agentstackToolsets, AuthOrchestrationReadScope],
+  [WS_METHODS.agentstackRestoreInventory, AuthOrchestrationReadScope],
+  // The library browser and the profile-edit PREVIEW are pure reads (nothing
+  // resolves, renders, or executes; no secret is touched), so they take the
+  // read scope — same as every other agentstack read.
+  [WS_METHODS.agentstackLibraryIndex, AuthOrchestrationReadScope],
+  [WS_METHODS.agentstackProfileEditPreview, AuthOrchestrationReadScope],
+  // Governed actions touch the AgentStack security control plane — trust
+  // grant/revoke, machine guard, config writes. That decides what code a
+  // repo may run on this machine, so it takes the dedicated admin scope
+  // (owner sessions carry it; standard delegated clients do not), not the
+  // vcs.pull tier. The profile-edit APPLY writes the manifest and re-renders
+  // native configs, so it takes the same admin scope.
+  [WS_METHODS.agentstackProfileEditApply, AuthAgentstackAdminScope],
+  [WS_METHODS.agentstackAction, AuthAgentstackAdminScope],
   [WS_METHODS.serverRefreshProviders, AuthOrchestrationOperateScope],
   [WS_METHODS.serverUpdateProvider, AuthOrchestrationOperateScope],
   [WS_METHODS.serverUpdateServer, AuthOrchestrationOperateScope],
@@ -437,6 +462,42 @@ const makeWsRpcLayer = (
       const config = yield* ServerConfig.ServerConfig;
       const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
+      const agentstackCli = yield* AgentstackCli.AgentstackCli;
+      // Resolve the workspace root from server-owned projections — the
+      // client names entities, never a filesystem path, so it cannot point
+      // the AgentStack CLI at an arbitrary directory.
+      const resolveAgentstackWorkspaceRoot = Effect.fnUntraced(function* (input: {
+        readonly projectId: ProjectId;
+        readonly threadId?: ThreadId;
+      }) {
+        const context = {
+          projectId: input.projectId,
+          ...(input.threadId !== undefined ? { threadId: input.threadId } : {}),
+        };
+        const project = yield* projectionSnapshotQuery
+          .getProjectShellById(input.projectId)
+          .pipe(
+            Effect.mapError((cause) => new AgentstackWorkspaceContextError({ ...context, cause })),
+          );
+        if (Option.isNone(project)) {
+          return yield* new AgentstackWorkspaceContextError(context);
+        }
+        let workspaceRoot = project.value.workspaceRoot;
+        if (input.threadId !== undefined) {
+          const thread = yield* projectionSnapshotQuery
+            .getThreadShellById(input.threadId)
+            .pipe(
+              Effect.mapError(
+                (cause) => new AgentstackWorkspaceContextError({ ...context, cause }),
+              ),
+            );
+          if (Option.isNone(thread) || thread.value.projectId !== input.projectId) {
+            return yield* new AgentstackWorkspaceContextError(context);
+          }
+          workspaceRoot = thread.value.worktreePath ?? workspaceRoot;
+        }
+        return workspaceRoot;
+      });
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
       const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
       const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
@@ -1481,6 +1542,153 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.serverGetConfig, loadServerConfig, {
             "rpc.aggregate": "server",
           }),
+        [WS_METHODS.agentstackStatus]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.agentstackStatus,
+            resolveAgentstackWorkspaceRoot(input).pipe(
+              Effect.flatMap((workspaceRoot) => agentstackCli.status({ workspaceRoot })),
+            ),
+            { "rpc.aggregate": "agentstack" },
+          ),
+        [WS_METHODS.agentstackActivity]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.agentstackActivity,
+            resolveAgentstackWorkspaceRoot(input).pipe(
+              Effect.flatMap((workspaceRoot) =>
+                agentstackCli.activity({
+                  workspaceRoot,
+                  limit: input.limit ?? AgentstackCli.ACTIVITY_LIMIT_DEFAULT,
+                }),
+              ),
+            ),
+            { "rpc.aggregate": "agentstack" },
+          ),
+        [WS_METHODS.agentstackWorkflow]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.agentstackWorkflow,
+            resolveAgentstackWorkspaceRoot(input).pipe(
+              Effect.flatMap((workspaceRoot) => agentstackCli.workflow({ workspaceRoot })),
+            ),
+            { "rpc.aggregate": "agentstack" },
+          ),
+        [WS_METHODS.agentstackWorkflowRun]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.agentstackWorkflowRun,
+            resolveAgentstackWorkspaceRoot(input).pipe(
+              Effect.flatMap((workspaceRoot) =>
+                agentstackCli.workflowRun({ workspaceRoot, runId: input.runId }),
+              ),
+            ),
+            { "rpc.aggregate": "agentstack" },
+          ),
+        [WS_METHODS.agentstackTrustPreview]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.agentstackTrustPreview,
+            resolveAgentstackWorkspaceRoot(input).pipe(
+              Effect.flatMap((workspaceRoot) => agentstackCli.trustPreview({ workspaceRoot })),
+            ),
+            { "rpc.aggregate": "agentstack" },
+          ),
+        [WS_METHODS.agentstackDiff]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.agentstackDiff,
+            resolveAgentstackWorkspaceRoot(input).pipe(
+              Effect.flatMap((workspaceRoot) =>
+                agentstackCli.diff({ workspaceRoot, scope: input.scope }),
+              ),
+            ),
+            { "rpc.aggregate": "agentstack" },
+          ),
+        [WS_METHODS.agentstackSetupPlan]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.agentstackSetupPlan,
+            resolveAgentstackWorkspaceRoot(input).pipe(
+              Effect.flatMap((workspaceRoot) =>
+                agentstackCli.setupPlan({
+                  workspaceRoot,
+                  ...(input.secretsDestination !== undefined
+                    ? { secretsDestination: input.secretsDestination }
+                    : {}),
+                }),
+              ),
+            ),
+            { "rpc.aggregate": "agentstack" },
+          ),
+        [WS_METHODS.agentstackToolsets]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.agentstackToolsets,
+            resolveAgentstackWorkspaceRoot(input).pipe(
+              Effect.flatMap((workspaceRoot) => agentstackCli.toolsets({ workspaceRoot })),
+            ),
+            { "rpc.aggregate": "agentstack" },
+          ),
+        [WS_METHODS.agentstackRestoreInventory]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.agentstackRestoreInventory,
+            resolveAgentstackWorkspaceRoot(input).pipe(
+              Effect.flatMap((workspaceRoot) => agentstackCli.restoreInventory({ workspaceRoot })),
+            ),
+            { "rpc.aggregate": "agentstack" },
+          ),
+        [WS_METHODS.agentstackLibraryIndex]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.agentstackLibraryIndex,
+            resolveAgentstackWorkspaceRoot(input).pipe(
+              Effect.flatMap((workspaceRoot) => agentstackCli.libraryIndex({ workspaceRoot })),
+            ),
+            { "rpc.aggregate": "agentstack" },
+          ),
+        [WS_METHODS.agentstackProfileEditPreview]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.agentstackProfileEditPreview,
+            resolveAgentstackWorkspaceRoot(input).pipe(
+              Effect.flatMap((workspaceRoot) =>
+                agentstackCli.profileEditPreview({ workspaceRoot, edit: input.edit }),
+              ),
+            ),
+            { "rpc.aggregate": "agentstack" },
+          ),
+        [WS_METHODS.agentstackProfileEditApply]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.agentstackProfileEditApply,
+            resolveAgentstackWorkspaceRoot(input).pipe(
+              Effect.flatMap((workspaceRoot) =>
+                agentstackCli.profileEditApply({
+                  workspaceRoot,
+                  edit: input.edit,
+                  consented: {
+                    digest: input.consentedDigest,
+                    ...(input.allowUnresolved !== undefined
+                      ? { allowUnresolved: input.allowUnresolved }
+                      : {}),
+                  },
+                }),
+              ),
+            ),
+            { "rpc.aggregate": "agentstack" },
+          ),
+        [WS_METHODS.agentstackAction]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.agentstackAction,
+            resolveAgentstackWorkspaceRoot(input).pipe(
+              Effect.flatMap((workspaceRoot) =>
+                agentstackCli.action({
+                  workspaceRoot,
+                  action: input.action,
+                  ...(input.consentedDigest !== undefined
+                    ? { consentedDigest: input.consentedDigest }
+                    : {}),
+                  ...(input.planDigest !== undefined ? { planDigest: input.planDigest } : {}),
+                  ...(input.restoreId !== undefined ? { restoreId: input.restoreId } : {}),
+                  ...(input.profile !== undefined ? { profile: input.profile } : {}),
+                  ...(input.secretsDestination !== undefined
+                    ? { secretsDestination: input.secretsDestination }
+                    : {}),
+                }),
+              ),
+            ),
+            { "rpc.aggregate": "agentstack" },
+          ),
         [WS_METHODS.serverRefreshProviders]: (input) =>
           observeRpcEffect(
             WS_METHODS.serverRefreshProviders,

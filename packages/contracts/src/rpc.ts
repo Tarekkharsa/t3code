@@ -15,6 +15,34 @@ import {
 } from "./filesystem.ts";
 import { AssetAccessError, AssetCreateUrlInput, AssetCreateUrlResult } from "./assets.ts";
 import {
+  AgentstackActionInput,
+  AgentstackActionResult,
+  AgentstackActivity,
+  AgentstackActivityInput,
+  AgentstackDiffInput,
+  AgentstackDiffResult,
+  AgentstackLibraryIndexInput,
+  AgentstackLibraryIndexResult,
+  AgentstackProfileEditApplyInput,
+  AgentstackProfileEditPreviewInput,
+  AgentstackProfileEditPreviewResult,
+  AgentstackRestoreInventoryInput,
+  AgentstackRestoreInventoryResult,
+  AgentstackSetupPlanInput,
+  AgentstackSetupPlanResult,
+  AgentstackToolsetsInput,
+  AgentstackToolsetsResult,
+  AgentstackStatus,
+  AgentstackStatusInput,
+  AgentstackTrustInput,
+  AgentstackTrustPreviewResult,
+  AgentstackWorkflowData,
+  AgentstackWorkflowInput,
+  AgentstackWorkflowRun,
+  AgentstackWorkflowRunInput,
+  AgentstackWorkspaceContextError,
+} from "./agentstack.ts";
+import {
   GitActionProgressEvent,
   VcsSwitchRefInput,
   VcsSwitchRefResult,
@@ -174,6 +202,21 @@ export const WS_METHODS = {
   vcsSwitchRef: "vcs.switchRef",
   vcsInit: "vcs.init",
 
+  // AgentStack methods
+  agentstackStatus: "agentstack.status",
+  agentstackActivity: "agentstack.activity",
+  agentstackWorkflow: "agentstack.workflow",
+  agentstackWorkflowRun: "agentstack.workflowRun",
+  agentstackTrustPreview: "agentstack.trustPreview",
+  agentstackDiff: "agentstack.diff",
+  agentstackSetupPlan: "agentstack.setupPlan",
+  agentstackToolsets: "agentstack.toolsets",
+  agentstackRestoreInventory: "agentstack.restoreInventory",
+  agentstackLibraryIndex: "agentstack.libraryIndex",
+  agentstackProfileEditPreview: "agentstack.profileEditPreview",
+  agentstackProfileEditApply: "agentstack.profileEditApply",
+  agentstackAction: "agentstack.action",
+
   // Git workflow methods
   gitRunStackedAction: "git.runStackedAction",
   gitResolvePullRequest: "git.resolvePullRequest",
@@ -261,6 +304,86 @@ export const WsServerGetConfigRpc = Rpc.make(WS_METHODS.serverGetConfig, {
   payload: Schema.Struct({}),
   success: ServerConfig,
   error: Schema.Union([KeybindingsConfigError, ServerSettingsError, EnvironmentAuthorizationError]),
+});
+
+export const WsAgentstackStatusRpc = Rpc.make(WS_METHODS.agentstackStatus, {
+  payload: AgentstackStatusInput,
+  success: AgentstackStatus,
+  error: Schema.Union([AgentstackWorkspaceContextError, EnvironmentAuthorizationError]),
+});
+
+export const WsAgentstackActivityRpc = Rpc.make(WS_METHODS.agentstackActivity, {
+  payload: AgentstackActivityInput,
+  success: AgentstackActivity,
+  error: Schema.Union([AgentstackWorkspaceContextError, EnvironmentAuthorizationError]),
+});
+
+export const WsAgentstackWorkflowRpc = Rpc.make(WS_METHODS.agentstackWorkflow, {
+  payload: AgentstackWorkflowInput,
+  success: AgentstackWorkflowData,
+  error: Schema.Union([AgentstackWorkspaceContextError, EnvironmentAuthorizationError]),
+});
+
+export const WsAgentstackWorkflowRunRpc = Rpc.make(WS_METHODS.agentstackWorkflowRun, {
+  payload: AgentstackWorkflowRunInput,
+  // Null when the run isn't found (or an older CLI can't report it) — the
+  // dialog degrades to its summary-row data rather than erroring.
+  success: Schema.NullOr(AgentstackWorkflowRun),
+  error: Schema.Union([AgentstackWorkspaceContextError, EnvironmentAuthorizationError]),
+});
+
+export const WsAgentstackTrustPreviewRpc = Rpc.make(WS_METHODS.agentstackTrustPreview, {
+  payload: AgentstackTrustInput,
+  success: AgentstackTrustPreviewResult,
+  error: Schema.Union([AgentstackWorkspaceContextError, EnvironmentAuthorizationError]),
+});
+
+export const WsAgentstackDiffRpc = Rpc.make(WS_METHODS.agentstackDiff, {
+  payload: AgentstackDiffInput,
+  success: AgentstackDiffResult,
+  error: Schema.Union([AgentstackWorkspaceContextError, EnvironmentAuthorizationError]),
+});
+
+export const WsAgentstackSetupPlanRpc = Rpc.make(WS_METHODS.agentstackSetupPlan, {
+  payload: AgentstackSetupPlanInput,
+  success: AgentstackSetupPlanResult,
+  error: Schema.Union([AgentstackWorkspaceContextError, EnvironmentAuthorizationError]),
+});
+
+export const WsAgentstackToolsetsRpc = Rpc.make(WS_METHODS.agentstackToolsets, {
+  payload: AgentstackToolsetsInput,
+  success: AgentstackToolsetsResult,
+  error: Schema.Union([AgentstackWorkspaceContextError, EnvironmentAuthorizationError]),
+});
+
+export const WsAgentstackRestoreInventoryRpc = Rpc.make(WS_METHODS.agentstackRestoreInventory, {
+  payload: AgentstackRestoreInventoryInput,
+  success: AgentstackRestoreInventoryResult,
+  error: Schema.Union([AgentstackWorkspaceContextError, EnvironmentAuthorizationError]),
+});
+
+export const WsAgentstackLibraryIndexRpc = Rpc.make(WS_METHODS.agentstackLibraryIndex, {
+  payload: AgentstackLibraryIndexInput,
+  success: AgentstackLibraryIndexResult,
+  error: Schema.Union([AgentstackWorkspaceContextError, EnvironmentAuthorizationError]),
+});
+
+export const WsAgentstackProfileEditPreviewRpc = Rpc.make(WS_METHODS.agentstackProfileEditPreview, {
+  payload: AgentstackProfileEditPreviewInput,
+  success: AgentstackProfileEditPreviewResult,
+  error: Schema.Union([AgentstackWorkspaceContextError, EnvironmentAuthorizationError]),
+});
+
+export const WsAgentstackProfileEditApplyRpc = Rpc.make(WS_METHODS.agentstackProfileEditApply, {
+  payload: AgentstackProfileEditApplyInput,
+  success: AgentstackActionResult,
+  error: Schema.Union([AgentstackWorkspaceContextError, EnvironmentAuthorizationError]),
+});
+
+export const WsAgentstackActionRpc = Rpc.make(WS_METHODS.agentstackAction, {
+  payload: AgentstackActionInput,
+  success: AgentstackActionResult,
+  error: Schema.Union([AgentstackWorkspaceContextError, EnvironmentAuthorizationError]),
 });
 
 export const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProviders, {
@@ -701,6 +824,19 @@ export const WsSubscribeAuthAccessRpc = Rpc.make(WS_METHODS.subscribeAuthAccess,
 export const WsRpcGroup = RpcGroup.make(
   WsServerProbeRpc,
   WsServerGetConfigRpc,
+  WsAgentstackStatusRpc,
+  WsAgentstackActivityRpc,
+  WsAgentstackWorkflowRpc,
+  WsAgentstackWorkflowRunRpc,
+  WsAgentstackTrustPreviewRpc,
+  WsAgentstackDiffRpc,
+  WsAgentstackSetupPlanRpc,
+  WsAgentstackToolsetsRpc,
+  WsAgentstackRestoreInventoryRpc,
+  WsAgentstackLibraryIndexRpc,
+  WsAgentstackProfileEditPreviewRpc,
+  WsAgentstackProfileEditApplyRpc,
+  WsAgentstackActionRpc,
   WsServerRefreshProvidersRpc,
   WsServerUpdateProviderRpc,
   WsServerUpdateServerRpc,

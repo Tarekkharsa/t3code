@@ -22,3 +22,12 @@ export function expandHomePath(value: string): string {
   }
   return value;
 }
+
+/**
+ * The current user's home directory. Paired with `expandHomePath`: that one
+ * turns `~/…` into an absolute path for a spawned process, this one lets a
+ * caller collapse an absolute path back to `~/…` for display.
+ */
+export function hostHomeDir(): string {
+  return NodeOS.homedir();
+}

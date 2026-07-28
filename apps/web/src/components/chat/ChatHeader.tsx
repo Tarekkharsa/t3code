@@ -1,6 +1,7 @@
 import {
   type EnvironmentId,
   type EditorId,
+  type ProjectId,
   type ProjectScript,
   type ResolvedKeybindingsConfig,
   type ThreadId,
@@ -15,6 +16,7 @@ import ProjectScriptsControl, {
   type ProjectScriptActionResult,
 } from "../ProjectScriptsControl";
 import { OpenInPicker } from "./OpenInPicker";
+import { AgentstackControl } from "../agentstack/AgentstackControl";
 import { usePrimaryEnvironmentId } from "../../state/environments";
 import { useT3ProjectFileScripts } from "~/hooks/useT3ProjectFileScripts";
 import { ProjectFavicon } from "../ProjectFavicon";
@@ -25,6 +27,7 @@ interface ChatHeaderProps {
   activeThreadId: ThreadId;
   draftId?: DraftId;
   activeThreadTitle: string;
+  activeProjectId: ProjectId | null;
   activeProjectName: string | undefined;
   activeProjectCwd: string | null;
   openInCwd: string | null;
@@ -61,6 +64,7 @@ export const ChatHeader = memo(function ChatHeader({
   activeThreadId,
   draftId,
   activeThreadTitle,
+  activeProjectId,
   activeProjectName,
   activeProjectCwd,
   openInCwd,
@@ -165,6 +169,15 @@ export const ChatHeader = memo(function ChatHeader({
             gitCwd={gitCwd}
             activeThreadRef={scopeThreadRef(activeThreadEnvironmentId, activeThreadId)}
             {...(draftId ? { draftId } : {})}
+          />
+        )}
+        {activeProjectId !== null && (
+          <AgentstackControl
+            environmentId={activeThreadEnvironmentId}
+            projectId={activeProjectId}
+            // Drafts have no server-side thread yet; the server then reports
+            // on the project root instead of a thread worktree.
+            {...(draftId === undefined ? { threadId: activeThreadId } : {})}
           />
         )}
       </div>

@@ -73,6 +73,7 @@ const TEST_EPOCH = DateTime.makeUnsafe("1970-01-01T00:00:00.000Z");
 
 import * as ServerConfig from "./config.ts";
 import { makeRoutesLayer } from "./server.ts";
+import * as AgentstackCli from "./agentstack/AgentstackCli.ts";
 import { resolveAvailableEditorsForConfig } from "./ws.ts";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as GitManager from "./git/GitManager.ts";
@@ -680,6 +681,30 @@ const buildAppUnderTest = (options?: {
             retain: Effect.void,
             registerTerminalProcesses: () => Effect.void,
             unregisterTerminal: () => Effect.void,
+          }),
+          Layer.mock(AgentstackCli.AgentstackCli)({
+            status: () =>
+              Effect.succeed({
+                installed: false,
+                version: null,
+                doctor: null,
+                checkedAt: 0,
+              }),
+            activity: () =>
+              Effect.succeed({
+                installed: false,
+                events: [],
+                checkedAt: 0,
+              }),
+            workflow: () =>
+              Effect.succeed({
+                installed: false,
+                workflows: [],
+                activeRun: null,
+                checkedAt: 0,
+              }),
+            trustPreview: () => Effect.succeed({ installed: false, preview: null, checkedAt: 0 }),
+            action: () => Effect.succeed({ ok: false, message: "not installed" }),
           }),
         ),
       ),
@@ -3179,6 +3204,71 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.equal(rpcError.requiredScope, "orchestration:read");
       }
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect(
+    "gates agentstack.action on agentstack:admin while agentstack reads need only orchestration:read",
+    () =>
+      Effect.gen(function* () {
+        const now = "2026-01-01T00:00:00.000Z";
+        // A resolvable project so the read reaches the CLI seam rather than
+        // failing on workspace resolution — the witness is about the scope
+        // gate in ws.ts, not the (mocked) CLI.
+        const projectShell = {
+          id: defaultProjectId,
+          title: "Default Project",
+          workspaceRoot: "/tmp/default-project",
+          defaultModelSelection,
+          scripts: [],
+          createdAt: now,
+          updatedAt: now,
+        };
+        yield* buildAppUnderTest({
+          layers: {
+            projectionSnapshotQuery: {
+              getProjectShellById: () => Effect.succeed(Option.some(projectShell)),
+            },
+          },
+        });
+
+        // The default token exchange grants orchestration:read (and other
+        // standard scopes) but NOT agentstack:admin — an owner-only scope.
+        const { body: tokenBody } = yield* exchangeAccessToken();
+        const accessToken = tokenBody.access_token ?? "";
+        const wsTicketResponse = yield* HttpClient.post("/api/auth/websocket-ticket", {
+          headers: { authorization: `Bearer ${accessToken}` },
+        });
+        const wsTicketBody = (yield* wsTicketResponse.json) as { readonly ticket: string };
+        const wsUrl = `${yield* getWsServerUrl("/ws", {
+          authenticated: false,
+        })}?wsTicket=${encodeURIComponent(wsTicketBody.ticket)}`;
+
+        // The write (agentstack.action) requires agentstack:admin → refused
+        // with the authorization error naming that scope, before the CLI runs.
+        const actionError = yield* Effect.flip(
+          Effect.scoped(
+            withWsRpcClient(wsUrl, (client) =>
+              client[WS_METHODS.agentstackAction]({
+                projectId: defaultProjectId,
+                action: "guard-install",
+              }),
+            ),
+          ),
+        );
+        assert.equal(actionError._tag, "EnvironmentAuthorizationError");
+        if (actionError._tag === "EnvironmentAuthorizationError") {
+          assert.equal(actionError.requiredScope, "agentstack:admin");
+        }
+
+        // A read (agentstack.status) needs only orchestration:read → passes the
+        // scope gate and returns the mocked not-installed status.
+        const status = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[WS_METHODS.agentstackStatus]({ projectId: defaultProjectId }),
+          ),
+        );
+        assert.equal(status.installed, false);
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
   it.effect("includes CORS headers on remote auth success responses", () =>

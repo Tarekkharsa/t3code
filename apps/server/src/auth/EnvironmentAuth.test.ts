@@ -186,6 +186,7 @@ it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
         "access:read",
         "access:write",
         "relay:write",
+        "agentstack:admin",
       ]);
       expect(verified.subject).toBe("administrative-bootstrap");
     }).pipe(Effect.provide(makeEnvironmentAuthLayer())),

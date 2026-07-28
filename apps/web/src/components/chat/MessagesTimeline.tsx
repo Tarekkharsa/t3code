@@ -38,6 +38,8 @@ import {
   resolveFileDiffPath,
 } from "../../lib/diffRendering";
 import ChatMarkdown from "../ChatMarkdown";
+import { AgentstackDenialCard } from "../agentstack/AgentstackDenialCard";
+import { matchAgentstackDenial } from "../agentstack/agentstack-logic";
 import {
   BotIcon,
   CheckIcon,
@@ -135,6 +137,8 @@ interface TimelineRowSharedState {
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
   onToggleTurnFold: (turnId: TurnId) => void;
   onToggleWorkGroup: (groupId: string, anchorElement?: HTMLElement) => void;
+  /** Sends a plain-text user message into the current thread (blueprint review). */
+  onSendUserMessage: ((text: string) => void) | undefined;
 }
 
 interface TimelineRowActivityState {
@@ -183,6 +187,8 @@ interface MessagesTimelineProps {
   onIsAtEndChange: (isAtEnd: boolean) => void;
   onManualNavigation: () => void;
   hideEmptyPlaceholder?: boolean;
+  /** Sends a plain-text user message into the current thread (blueprint review). */
+  onSendUserMessage?: ((text: string) => void) | undefined;
   topFadeEnabled?: boolean;
 }
 
@@ -218,6 +224,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onIsAtEndChange,
   onManualNavigation,
   hideEmptyPlaceholder = false,
+  onSendUserMessage,
   topFadeEnabled = false,
 }: MessagesTimelineProps) {
   const [expandedTurnIds, setExpandedTurnIds] = useState<ReadonlySet<TurnId>>(new Set());
@@ -430,6 +437,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onOpenTurnDiff,
       onToggleTurnFold,
       onToggleWorkGroup,
+      onSendUserMessage,
     }),
     [
       timestampFormat,
@@ -444,6 +452,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onOpenTurnDiff,
       onToggleTurnFold,
       onToggleWorkGroup,
+      onSendUserMessage,
     ],
   );
   const activityState = useMemo<TimelineRowActivityState>(
@@ -1028,6 +1037,7 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
           threadRef={ctx.threadRef ?? undefined}
           isStreaming={Boolean(row.message.streaming)}
           skills={ctx.skills}
+          onSendUserMessage={ctx.onSendUserMessage}
         />
         <AssistantChangedFilesSection
           turnSummary={row.assistantTurnDiffSummary}
@@ -1175,13 +1185,24 @@ const WorkGroupSection = memo(function WorkGroupSection({
         </p>
       )}
       <div className="space-y-px">
-        {nonEmptyEntries.map((workEntry) => (
-          <SimpleWorkEntryRow
-            key={workEntry.id}
-            workEntry={workEntry}
-            workspaceRoot={workspaceRoot}
-          />
-        ))}
+        {nonEmptyEntries.map((workEntry) => {
+          // An AgentStack guard denial reads as protection, not failure —
+          // it gets its own card instead of the generic tool/error row.
+          // Depending on the provider and permission mode a denial surfaces
+          // as a tool.denied error, a failed call, or (in bypass mode) a
+          // "completed" call whose result text carries the guard message —
+          // so we always run the matcher, which is a cheap marker check.
+          const denial = matchAgentstackDenial(workEntry);
+          return denial ? (
+            <AgentstackDenialCard denial={denial} key={workEntry.id} workEntry={workEntry} />
+          ) : (
+            <SimpleWorkEntryRow
+              key={workEntry.id}
+              workEntry={workEntry}
+              workspaceRoot={workspaceRoot}
+            />
+          );
+        })}
       </div>
     </section>
   );
