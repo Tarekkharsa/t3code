@@ -32,6 +32,7 @@ import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import {
   Dialog,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogPanel,
@@ -231,6 +232,7 @@ export function AgentstackControl({
   const [reviewing, setReviewing] = useState(false);
   const [reviewingDrift, setReviewingDrift] = useState(false);
   const [browsingLibrary, setBrowsingLibrary] = useState(false);
+  const [settingUp, setSettingUp] = useState(false);
   // The 1c expanded monitor: which run it shows, and (for recorded runs) the
   // evidence fetched for it. A live target reads the polled activeRun instead.
   const [monitorTarget, setMonitorTarget] = useState<{
@@ -604,31 +606,10 @@ export function AgentstackControl({
             </button>
           ) : null}
 
-          {reviewing ? (
-            <TrustReviewPanel
-              loadPreview={loadPreview}
-              onTrust={onTrust}
-              onClose={() => setReviewing(false)}
-              trustConsentMissing={trustConsentMissing}
-            />
-          ) : reviewingDrift ? (
-            <DriftReviewPanel
-              loadDiff={loadDiff}
-              onAction={runDriftAction}
-              onClose={() => setReviewingDrift(false)}
-            />
-          ) : browsingLibrary ? (
-            <LibraryPanel
-              loadIndex={loadLibraryIndex}
-              preview={previewProfileEdit}
-              apply={applyProfileEdit}
-              canRemove={canRemoveFromLibrary}
-              onClose={() => setBrowsingLibrary(false)}
-            />
-          ) : status?.installed && incompatible ? (
+          {status?.installed && incompatible ? (
             <UpdateNeeded incompatible={incompatible} cliVersion={status.version} />
           ) : status?.installed && setupState === "needs_setup" ? (
-            <SetupPanel loadPlan={loadSetupPlan} onApply={onSetupApply} canApply={canApplySetup} />
+            <NeedsSetup onOpen={() => setSettingUp(true)} />
           ) : (
             <>
               {/* Advanced views carry a back row (like the review panels) so
@@ -722,12 +703,90 @@ export function AgentstackControl({
           </div>
         </PopoverPopup>
       </Popover>
+      {/* Screens you read, not glance at — see PanelDialog. Rendered beside the
+          popover rather than inside it, so opening one never blanks status. */}
+      {reviewing ? (
+        <PanelDialog
+          title="Review this project"
+          description="What this project would be allowed to run here, before you approve it."
+          onClose={() => setReviewing(false)}
+        >
+          <TrustReviewPanel
+            loadPreview={loadPreview}
+            onTrust={onTrust}
+            onClose={() => setReviewing(false)}
+            trustConsentMissing={trustConsentMissing}
+          />
+        </PanelDialog>
+      ) : null}
+      {reviewingDrift ? (
+        <PanelDialog
+          title="Review drift"
+          description="What changed on disk since AgentStack last wrote, and which truth to keep."
+          onClose={() => setReviewingDrift(false)}
+          width="max-w-3xl"
+        >
+          <DriftReviewPanel loadDiff={loadDiff} onAction={runDriftAction} />
+        </PanelDialog>
+      ) : null}
+      {browsingLibrary ? (
+        <PanelDialog
+          title="Library"
+          description="Tools available to bundle into a toolset for this project."
+          onClose={() => setBrowsingLibrary(false)}
+          width="max-w-3xl"
+        >
+          <LibraryPanel
+            loadIndex={loadLibraryIndex}
+            preview={previewProfileEdit}
+            apply={applyProfileEdit}
+            canRemove={canRemoveFromLibrary}
+          />
+        </PanelDialog>
+      ) : null}
+      {settingUp ? (
+        <PanelDialog
+          title="Set up this project"
+          description="Import the coding tools already on this machine into one manifest."
+          onClose={() => setSettingUp(false)}
+        >
+          <SetupPanel
+            loadPlan={loadSetupPlan}
+            onApply={async (choice, digest) => {
+              const r = await onSetupApply(choice, digest);
+              if (r.ok) setSettingUp(false);
+              return r;
+            }}
+            canApply={canApplySetup}
+          />
+        </PanelDialog>
+      ) : null}
       <WorkflowMonitorDialog
         target={monitorTarget}
         run={monitorRun}
         onClose={() => setMonitorTarget(null)}
       />
     </>
+  );
+}
+
+/**
+ * The popover's view of an unset-up project: say the state and offer the one
+ * action, rather than rendering the whole setup plan into a 400px column. The
+ * plan itself opens in a dialog where it has room to be read.
+ */
+function NeedsSetup({ onOpen }: { onOpen: () => void }) {
+  return (
+    <div className="flex flex-col gap-2.5 px-4 py-4">
+      <p className="text-xs font-semibold text-foreground">This project isn't set up yet</p>
+      <p className="text-xs leading-relaxed text-muted-foreground">
+        AgentStack can import the coding tools already on this machine into one manifest your CLIs
+        render from. You'll see exactly what it would write before anything is written.
+      </p>
+      <Button size="sm" onClick={onOpen} className="self-start">
+        Review setup
+      </Button>
+    </div>
   );
 }
 
@@ -757,9 +816,7 @@ function NotInstalled({ onRecheck }: { onRecheck: () => Promise<void> | void }) 
         trust-gated MCP servers, a pre-tool-use guard, and a per-project audit log.
       </p>
       <div className="flex flex-col gap-1.5">
-        <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
-          Install
-        </p>
+        <p className="text-xs font-semibold text-foreground">Install</p>
         <p>
           Build or download it from{" "}
           <code className="break-all font-mono text-muted-foreground/90">
@@ -769,9 +826,7 @@ function NotInstalled({ onRecheck }: { onRecheck: () => Promise<void> | void }) 
         </p>
       </div>
       <div className="flex flex-col gap-1.5">
-        <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
-          Already installed?
-        </p>
+        <p className="text-xs font-semibold text-foreground">Already installed?</p>
         <p>
           If <code className="font-mono">agentstack</code> is a shell function or lives off{" "}
           <code>PATH</code> (so a packaged/Finder-launched app can't see it), point the server at
@@ -924,18 +979,7 @@ function TrustReviewPanel({
   };
 
   return (
-    <div className="max-h-[440px] overflow-y-auto">
-      <div className="flex items-center gap-2 border-b border-border/60 px-3.5 py-2">
-        <button
-          type="button"
-          onClick={onClose}
-          className="text-xs font-medium text-muted-foreground hover:text-foreground"
-        >
-          ← Back
-        </button>
-        <span className="text-xs font-semibold text-foreground">Trust review</span>
-      </div>
-
+    <div>
       {load.phase === "loading" ? (
         <p className="px-4 py-4 text-xs text-muted-foreground">Loading review…</p>
       ) : preview === null ? (
@@ -954,7 +998,7 @@ function TrustReviewPanel({
           </p>
 
           <div>
-            <p className="mb-1 text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
+            <p className="mb-1 text-xs font-semibold text-foreground">
               Servers ({preview.servers.length})
             </p>
             {preview.servers.length === 0 ? (
@@ -1002,7 +1046,7 @@ function TrustReviewPanel({
                   <TrustNamedList title="Skills" items={preview.skills ?? []} />
                   {preview.workflows && preview.workflows.length > 0 ? (
                     <div>
-                      <p className="mb-1 text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
+                      <p className="mb-1 text-xs font-semibold text-foreground">
                         Workflows ({preview.workflows.length})
                       </p>
                       <ul className="flex flex-col gap-0.5">
@@ -1022,7 +1066,7 @@ function TrustReviewPanel({
                   ) : null}
                   {preview.extensions && preview.extensions.length > 0 ? (
                     <div>
-                      <p className="mb-1 text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
+                      <p className="mb-1 text-xs font-semibold text-foreground">
                         Extensions ({preview.extensions.length})
                       </p>
                       <ul className="flex flex-col gap-0.5">
@@ -1132,7 +1176,7 @@ function TrustNamedList({ title, items }: { title: string; items: ReadonlyArray<
   if (items.length === 0) return null;
   return (
     <div>
-      <p className="mb-1 text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
+      <p className="mb-1 text-xs font-semibold text-foreground">
         {title} ({items.length})
       </p>
       <ul className="flex flex-wrap gap-1">
@@ -1180,11 +1224,9 @@ function keptServers(report: AgentstackDiffReport): string[] {
 function DriftReviewPanel({
   loadDiff,
   onAction,
-  onClose,
 }: {
   loadDiff: (scope: "global" | "project") => Promise<AgentstackDiffResult | null>;
   onAction: (action: ActionKind) => Promise<{ ok: boolean; message: string }>;
-  onClose: () => void;
 }) {
   const [load, setLoad] = useState<DriftLoad>({ phase: "loading" });
   const [act, setAct] = useState<DriftAct>({ phase: "idle" });
@@ -1227,18 +1269,7 @@ function DriftReviewPanel({
   const running = act.phase === "running";
 
   return (
-    <div className="max-h-[440px] overflow-y-auto">
-      <div className="flex items-center gap-2 border-b border-border/60 px-3.5 py-2">
-        <button
-          type="button"
-          onClick={onClose}
-          className="text-xs font-medium text-muted-foreground hover:text-foreground"
-        >
-          ← Back
-        </button>
-        <span className="text-xs font-semibold text-foreground">Drift review</span>
-      </div>
-
+    <div>
       {load.phase === "loading" ? (
         <p className="px-4 py-4 text-xs text-muted-foreground">Loading drift…</p>
       ) : load.phase === "error" ? (
@@ -1343,9 +1374,7 @@ function DriftScopeSection({
 
   return (
     <div className="flex flex-col gap-2">
-      <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
-        {where}
-      </p>
+      <p className="text-xs font-semibold text-foreground">{where}</p>
 
       {changed.length > 0 ? (
         <>
@@ -1512,9 +1541,7 @@ function OverviewPanel({
           <div className="flex min-w-0 flex-1 flex-col gap-0.5">
             {/* The category is a label, not the news — it used to be bold
                 white while the actual message was muted and truncated. */}
-            <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-muted-foreground/70">
-              {row.label}
-            </span>
+            <span className="text-[11px] font-medium text-muted-foreground">{row.label}</span>
             <span className={cn("text-xs leading-snug", LEVEL_TEXT[row.level])}>{row.summary}</span>
           </div>
           {row.reviewDrift ? (
@@ -1624,9 +1651,7 @@ export function StatusSummary({
       </div>
       {nextAction ? (
         <div className="flex items-baseline gap-1.5">
-          <span className="shrink-0 text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
-            Next
-          </span>
+          <span className="shrink-0 text-xs font-semibold text-foreground">Next</span>
           <code className="min-w-0 wrap-break-word font-mono text-[11px] text-muted-foreground">
             {nextAction}
           </code>
@@ -1720,9 +1745,7 @@ function ToolsetsCard({
   return (
     <div className="mx-1 mt-1.5 border-t border-border/40 px-1.5 pt-2">
       <div className="flex items-center gap-2 px-1 pb-1">
-        <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-          Toolsets
-        </span>
+        <span className="text-xs font-semibold text-foreground">Toolsets</span>
         {sessionsKnownMissing ? (
           <span className="text-[10px] text-muted-foreground/70">
             update agentstack to start one from here
@@ -1856,6 +1879,55 @@ type LibView =
   | { kind: "pick-target"; group: "skill" | "server"; name: string }
   | { kind: "new" };
 
+/**
+ * The container for a screen you *read* — a trust surface, a drift diff, the
+ * library, the setup plan.
+ *
+ * These lived in the 400px status popover, which is the wrong shape for them:
+ * a trust review lists every server, its exact command, every secret name and
+ * skill, and it is the thing you study before granting authority. At 400px it
+ * wrapped mid-path, truncated, and scrolled for pages. The workflow monitor
+ * had already escaped to a dialog for exactly this reason; this generalises
+ * that escape so the popover can go back to being a glance surface.
+ *
+ * Everything here also gets one navigation model: a title, a description, and
+ * a close — instead of the mix of "← Back", panel takeovers and modals the
+ * panel had grown.
+ */
+function PanelDialog({
+  title,
+  description,
+  onClose,
+  children,
+  width = "max-w-2xl",
+}: {
+  title: string;
+  description?: string | undefined;
+  onClose: () => void;
+  children: ReactNode;
+  width?: string;
+}) {
+  return (
+    <Dialog
+      open
+      onOpenChange={(next) => {
+        if (!next) onClose();
+      }}
+    >
+      <DialogPopup className={width}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2.5 pr-8">
+            <AgentstackMark className="size-[18px] shrink-0" />
+            <span className="truncate">{title}</span>
+          </DialogTitle>
+          {description ? <DialogDescription>{description}</DialogDescription> : null}
+        </DialogHeader>
+        <div className="max-h-[70vh] overflow-y-auto">{children}</div>
+      </DialogPopup>
+    </Dialog>
+  );
+}
+
 /** A plain-language sentence for the change being confirmed. */
 function describeEdit(edit: AgentstackProfileEdit): string {
   switch (edit.kind) {
@@ -1911,7 +1983,6 @@ function LibraryPanel({
   preview,
   apply,
   canRemove,
-  onClose,
 }: {
   loadIndex: () => Promise<AgentstackLibraryIndexResult | null>;
   preview: (edit: AgentstackProfileEdit) => Promise<AgentstackProfileEditPreviewResult | null>;
@@ -1921,7 +1992,6 @@ function LibraryPanel({
   ) => Promise<{ ok: boolean; message: string }>;
   /** Whether this CLI advertises `library-remove-v1`. */
   canRemove: boolean;
-  onClose: () => void;
 }) {
   const [load, setLoad] = useState<LibLoad>({ phase: "loading" });
   const [view, setView] = useState<LibView>({ kind: "browse" });
@@ -1997,18 +2067,7 @@ function LibraryPanel({
     list.includes(name) ? list.filter((n) => n !== name) : [...list, name];
 
   return (
-    <div className="max-h-[460px] overflow-y-auto">
-      <div className="flex items-center gap-2 border-b border-border/60 px-3.5 py-2">
-        <button
-          type="button"
-          onClick={onClose}
-          className="text-xs font-medium text-muted-foreground hover:text-foreground"
-        >
-          ← Back
-        </button>
-        <span className="text-xs font-semibold text-foreground">Library</span>
-      </div>
-
+    <div>
       {/* The edit flow takes over the body while active. */}
       {flow.phase !== "idle" ? (
         <EditFlowCard flow={flow} onConfirm={confirmEdit} onBack={backToBrowse} />
@@ -2065,9 +2124,7 @@ function LibraryPanel({
             Toolsets list.
           </p>
           <label className="flex flex-col gap-1">
-            <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
-              Toolset name
-            </span>
+            <span className="text-xs font-semibold text-foreground">Toolset name</span>
             <input
               value={draftName}
               onChange={(e) => setDraftName(e.target.value)}
@@ -2126,9 +2183,8 @@ function LibraryPanel({
       ) : (
         <div className="flex flex-col gap-3 px-4 py-3">
           <div className="flex items-center gap-2">
-            <p className="min-w-0 flex-1 text-[11px] leading-relaxed text-muted-foreground">
-              Tools available to bundle into a toolset. Adding one enrolls it and re-locks the
-              toolset.
+            <p className="min-w-0 flex-1 text-xs leading-relaxed text-muted-foreground">
+              Adding one enrolls it and re-locks the toolset.
             </p>
             <button
               type="button"
@@ -2234,9 +2290,7 @@ function LibraryBrowseGroup({
 }) {
   return (
     <div className="flex flex-col gap-1">
-      <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
-        {title}
-      </p>
+      <p className="text-xs font-semibold text-foreground">{title}</p>
       {items.length === 0 ? (
         <span className="text-[11px] text-muted-foreground/70">{emptyLabel}</span>
       ) : (
@@ -2320,9 +2374,7 @@ function LibrarySelectGroup({
 }) {
   return (
     <div className="flex flex-col gap-1">
-      <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
-        {title}
-      </p>
+      <p className="text-xs font-semibold text-foreground">{title}</p>
       {items.length === 0 ? (
         <span className="text-[11px] text-muted-foreground/70">none available</span>
       ) : (
@@ -2941,9 +2993,7 @@ function SetupPanel({
 
       {plan.conflicts.length > 0 ? (
         <div className="flex flex-col gap-1 rounded-lg border border-warning/30 bg-warning/8 px-2.5 py-2 dark:bg-warning/16">
-          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-warning-foreground/80">
-            Defined more than once
-          </p>
+          <p className="text-xs font-semibold text-warning-foreground">Defined more than once</p>
           <ul className="flex flex-col gap-0.5 text-xs leading-relaxed text-warning-foreground">
             {plan.conflicts.map((c) => (
               <li key={c.name}>
@@ -3114,7 +3164,7 @@ function SetupPanel({
 /**
  * A labelled block inside a panel. `divided` draws a hairline above the label,
  * which is what separates stacked sections — without it a panel reads as one
- * continuous column of prose and the uppercase labels get lost in it. The
+ * continuous column of prose and the headings get lost in it. The
  * first section in a panel passes `divided={false}`.
  */
 function PanelSection({
@@ -3128,9 +3178,7 @@ function PanelSection({
 }) {
   return (
     <div className={cn("flex flex-col gap-1.5", divided && "border-t border-border/50 pt-3")}>
-      <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
-        {title}
-      </p>
+      <p className="text-xs font-semibold text-foreground">{title}</p>
       {children}
     </div>
   );
@@ -3150,11 +3198,7 @@ function SetupGroup({
    */
   count?: { readonly n: number; readonly noun: string } | undefined;
 }) {
-  const label = (
-    <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
-      {title}
-    </span>
-  );
+  const label = <span className="text-xs font-semibold text-foreground">{title}</span>;
   if (!count) {
     return (
       <div className="flex flex-col gap-1">
@@ -3845,9 +3889,7 @@ function SharePanel({ doctor }: { doctor: AgentstackStatus["doctor"] }) {
       {/* The guarantee gets a surface of its own: it is the question people
           actually have, and it should not read as one more paragraph. */}
       <div className="flex flex-col gap-1 rounded-lg border border-border/50 bg-muted/40 px-2.5 py-2">
-        <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
-          What travels
-        </p>
+        <p className="text-xs font-semibold text-foreground">What travels</p>
         <p className="text-xs leading-relaxed text-foreground/80">
           Server and skill definitions, instructions, settings, and{" "}
           {facts.secretRefs > 0 ? (
@@ -3978,9 +4020,7 @@ function ProtectionPanel({
               <div key={row.key} className="flex items-start gap-2.5">
                 <span className={cn("mt-1 size-1.5 shrink-0 rounded-full", LEVEL_DOT[row.level])} />
                 <div className="flex min-w-0 flex-col gap-0.5">
-                  <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
-                    {row.title}
-                  </span>
+                  <span className="text-xs font-semibold text-foreground">{row.title}</span>
                   <span className="text-xs leading-relaxed text-muted-foreground">{row.msg}</span>
                 </div>
               </div>

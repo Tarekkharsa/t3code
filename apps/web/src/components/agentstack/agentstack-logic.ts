@@ -824,6 +824,8 @@ export function matchAgentstackNextAction(
       return "guard-install";
     case "agentstack apply --write":
       return "apply-project";
+    case "agentstack apply --write --scope global":
+      return "apply-global";
     default:
       return null;
   }
@@ -916,4 +918,51 @@ export function partitionAgentstackOverviewRows(rows: ReadonlyArray<AgentstackOv
     else healthy.push(row);
   }
   return { problems, healthy };
+}
+
+// ── checkup findings ─────────────────────────────────────────────────────────
+
+export interface AgentstackFinding {
+  readonly key: string;
+  readonly level: AgentstackRowLevel;
+  /** The finding, with the trailing `↳ <fix>` stripped off. */
+  readonly message: string;
+  /** The command doctor named as the fix, when it named one. */
+  readonly fix: string | null;
+  /** Set when that fix is a fixed action this panel can run directly. */
+  readonly action: AgentstackActionKind | null;
+  /** Which doctor section it came from, for grouping. */
+  readonly section: string;
+}
+
+/**
+ * Every error and warning doctor reported, with its fix.
+ *
+ * The Checkup row said "N warning(s) — each names its fix" and then showed
+ * none of them: the panel already had every line and its remedy in the payload
+ * it polls, and was rendering only a count. Doctor writes remedies as
+ * `<message> ↳ <command>`, so the split is exact rather than guessed, and a
+ * line without the marker simply has no fix to offer.
+ */
+export function deriveAgentstackFindings(
+  report: AgentstackDoctorReport | null,
+): ReadonlyArray<AgentstackFinding> {
+  if (!report) return [];
+  const out: AgentstackFinding[] = [];
+  for (const section of report.sections) {
+    for (const [i, line] of section.lines.entries()) {
+      if (line.level !== "error" && line.level !== "warn") continue;
+      const [message, ...rest] = line.msg.split("↳");
+      const fix = rest.join("↳").trim();
+      out.push({
+        key: `${section.title}:${i}`,
+        level: line.level === "error" ? "error" : "warn",
+        message: (message ?? line.msg).trim().replace(/\s+/g, " "),
+        fix: fix.length > 0 ? fix : null,
+        action: fix.length > 0 ? matchAgentstackNextAction(fix) : null,
+        section: section.title,
+      });
+    }
+  }
+  return out;
 }

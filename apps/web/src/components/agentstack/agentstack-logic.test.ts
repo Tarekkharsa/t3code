@@ -7,6 +7,7 @@ import {
   deriveAgentstackPolicyRows,
   deriveAgentstackProtectionRows,
   deriveAgentstackStatusChip,
+  deriveAgentstackFindings,
   deriveAgentstackShareFacts,
   deriveAgentstackTrustBadge,
   deriveToolsetRows,
@@ -548,8 +549,17 @@ describe("matchAgentstackNextAction", () => {
     expect(matchAgentstackNextAction("  agentstack   guard  install ")).toBe("guard-install");
   });
 
-  it("refuses to widen scope — a global apply is not the project apply", () => {
-    expect(matchAgentstackNextAction("agentstack apply --write --scope global")).toBeNull();
+  it("keeps scopes distinct — the global apply maps to the global action", () => {
+    expect(matchAgentstackNextAction("agentstack apply --write --scope global")).toBe(
+      "apply-global",
+    );
+    expect(matchAgentstackNextAction("agentstack apply --write")).toBe("apply-project");
+  });
+
+  it("refuses a scope it has no exact action for", () => {
+    expect(
+      matchAgentstackNextAction("agentstack apply --write --scope project --target codex"),
+    ).toBeNull();
   });
 
   it("returns null for anything it does not exactly recognize", () => {
@@ -656,5 +666,73 @@ describe("partitionAgentstackOverviewRows", () => {
     const allOk = partitionAgentstackOverviewRows([row({ key: "a" }), row({ key: "b" })]);
     expect(allOk.problems).toHaveLength(0);
     expect(allOk.healthy).toHaveLength(2);
+  });
+});
+
+describe("deriveAgentstackFindings", () => {
+  const report = (sections: unknown) => ({ sections }) as never;
+
+  it("splits doctor's `message ↳ fix` and maps a runnable fix to its action", () => {
+    const [f] = deriveAgentstackFindings(
+      report([
+        {
+          title: "Drift",
+          lines: [
+            { level: "warn", msg: "Codex CLI 10 change(s) pending ↳ agentstack apply --write" },
+          ],
+        },
+      ]),
+    );
+    expect(f?.message).toBe("Codex CLI 10 change(s) pending");
+    expect(f?.fix).toBe("agentstack apply --write");
+    expect(f?.action).toBe("apply-project");
+    expect(f?.section).toBe("Drift");
+  });
+
+  it("maps the explicitly global apply to the global action", () => {
+    const [f] = deriveAgentstackFindings(
+      report([
+        {
+          title: "Drift",
+          lines: [{ level: "warn", msg: "x ↳ agentstack apply --write --scope global" }],
+        },
+      ]),
+    );
+    expect(f?.action).toBe("apply-global");
+  });
+
+  it("keeps a finding with no fix, and offers no action for one it cannot run", () => {
+    const found = deriveAgentstackFindings(
+      report([
+        {
+          title: "Adapters & CLIs",
+          lines: [
+            { level: "warn", msg: "VS Code config present but binary not on PATH" },
+            { level: "warn", msg: "needs review ↳ agentstack trust ." },
+          ],
+        },
+      ]),
+    );
+    expect(found[0]?.fix).toBeNull();
+    expect(found[0]?.action).toBeNull();
+    expect(found[1]?.fix).toBe("agentstack trust .");
+    expect(found[1]?.action).toBeNull();
+  });
+
+  it("ignores ok and info lines, and survives a missing report", () => {
+    expect(
+      deriveAgentstackFindings(
+        report([
+          {
+            title: "S",
+            lines: [
+              { level: "ok", msg: "fine" },
+              { level: "info", msg: "fyi" },
+            ],
+          },
+        ]),
+      ),
+    ).toHaveLength(0);
+    expect(deriveAgentstackFindings(null)).toHaveLength(0);
   });
 });
