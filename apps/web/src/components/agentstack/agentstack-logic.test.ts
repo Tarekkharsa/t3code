@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  AGENTSTACK_FINDINGS_PREVIEW,
   agentstackFeatureKnownMissing,
+  agentstackFindingAction,
   deriveAgentstackActivityRows,
   deriveAgentstackOverviewRows,
   deriveAgentstackPolicyRows,
@@ -14,15 +16,22 @@ import {
   deriveWorkflowCounts,
   deriveWorkflowStages,
   filterAgentstackLibraryItems,
+  formatAgentstackCheckupSummary,
+  formatAgentstackCount,
+  formatAgentstackImportSummary,
   hasAgentstackFeature,
   matchAgentstackDenial,
   matchAgentstackNextAction,
   partitionAgentstackOverviewRows,
+  selectAgentstackFindingsView,
   shortenAgentstackPath,
   shortenAgentstackPathsIn,
   selectAgentstackUndoEntry,
   shortDigest,
+  summarizeAgentstackHealthyRows,
   type AgentstackDoctorReport,
+  type AgentstackFinding,
+  type AgentstackOverviewRow,
   type AgentstackRestoreEntryLike,
   type AgentstackWorkflowStepLike,
 } from "./agentstack-logic";
@@ -74,7 +83,7 @@ describe("deriveAgentstackOverviewRows", () => {
     expect(byKey["manifest"]).not.toHaveProperty("action");
     // The beginner label for the doctor rollup is "Checkup".
     expect(byKey["doctor"]).toMatchObject({ level: "warn", label: "Checkup" });
-    expect(byKey["doctor"]!.summary).toContain("2 warning(s)");
+    expect(byKey["doctor"]!.summary).toContain("2 warnings");
     expect(byKey["secrets"]).toMatchObject({ level: "ok", summary: "no secrets referenced" });
     // Guard/gateway/sandbox facts are protection-view rows, not beginner rows
     // (Stage 1.4): the overview names outcomes only.
@@ -734,5 +743,349 @@ describe("deriveAgentstackFindings", () => {
       ),
     ).toHaveLength(0);
     expect(deriveAgentstackFindings(null)).toHaveLength(0);
+  });
+
+  it("bounds a doctor line built out of repository-controlled text", () => {
+    // Doctor interpolates manifest skill/server names, fragment names and
+    // paths verbatim, and this list is the one place a line reaches the DOM
+    // whole. All repository content is hostile input: React escapes it, but a
+    // 200 KB "skill name" would still own the panel.
+    const hostile = "A".repeat(200_000);
+    const [f] = deriveAgentstackFindings(
+      report([
+        {
+          title: "Skills",
+          lines: [
+            { level: "warn", msg: `${hostile} not installed ↳ agentstack install ${hostile}` },
+          ],
+        },
+      ]),
+    );
+    expect(f?.message.length).toBeLessThanOrEqual(240);
+    expect(f?.fix?.length).toBeLessThanOrEqual(240);
+    expect(f?.message.endsWith("…")).toBe(true);
+  });
+
+  it("matches the action on the whole command, not on the clipped one", () => {
+    // Clipping is a display concern; a fix that is one of our fixed actions
+    // must still map to it however long the line that carried it was.
+    const [f] = deriveAgentstackFindings(
+      report([
+        {
+          title: "t3code (supervisor)",
+          lines: [{ level: "warn", msg: `${"B".repeat(500)} ↳ agentstack guard install` }],
+        },
+      ]),
+    );
+    expect(f?.action).toBe("guard-install");
+  });
+});
+
+describe("formatAgentstackCheckupSummary", () => {
+  it("pluralizes each count and keeps the promise that every finding names a fix", () => {
+    expect(formatAgentstackCheckupSummary(1, 7)).toBe("1 error · 7 warnings — each names its fix");
+    expect(formatAgentstackCheckupSummary(2, 1)).toBe("2 errors · 1 warning — each names its fix");
+  });
+
+  it("names only the level that exists, and says nothing is wrong when nothing is", () => {
+    expect(formatAgentstackCheckupSummary(0, 1)).toBe("1 warning — each names its fix");
+    expect(formatAgentstackCheckupSummary(3, 0)).toBe("3 errors — each names its fix");
+    expect(formatAgentstackCheckupSummary(0, 0)).toBe("all checks pass");
+  });
+});
+
+describe("summarizeAgentstackHealthyRows", () => {
+  const row = (over: Partial<AgentstackOverviewRow>): AgentstackOverviewRow => ({
+    key: "k",
+    label: "L",
+    summary: "s",
+    level: "ok",
+    ...over,
+  });
+
+  it("states the outcome each row established, not our category names", () => {
+    expect(
+      summarizeAgentstackHealthyRows([
+        row({ key: "manifest", label: "Manifest", healthy: "4 CLIs in sync" }),
+        row({ key: "doctor", label: "Checkup", summary: "all checks pass" }),
+        row({ key: "secrets", label: "Secrets", healthy: "secrets resolved" }),
+        row({ key: "library", label: "Library", healthy: "skills installed" }),
+      ]),
+    ).toBe("4 CLIs in sync · secrets resolved · skills installed");
+  });
+
+  it("leaves the readiness claim to the chip and never restates it", () => {
+    // The chip directly above says Ready/Protected from the same doctor state;
+    // "checks pass" beside it is the same sentence twice.
+    expect(summarizeAgentstackHealthyRows([row({ key: "doctor", label: "Checkup" })])).toBeNull();
+  });
+
+  it("names a row that established no specific claim instead of inventing one", () => {
+    // No `healthy` — e.g. clean-at-rest, where nothing was rendered and drift
+    // was never compared, so there is no count of CLIs "in sync" to report.
+    expect(
+      summarizeAgentstackHealthyRows([
+        row({ key: "manifest", label: "Manifest", summary: "in sync · rendered to 3 CLIs" }),
+        row({ key: "future", label: "Attestation", summary: "whatever" }),
+      ]),
+    ).toBe("manifest ok · attestation ok");
+  });
+
+  it("drops a row that is fine but has nothing worth saying", () => {
+    expect(
+      summarizeAgentstackHealthyRows([
+        row({ key: "secrets", label: "Secrets", healthy: "no secrets needed" }),
+        // `null` = "no skills defined": a healthy nothing, so it earns no phrase.
+        row({ key: "library", label: "Library", healthy: null }),
+      ]),
+    ).toBe("no secrets needed");
+  });
+
+  it("produces no line at all for an empty or wholly silent set", () => {
+    expect(summarizeAgentstackHealthyRows([])).toBeNull();
+    expect(
+      summarizeAgentstackHealthyRows([row({ key: "library", label: "Library", healthy: null })]),
+    ).toBeNull();
+  });
+});
+
+/**
+ * The end-to-end path the reassurance line actually travels: a real doctor
+ * payload → rows → partition → one line. Asserting on hand-built rows alone
+ * left the two ends free to drift apart, which is how the line came to claim
+ * "N CLIs in sync" for a project that renders to none.
+ */
+describe("the healthy line, from a real doctor report", () => {
+  const lineFor = (report: AgentstackDoctorReport): string | null =>
+    summarizeAgentstackHealthyRows(
+      partitionAgentstackOverviewRows(deriveAgentstackOverviewRows(report)).healthy,
+    );
+
+  const adapters = {
+    title: "Adapters & CLIs",
+    lines: [
+      { level: "ok", msg: "Claude Code    installed · ~/.claude.json parses" },
+      { level: "ok", msg: "Codex CLI      installed · ~/.codex/config.toml parses" },
+      { level: "ok", msg: "Cursor         installed · ~/.cursor/mcp.json parses" },
+      { level: "info", msg: "OpenCode       not detected (ok unless you use it)" },
+    ],
+  };
+
+  it("claims the CLI count only where doctor compared the renders", () => {
+    expect(
+      lineFor({
+        errors: 0,
+        warnings: 0,
+        sections: [
+          adapters,
+          { title: "Drift", lines: [{ level: "ok", msg: "all targets in sync" }] },
+          {
+            title: "Secrets",
+            lines: [{ level: "ok", msg: "GITHUB_TOKEN resolved from keychain" }],
+          },
+        ],
+      }),
+    ).toBe("3 CLIs in sync · secrets resolved");
+  });
+
+  it("claims nothing about sync in clean-at-rest, where nothing was rendered", () => {
+    // `--skip-drift`: the section is Ok and warning-free precisely BECAUSE the
+    // comparison never ran. "3 CLIs in sync" here would reassure the user about
+    // a render they deliberately turned off.
+    const line = lineFor({
+      errors: 0,
+      warnings: 0,
+      sections: [
+        adapters,
+        {
+          title: "Drift",
+          lines: [
+            { level: "ok", msg: "not rendering configs — clean-at-rest keeps them off disk" },
+          ],
+        },
+        { title: "Secrets", lines: [{ level: "ok", msg: "no secrets referenced" }] },
+      ],
+    });
+    expect(line).toBe("manifest ok · no secrets needed");
+    expect(line).not.toContain("in sync");
+  });
+
+  it("reads secrets off the whole section, not off the clipped row summary", () => {
+    // A ref name long enough to push "resolved from" past the row's 64-char
+    // clamp used to degrade the phrase to a bare "secrets ok".
+    expect(
+      lineFor({
+        errors: 0,
+        warnings: 0,
+        sections: [
+          {
+            title: "Secrets",
+            lines: [
+              {
+                level: "ok",
+                msg: `${"SOME_VERY_LONG_SECRET_REF_NAME".padEnd(48)} resolved from keychain`,
+              },
+            ],
+          },
+        ],
+      }),
+    ).toBe("secrets resolved");
+  });
+});
+
+describe("selectAgentstackFindingsView", () => {
+  const finding = (over: Partial<AgentstackFinding>): AgentstackFinding => ({
+    key: "k",
+    level: "warn",
+    message: "m",
+    fix: null,
+    action: null,
+    section: "S",
+    ...over,
+  });
+  const many = Array.from({ length: 5 }, (_, i) => finding({ key: `w${i}` }));
+  const keys = (view: { visible: ReadonlyArray<{ finding: AgentstackFinding }> }) =>
+    view.visible.map((v) => v.finding.key);
+
+  it("shows an ordinary report whole — the cap is for pathological ones", () => {
+    const view = selectAgentstackFindingsView(many, false, ["status-v1"]);
+    expect(keys(view)).toEqual(["w0", "w1", "w2", "w3", "w4"]);
+    expect(view).toMatchObject({ hidden: 0, total: 5 });
+  });
+
+  it("caps a long list and reports how many stay hidden", () => {
+    const forty = Array.from({ length: 40 }, (_, i) => finding({ key: `w${i}` }));
+    const view = selectAgentstackFindingsView(forty, false, ["status-v1"]);
+    expect(view).toMatchObject({ hidden: 32, total: 40 });
+    expect(view.visible).toHaveLength(AGENTSTACK_FINDINGS_PREVIEW);
+  });
+
+  it("reveals everything once expanded", () => {
+    const view = selectAgentstackFindingsView(many, true, ["status-v1"], 2);
+    expect(view.visible).toHaveLength(5);
+    expect(view.hidden).toBe(0);
+  });
+
+  it("never buries an error behind the preview, and keeps report order within a level", () => {
+    const view = selectAgentstackFindingsView(
+      [
+        finding({ key: "w0" }),
+        finding({ key: "w1" }),
+        finding({ key: "w2" }),
+        finding({ key: "e0", level: "error" }),
+        finding({ key: "w3" }),
+      ],
+      false,
+      ["status-v1"],
+      3,
+    );
+    expect(keys(view)).toEqual(["e0", "w0", "w1"]);
+    expect(view.hidden).toBe(2);
+  });
+
+  it("hides nothing when there is nothing to hide", () => {
+    expect(selectAgentstackFindingsView([], false, ["status-v1"])).toMatchObject({
+      hidden: 0,
+      total: 0,
+    });
+    const two = selectAgentstackFindingsView(many.slice(0, 2), false, ["status-v1"], 3);
+    expect(two.visible).toHaveLength(2);
+    expect(two.hidden).toBe(0);
+  });
+
+  it("offers one machine-wide fix once, however many symptoms name it", () => {
+    // Doctor writes one warn line per provider missing the guard hook, each
+    // ending in the same `agentstack guard install`. Four identical buttons for
+    // one machine-wide write reads as four separate repairs.
+    const guard = (n: number) =>
+      finding({
+        key: `g${n}`,
+        section: "t3code (supervisor)",
+        fix: "agentstack guard install",
+        action: "guard-install",
+      });
+    const view = selectAgentstackFindingsView([guard(0), guard(1), guard(2)], false, ["status-v1"]);
+    expect(view.visible.map((v) => v.action)).toEqual(["guard-install", null, null]);
+    // The command is still on every one of them — only the button is deduped.
+    expect(view.visible.every((v) => v.finding.fix === "agentstack guard install")).toBe(true);
+  });
+});
+
+describe("agentstackFindingAction", () => {
+  const runnable: AgentstackFinding = {
+    key: "t3code (supervisor):0",
+    level: "warn",
+    message: "guard hook missing",
+    fix: "agentstack guard install",
+    action: "guard-install",
+    section: "t3code (supervisor)",
+  };
+
+  it("offers the button only when the CLI advertises the doctor contract", () => {
+    expect(agentstackFindingAction(runnable, ["status-v1"])).toBe("guard-install");
+    expect(agentstackFindingAction(runnable, ["profiles-v1"])).toBeNull();
+    // Unknown/absent features (older CLI) → command only, never a blind action.
+    expect(agentstackFindingAction(runnable, undefined)).toBeNull();
+    expect(agentstackFindingAction(runnable, [])).toBeNull();
+  });
+
+  it("offers nothing for a fix the panel cannot run, however advertised", () => {
+    expect(
+      agentstackFindingAction({ ...runnable, fix: "agentstack trust .", action: null }, [
+        "status-v1",
+      ]),
+    ).toBeNull();
+  });
+
+  it("never turns drift into one click, wherever it is rendered", () => {
+    // The Manifest row deliberately routes drift to the review — adopt vs
+    // apply differ and the scope has to be chosen. A "Re-render" button on the
+    // same fact two rows below is that decision made twice, and the dangerous
+    // one wins because it is the one click.
+    expect(
+      agentstackFindingAction(
+        {
+          key: "Drift:0",
+          level: "warn",
+          message: "Codex CLI 2 change(s) pending",
+          fix: "agentstack apply --write",
+          action: "apply-project",
+          section: "Drift",
+        },
+        ["status-v1"],
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("formatAgentstackImportSummary", () => {
+  it("never hides a settings import behind a zero server count", () => {
+    expect(formatAgentstackImportSummary({ servers: 0, settingsFrom: ["Claude Code"] })).toBe(
+      "no servers · settings from Claude Code",
+    );
+    expect(
+      formatAgentstackImportSummary({ servers: 2, settingsFrom: ["Claude Code", "Codex CLI"] }),
+    ).toBe("2 servers · settings from Claude Code, Codex CLI");
+  });
+
+  it("counts the sources once naming them would crowd the summary", () => {
+    expect(formatAgentstackImportSummary({ servers: 1, settingsFrom: ["a", "b", "c"] })).toBe(
+      "1 server · settings from 3 tools",
+    );
+  });
+
+  it("says nothing to import rather than a zero", () => {
+    expect(formatAgentstackImportSummary({ servers: 0, settingsFrom: [] })).toBe(
+      "nothing to import",
+    );
+    expect(formatAgentstackImportSummary({ servers: 3, settingsFrom: [] })).toBe("3 servers");
+  });
+});
+
+describe("formatAgentstackCount", () => {
+  it("pluralizes on the number, so the panel never writes its own", () => {
+    expect(formatAgentstackCount(1, "finding")).toBe("1 finding");
+    expect(formatAgentstackCount(2, "finding")).toBe("2 findings");
+    expect(formatAgentstackCount(0, "server")).toBe("0 servers");
   });
 });

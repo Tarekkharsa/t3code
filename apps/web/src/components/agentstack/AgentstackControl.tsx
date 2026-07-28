@@ -44,6 +44,7 @@ import { AgentstackMark } from "./AgentstackMark";
 import {
   agentstackFeatureKnownMissing,
   deriveAgentstackActivityRows,
+  deriveAgentstackFindings,
   deriveAgentstackOverviewRows,
   deriveAgentstackPolicyRows,
   deriveAgentstackShareFacts,
@@ -54,14 +55,19 @@ import {
   deriveWorkflowCounts,
   deriveWorkflowStages,
   filterAgentstackLibraryItems,
+  formatAgentstackCount,
+  formatAgentstackImportSummary,
   hasAgentstackFeature,
   matchAgentstackNextAction,
   partitionAgentstackOverviewRows,
+  selectAgentstackFindingsView,
   selectAgentstackUndoEntry,
   shortDigest,
   shortenAgentstackPath,
   shortenAgentstackPathsIn,
+  summarizeAgentstackHealthyRows,
   type AgentstackActionKind as ActionKind,
+  type AgentstackFinding,
   type AgentstackOverviewRow,
   type AgentstackRowLevel,
   type AgentstackTrustState,
@@ -117,11 +123,18 @@ const TRUST_BADGE: Record<
   unknown: null,
 };
 
-/** Text colour paired with LEVEL_DOT, so a row's state is legible from the
- *  words and not only from a 6px dot. */
+/**
+ * Text colour paired with LEVEL_DOT.
+ *
+ * Only an error earns coloured words. A realistic report puts a warning on
+ * nearly every visible line — manifest, secrets, library, plus each finding —
+ * and amber applied to all of the prose discriminates none of it; the dot
+ * already carries the level. Reserving colour for the error is what makes the
+ * one thing that gates the project the one thing that is coloured.
+ */
 const LEVEL_TEXT: Record<AgentstackRowLevel, string> = {
   ok: "text-foreground/80",
-  warn: "text-warning-foreground",
+  warn: "text-foreground",
   error: "text-destructive-foreground",
   muted: "text-muted-foreground",
 };
@@ -536,6 +549,11 @@ export function AgentstackControl({
     [status],
   );
 
+  // Every error and warning doctor reported, with the fix it named. The Checkup
+  // row summarized these as a count and showed none of them; the list below the
+  // row is where they finally appear.
+  const findings = useMemo(() => deriveAgentstackFindings(status?.doctor ?? null), [status]);
+
   const anyAttention = overviewRows.some((r) => r.level === "warn" || r.level === "error");
 
   return (
@@ -647,6 +665,8 @@ export function AgentstackControl({
                   <>
                     <OverviewPanel
                       rows={overviewRows}
+                      findings={findings}
+                      features={features}
                       doctorAvailable={status.doctor !== null}
                       chip={deriveAgentstackStatusChip({
                         state: status.doctor?.state,
@@ -1484,6 +1504,8 @@ function DriftTarget({ target }: { target: AgentstackDiffTarget }) {
 
 function OverviewPanel({
   rows,
+  findings,
+  features,
   doctorAvailable,
   chip,
   nextAction,
@@ -1506,6 +1528,10 @@ function OverviewPanel({
   onRecheck,
 }: {
   rows: AgentstackOverviewRow[];
+  /** Every error/warning doctor reported, with its fix — shown under Checkup. */
+  findings: ReadonlyArray<AgentstackFinding>;
+  /** The contracts the CLI advertised; gates a finding's fix BUTTON only. */
+  features: ReadonlyArray<string> | undefined;
   doctorAvailable: boolean;
   chip: ReturnType<typeof deriveAgentstackStatusChip>;
   nextAction: string | null;
@@ -1529,6 +1555,7 @@ function OverviewPanel({
 }) {
   if (!doctorAvailable) return <DoctorUnreadable onRecheck={onRecheck} />;
   const { problems, healthy } = partitionAgentstackOverviewRows(rows);
+  const healthyLine = summarizeAgentstackHealthyRows(healthy);
   return (
     <div className="flex flex-col p-1.5">
       {chip ? (
@@ -1549,30 +1576,32 @@ function OverviewPanel({
             <span className={cn("text-xs leading-snug", LEVEL_TEXT[row.level])}>{row.summary}</span>
           </div>
           {row.reviewDrift ? (
-            <button
-              type="button"
-              onClick={onReviewDrift}
-              className="mt-[3px] shrink-0 rounded-md border border-border/60 px-2 py-0.5 text-[10px] font-semibold text-foreground/85 transition-colors hover:border-warning/40 hover:bg-warning/10 hover:text-warning-foreground"
-            >
-              Review drift
-            </button>
+            <RowAction onClick={onReviewDrift}>Review drift</RowAction>
           ) : row.action ? (
-            <button
-              type="button"
-              onClick={() => onRequestAction(row.action!)}
-              className="mt-[3px] shrink-0 rounded-md border border-border/60 px-2 py-0.5 text-[10px] font-semibold text-foreground/85 transition-colors hover:border-warning/40 hover:bg-warning/10 hover:text-warning-foreground"
-            >
+            <RowAction onClick={() => onRequestAction(row.action!)}>
               {ACTION_META[row.action].label}
-            </button>
+            </RowAction>
           ) : null}
         </div>
       ))}
-      {healthy.length > 0 ? (
+      {/* After the rows, not wedged between two of them: the findings are the
+          detail behind the Checkup row, and injecting them mid-list stopped the
+          four rows reading as one list. */}
+      <CheckupFindings findings={findings} features={features} onRequestAction={onRequestAction} />
+      {healthyLine !== null ? (
         // Everything that is fine, in one quiet line — reassurance without
-        // four rows of it competing with the thing that needs the user.
-        <p className="flex items-center gap-2 px-2.5 py-1 text-[11px] text-muted-foreground/70">
+        // four rows of it competing with the thing that needs the user, and
+        // stated as outcomes rather than as a list of our category names.
+        // Faint is right BESIDE problems and wrong when it is the only thing on
+        // screen, so the weight follows whether anything else is competing.
+        <p
+          className={cn(
+            "flex items-center gap-2 px-2.5 py-1 text-[11px]",
+            problems.length > 0 ? "text-muted-foreground/70" : "text-muted-foreground",
+          )}
+        >
           <span className="size-1.5 shrink-0 rounded-full bg-success/60" />
-          {healthy.map((r) => r.label).join(" · ")} — all good
+          {healthyLine}
         </p>
       ) : null}
       {actionState.phase !== "idle" ? (
@@ -1593,6 +1622,116 @@ function OverviewPanel({
         canRestore={canRestore}
       />
     </div>
+  );
+}
+
+/**
+ * The small outline button an overview row or a finding hangs on its right.
+ *
+ * One definition rather than the four hand-rolled copies of the same 30-token
+ * class string that had accumulated — the house rule is to reach for the
+ * shared `Button`, and this is that button with the row's 10px scale pinned in
+ * one place.
+ */
+function RowAction({ onClick, children }: { onClick: () => void; children: ReactNode }) {
+  return (
+    <Button
+      size="xs"
+      variant="outline"
+      onClick={onClick}
+      className="mt-[2px] h-[22px] px-2 font-semibold text-[10px] sm:h-[22px] sm:text-[10px]"
+    >
+      {children}
+    </Button>
+  );
+}
+
+/**
+ * The checkup's findings, below the rows.
+ *
+ * The Checkup row said "1 error · 7 warnings — each names its fix" and then
+ * showed neither the findings nor the fixes: the panel already polls every line
+ * and its remedy, and was rendering a number. Each finding shows its message
+ * (bounded in the derivation — doctor lines carry repository-controlled names)
+ * with the command doctor gave, and, where that command is one of the fixed
+ * actions this panel exposes, a button that runs it through the same confirm
+ * step as every other write.
+ *
+ * The command stays on screen even when the button is there: the button is an
+ * extra affordance, never a replacement for saying what will run. It is
+ * rendered muted, because it is the reference and the message is the news.
+ *
+ * One gate, not two. The disclosure stays closed — Toolset and Undo are two of
+ * the four beginner ideas and a list opened by default pushes them out of the
+ * 420px viewport — but opening it now shows the whole list for any ordinary
+ * report, instead of three of five behind a second "See all".
+ *
+ * Exported for its own render test: "the findings are on screen with their
+ * fixes, and a fix button appears only where the panel may honestly offer one"
+ * is a claim about rendered output, so it is asserted on rendered output.
+ */
+export function CheckupFindings({
+  findings,
+  features,
+  onRequestAction,
+}: {
+  findings: ReadonlyArray<AgentstackFinding>;
+  features: ReadonlyArray<string> | undefined;
+  onRequestAction: (a: ActionKind) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const { visible, hidden, total } = selectAgentstackFindingsView(findings, expanded, features);
+  if (total === 0) return null;
+  return (
+    // Indented to the rows' text column (px-2.5 + 6px dot + gap-2.5) and hung
+    // off a rule, so it reads as the detail under the rows rather than as one
+    // more, wider, sibling row.
+    <details className="group mr-1 mb-1 ml-[26px] border-border/50 border-l-2 py-1 pl-2.5 text-left">
+      <summary className="flex cursor-pointer select-none items-center gap-2 [&::-webkit-details-marker]:hidden">
+        <span className="text-xs font-semibold text-foreground">What the checkup found</span>
+        <span className="text-[11px] text-muted-foreground">
+          {formatAgentstackCount(total, "finding")}
+        </span>
+        <span className="ml-auto text-[10px] text-muted-foreground/60 transition-transform group-open:rotate-90">
+          ›
+        </span>
+      </summary>
+      <ul className="flex flex-col pt-1.5">
+        {visible.map(({ finding, action }) => (
+          <li
+            key={finding.key}
+            className="flex items-start gap-2 border-border/40 border-t py-2 first:border-t-0 first:pt-0 last:pb-0"
+          >
+            <span
+              className={cn("mt-[6px] size-1.5 shrink-0 rounded-full", LEVEL_DOT[finding.level])}
+            />
+            <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+              <span className="text-[10px] text-muted-foreground/70">{finding.section}</span>
+              <span
+                className={cn("wrap-break-word text-xs leading-snug", LEVEL_TEXT[finding.level])}
+              >
+                {finding.message}
+              </span>
+              {finding.fix !== null ? <CommandLine text={finding.fix} muted /> : null}
+            </div>
+            {action !== null ? (
+              <RowAction onClick={() => onRequestAction(action)}>
+                {ACTION_META[action].label}
+              </RowAction>
+            ) : null}
+          </li>
+        ))}
+      </ul>
+      {hidden > 0 ? (
+        <button
+          type="button"
+          onClick={() => setExpanded(true)}
+          className="mt-1.5 font-medium text-[11px] text-muted-foreground hover:text-foreground"
+        >
+          See all {total} →
+        </button>
+      ) : null}
+    </details>
   );
 }
 
@@ -1660,13 +1799,20 @@ export function StatusSummary({
             {nextAction}
           </code>
           {runnable && onRunNextAction ? (
-            <button
-              type="button"
+            // `accent` is a FILL token (white at 4% alpha in dark), so
+            // `text-accent` rendered the panel's primary call to action at
+            // ~1.05:1 against its own background — a ghost. The paired text
+            // colour lives on the shared Button, which is the house rule
+            // anyway: this is the one recommended step, so it gets the one
+            // primary button on the panel.
+            <Button
+              size="xs"
+              variant="default"
               onClick={() => onRunNextAction(runnable)}
-              className="ml-auto inline-flex h-[22px] shrink-0 items-center rounded-md border border-accent/40 px-2 text-[11px] font-semibold text-accent hover:bg-accent/10"
+              className="ml-auto h-[22px] font-semibold sm:h-[22px] sm:text-[11px]"
             >
               {ACTION_META[runnable].label}
-            </button>
+            </Button>
           ) : null}
         </div>
       ) : null}
@@ -2572,7 +2718,19 @@ function EditFlowCard({
  * so they remain the only break opportunities — and a copy still yields the
  * exact command.
  */
-function CommandLine({ text }: { text: string }) {
+function CommandLine({
+  text,
+  muted = false,
+}: {
+  text: string;
+  /**
+   * Dim it. True where the command accompanies prose that is the actual news
+   * (a checkup finding): at full brightness the argv is the loudest thing in
+   * the row, and a list of them reads as a terminal transcript. False where
+   * the command IS the instruction and nothing else on screen carries it.
+   */
+  muted?: boolean;
+}) {
   // Key each token by where it starts in the command: a real property of the
   // token (two identical flags at different positions stay distinct), so the
   // list needs no index key.
@@ -2585,7 +2743,12 @@ function CommandLine({ text }: { text: string }) {
     });
   }, [text]);
   return (
-    <code className="mt-1 block font-mono text-[10.5px] text-foreground">
+    <code
+      className={cn(
+        "mt-1 block font-mono text-[10.5px]",
+        muted ? "text-muted-foreground" : "text-foreground",
+      )}
+    >
       {tokens.map(({ key, token, isFirst }) => (
         <Fragment key={key}>
           {isFirst ? null : " "}
@@ -2972,8 +3135,21 @@ function SetupPanel({
         )}
       </SetupGroup>
 
-      <SetupGroup title="What will be imported" count={{ n: plan.servers.length, noun: "server" }}>
-        {plan.servers.length === 0 && settingsFrom.length === 0 && plan.conflicts.length === 0 ? (
+      {/* The summary counts BOTH kinds of import: this group lists imported
+          settings too, so a servers-only count read "0 servers" on a plan that
+          was importing every setting your tools had. */}
+      <SetupGroup
+        title="What will be imported"
+        summary={formatAgentstackImportSummary({
+          servers: plan.servers.length,
+          settingsFrom,
+        })}
+      >
+        {/* Same predicate the collapsed summary uses. Conflicts are not an
+            import — they get their own block below — so counting them here made
+            the summary say "nothing to import" while the body drew an empty
+            list. */}
+        {plan.servers.length === 0 && settingsFrom.length === 0 ? (
           <span className="text-[11px] text-muted-foreground">nothing to import</span>
         ) : (
           <ul className="flex flex-col gap-1 text-[11px] leading-relaxed">
@@ -3192,6 +3368,7 @@ function SetupGroup({
   title,
   children,
   count,
+  summary,
 }: {
   title: string;
   children: ReactNode;
@@ -3201,9 +3378,16 @@ function SetupGroup({
    * making someone scroll past to reach the button that does the work.
    */
   count?: { readonly n: number; readonly noun: string } | undefined;
+  /**
+   * The same thing for a group whose contents are not one countable noun —
+   * a collapsed summary must never report one kind of item and silently omit
+   * another. Wins over `count` when both are given.
+   */
+  summary?: string | undefined;
 }) {
   const label = <span className="text-xs font-semibold text-foreground">{title}</span>;
-  if (!count) {
+  const collapsedSummary = summary ?? (count ? formatAgentstackCount(count.n, count.noun) : null);
+  if (collapsedSummary === null) {
     return (
       <div className="flex flex-col gap-1">
         {label}
@@ -3215,9 +3399,7 @@ function SetupGroup({
     <details className="group flex flex-col gap-1 border-t border-border/50 pt-2.5">
       <summary className="flex cursor-pointer select-none items-center gap-2 [&::-webkit-details-marker]:hidden">
         {label}
-        <span className="text-[11px] text-muted-foreground">
-          {count.n} {count.n === 1 ? count.noun : `${count.noun}s`}
-        </span>
+        <span className="text-[11px] text-muted-foreground">{collapsedSummary}</span>
         <span className="ml-auto text-[10px] text-muted-foreground/60 transition-transform group-open:rotate-90">
           ›
         </span>

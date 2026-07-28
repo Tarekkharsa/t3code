@@ -63,6 +63,23 @@ export interface AgentstackOverviewRow {
    * re-render verb (apply) differ and the scope must be chosen.
    */
   reviewDrift?: boolean;
+  /**
+   * What this row contributes to the single reassurance line, phrased as the
+   * outcome the user came for ("3 CLIs in sync").
+   *
+   * Set HERE, where the facts that justify the claim are in hand, and only
+   * when they do justify it. It is deliberately NOT re-derived from `summary`
+   * downstream: a summary is display text — truncated to fit a row, joined
+   * from independent facts, reworded between doctor versions — so reading a
+   * claim back out of one is exactly how a reassurance line ends up asserting
+   * something the report never said.
+   *
+   * Absent means "no specific claim available": the line falls back to naming
+   * the row ("library ok"), which is only ever as strong as the row's own `ok`
+   * level. Explicit `null` means "fine, and there is nothing worth saying" —
+   * the row drops out of the line entirely.
+   */
+  healthy?: string | null;
 }
 
 /**
@@ -95,6 +112,35 @@ function lineContaining(
   needle: string,
 ): AgentstackDoctorLine | undefined {
   return section?.lines.find((l) => l.msg.toLowerCase().includes(needle));
+}
+
+/**
+ * `1 error` / `2 errors` — a count and its noun, pluralized properly.
+ *
+ * Exported because the panel renders counts too ("3 findings", "1 server"),
+ * and a second pluralizer written inline in a render is a second thing to get
+ * wrong and nothing to test it with.
+ */
+export function formatAgentstackCount(n: number, noun: string): string {
+  return `${n} ${noun}${n === 1 ? "" : "s"}`;
+}
+
+const countOf = formatAgentstackCount;
+
+/**
+ * The Checkup row's summary: what the checkup found, in words a human wrote.
+ *
+ * It used to read "1 error(s) · 7 warning(s)" — the parenthetical plural is a
+ * programmer's shorthand for "I didn't want to branch", and it is the first
+ * line of the panel's most important row.
+ */
+export function formatAgentstackCheckupSummary(errors: number, warnings: number): string {
+  if (errors <= 0 && warnings <= 0) return "all checks pass";
+  const parts = [
+    errors > 0 ? countOf(errors, "error") : null,
+    warnings > 0 ? countOf(warnings, "warning") : null,
+  ].filter((p): p is string => p !== null);
+  return `${parts.join(" · ")} — each names its fix`;
 }
 
 /**
@@ -131,6 +177,18 @@ export function deriveAgentstackOverviewRows(
     const cliCount = sectionByTitle(report, "Adapters & CLIs")?.lines.filter(
       (l) => l.level === "ok",
     ).length;
+    // Doctor's own words for "drift was CHECKED and every target matched". It
+    // is the ONLY line that licenses a sync claim, and the check must be for
+    // that line rather than for the absence of warnings: clean-at-rest mode
+    // skips the comparison entirely and says so with an `ok` line of its own
+    // ("not rendering configs — clean-at-rest keeps them off disk"), which
+    // leaves the section warning-free precisely because nothing was rendered
+    // or compared. Claiming "3 CLIs in sync" there would reassure the user
+    // about a render they deliberately turned off. Matching the positive
+    // phrase fails safe: a doctor that reworded it makes us claim less.
+    const allInSync = drift.lines.some(
+      (l) => l.level === "ok" && l.msg.trim().startsWith("all targets in sync"),
+    );
     rows.push({
       key: "manifest",
       label: "Manifest",
@@ -143,6 +201,11 @@ export function deriveAgentstackOverviewRows(
       // stays an "ok" dot; only real own-manifest drift warns.
       level: actionable ? "warn" : "ok",
       ...(actionable || foreignKept ? { reviewDrift: true as const } : {}),
+      // Cross-CLI convergence is what the product promises, so it is what the
+      // reassurance line should say — but only over CLIs doctor actually
+      // compared. The count is of installed adapters whose config parses, all
+      // of which are render targets, and `allInSync` covers every target.
+      ...(allInSync && cliCount ? { healthy: `${countOf(cliCount, "CLI")} in sync` } : {}),
     });
   }
 
@@ -151,36 +214,38 @@ export function deriveAgentstackOverviewRows(
   rows.push({
     key: "doctor",
     label: "Checkup",
-    summary:
-      report.errors === 0 && report.warnings === 0
-        ? "all checks pass"
-        : [
-            report.errors > 0 ? `${report.errors} error(s)` : null,
-            report.warnings > 0 ? `${report.warnings} warning(s)` : null,
-          ]
-            .filter(Boolean)
-            .join(" · ") + " — each names its fix",
+    summary: formatAgentstackCheckupSummary(report.errors, report.warnings),
     level: report.errors > 0 ? "error" : report.warnings > 0 ? "warn" : "ok",
   });
 
   const secrets = sectionByTitle(report, "Secrets");
   if (secrets) {
+    // Doctor writes one `NAME  resolved from <layer>` line per ref, and the
+    // single line "no secrets referenced" when there are none. Read off the
+    // whole section, not off `summary` — which is one line of it, clipped to
+    // row width, so a long enough ref name pushes "resolved from" out of view.
+    const anyResolved = secrets.lines.some((l) => l.msg.includes("resolved from"));
     rows.push({
       key: "secrets",
       label: "Secrets",
       summary: firstMessage(secrets) ?? "—",
       level: worstLevel(secrets),
+      healthy: anyResolved ? "secrets resolved" : "no secrets needed",
     });
   }
 
   // Library ← Skills section (the manifest's library-backed capabilities).
   const skills = sectionByTitle(report, "Skills");
   if (skills) {
+    // "no skills defined" is a healthy nothing: there is no reassurance in it,
+    // so the row says nothing on the reassurance line rather than padding it.
+    const anyInstalled = skills.lines.some((l) => l.level === "ok" && l.msg.includes("present"));
     rows.push({
       key: "library",
       label: "Library",
       summary: firstMessage(skills) ?? "—",
       level: worstLevel(skills),
+      healthy: anyInstalled ? "skills installed" : null,
     });
   }
 
@@ -920,6 +985,40 @@ export function partitionAgentstackOverviewRows(rows: ReadonlyArray<AgentstackOv
   return { problems, healthy };
 }
 
+/**
+ * One line for everything that is fine — stated as outcomes, not as a list of
+ * our category names.
+ *
+ * The panel used to render `rows.map(r => r.label).join(" · ") + " — all good"`,
+ * which produced "Manifest · Checkup · Secrets · Library — all good": four
+ * internal nouns, and it threw away what the rows had already established (how
+ * many CLIs this manifest is in sync with, whether the secret refs resolve,
+ * whether the skills are installed). Cross-CLI convergence is the product's
+ * promise, so the one reassurance line is where it should be said.
+ *
+ * Every phrase comes from the row's `healthy` field, set at derivation where
+ * the evidence is. Nothing is inferred from `summary` here — this line is the
+ * panel's only unqualified "you're fine", so a claim it cannot source is a
+ * claim it does not make: such a row degrades to naming itself, and a set with
+ * nothing to say returns null so the caller renders no line at all.
+ *
+ * The Checkup row deliberately contributes nothing: the readiness chip
+ * directly above already says Ready/Protected from the same doctor state, and
+ * "checks pass" next to it is the same sentence twice.
+ */
+export function summarizeAgentstackHealthyRows(
+  rows: ReadonlyArray<AgentstackOverviewRow>,
+): string | null {
+  const parts: string[] = [];
+  for (const row of rows) {
+    if (row.key === "doctor") continue;
+    // `undefined` = no specific claim, name the row; `null` = say nothing.
+    const phrase = row.healthy === undefined ? `${row.label.toLowerCase()} ok` : row.healthy;
+    if (phrase !== null) parts.push(phrase);
+  }
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
 // ── checkup findings ─────────────────────────────────────────────────────────
 
 export interface AgentstackFinding {
@@ -933,6 +1032,23 @@ export interface AgentstackFinding {
   readonly action: AgentstackActionKind | null;
   /** Which doctor section it came from, for grouping. */
   readonly section: string;
+}
+
+/**
+ * The longest finding the panel will draw before clipping it.
+ *
+ * Doctor lines interpolate repository-controlled strings verbatim — skill and
+ * server names out of the manifest, instruction-fragment and target names,
+ * paths. All repository content is hostile input and must be bounded before it
+ * is rendered, and this list is the one place a doctor line reaches the DOM
+ * whole (the overview rows clip at `SUMMARY_MAX`). React escapes it, so the
+ * risk is not injection but a single 200 KB "skill name" owning the panel.
+ * Generous enough that no real doctor line is ever touched.
+ */
+const FINDING_MAX = 240;
+
+function clamp(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
 /**
@@ -957,12 +1073,139 @@ export function deriveAgentstackFindings(
       out.push({
         key: `${section.title}:${i}`,
         level: line.level === "error" ? "error" : "warn",
-        message: (message ?? line.msg).trim().replace(/\s+/g, " "),
-        fix: fix.length > 0 ? fix : null,
+        message: clamp((message ?? line.msg).trim().replace(/\s+/g, " "), FINDING_MAX),
+        fix: fix.length > 0 ? clamp(fix, FINDING_MAX) : null,
+        // Match the action on the UNCLAMPED command: clipping is a display
+        // concern and must not change which fixed action a fix maps to.
         action: fix.length > 0 ? matchAgentstackNextAction(fix) : null,
-        section: section.title,
+        section: clamp(section.title, 64),
       });
     }
   }
   return out;
+}
+
+/**
+ * What the panel must see advertised before it will offer to RUN a fix it read
+ * out of doctor's prose.
+ *
+ * Read this precisely: `status-v1` is `doctor --json` carrying `state` +
+ * `next_action`, and that is exactly — only — what is being gated. The command
+ * behind these buttons is not declared by the CLI; it is scraped from the
+ * `↳ <command>` tail of a report line, so the question this gate answers is
+ * "does this binary serve the doctor JSON contract whose shape we are reading",
+ * not "does it support apply/guard-install". No feature name covers the writes
+ * themselves: the actions are a closed set the SERVER maps to fixed argv, the
+ * CLI re-validates every precondition, and the panel already fires the same
+ * set ungated from the status row. So this narrows the surface (an older
+ * binary gets the command as text, never a click) without pretending to
+ * verify a contract nobody publishes.
+ */
+export const AGENTSTACK_CHECKUP_ACTION_FEATURE = "status-v1";
+
+/**
+ * The action this finding may be offered as a button, or null to show only its
+ * command.
+ */
+export function agentstackFindingAction(
+  finding: AgentstackFinding,
+  features: ReadonlyArray<string> | undefined,
+): AgentstackActionKind | null {
+  if (finding.action === null) return null;
+  // Drift is never one blind click, here or anywhere. The safe verb (adopt)
+  // and the re-render verb (apply) differ, the scope has to be chosen, and the
+  // Manifest row deliberately routes the same fact to the drift review instead
+  // of firing `apply --write`. A "Re-render" button on a Drift finding is that
+  // decision made twice, two rows apart, in opposite directions — and the
+  // dangerous one wins because it is the one click.
+  if (finding.section === "Drift") return null;
+  return hasAgentstackFeature(features, AGENTSTACK_CHECKUP_ACTION_FEATURE) ? finding.action : null;
+}
+
+/**
+ * How many findings the opened checkup list shows before "See all N".
+ *
+ * High enough that the second gate is rare. The list already sits behind a
+ * disclosure, and a cap of 3 meant two clicks to read five short lines with no
+ * way back — two gates for one small list. This one exists only to stop a
+ * pathological report (a repo declaring forty broken skills) from turning the
+ * panel into a scroll, so it fires where a cap is actually doing work.
+ */
+export const AGENTSTACK_FINDINGS_PREVIEW = 8;
+
+/** A finding as the list draws it: the finding, plus the button it may show. */
+export interface AgentstackFindingView {
+  readonly finding: AgentstackFinding;
+  /** The fixed action to offer, or null to show the command only. */
+  readonly action: AgentstackActionKind | null;
+}
+
+/**
+ * What the checkup list renders: errors first, then a preview of the rest,
+ * each with the button it is allowed to show.
+ *
+ * Errors lead regardless of which section they came from — doctor's section
+ * order is a report layout, and previewing three warnings while the single
+ * error sits behind "See all" would bury the one finding that gates the
+ * project. Order within a level is preserved, so the report's own sequence
+ * still reads through.
+ *
+ * An action is offered at most once. Doctor reports machine-wide facts per
+ * subject — four providers missing the guard hook are four warn lines all
+ * ending `↳ agentstack guard install` — and four identical buttons for one
+ * machine-wide write reads as four separate repairs. The first finding that
+ * asks for an action keeps the button; the rest still show the command, which
+ * is the honest picture: one fix, several symptoms.
+ */
+export function selectAgentstackFindingsView(
+  findings: ReadonlyArray<AgentstackFinding>,
+  expanded: boolean,
+  features: ReadonlyArray<string> | undefined,
+  previewCount: number = AGENTSTACK_FINDINGS_PREVIEW,
+): {
+  readonly visible: ReadonlyArray<AgentstackFindingView>;
+  readonly hidden: number;
+  readonly total: number;
+} {
+  const ranked = [
+    ...findings.filter((f) => f.level === "error"),
+    ...findings.filter((f) => f.level !== "error"),
+  ];
+  const limit = Math.max(0, previewCount);
+  const shown = expanded ? ranked : ranked.slice(0, limit);
+  const offered = new Set<AgentstackActionKind>();
+  const visible = shown.map((finding) => {
+    const action = agentstackFindingAction(finding, features);
+    if (action === null || offered.has(action)) return { finding, action: null };
+    offered.add(action);
+    return { finding, action };
+  });
+  return { visible, hidden: ranked.length - visible.length, total: ranked.length };
+}
+
+// ── setup plan ───────────────────────────────────────────────────────────────
+
+/**
+ * The collapsed summary of the setup plan's "What will be imported" group.
+ *
+ * The group counted servers only, so a plan that imports settings from two
+ * tools and no servers summarized as "0 servers" — a true number that hid the
+ * whole import. Both facts are stated, and "nothing to import" is said plainly
+ * rather than as a zero.
+ */
+export function formatAgentstackImportSummary(input: {
+  readonly servers: number;
+  readonly settingsFrom: ReadonlyArray<string>;
+}): string {
+  const servers = Math.max(0, input.servers);
+  const from = input.settingsFrom;
+  const settings =
+    from.length === 0
+      ? null
+      : from.length <= 2
+        ? `settings from ${from.join(", ")}`
+        : `settings from ${countOf(from.length, "tool")}`;
+  if (servers === 0 && settings === null) return "nothing to import";
+  const serverPart = servers > 0 ? countOf(servers, "server") : "no servers";
+  return [serverPart, settings].filter((p): p is string => p !== null).join(" · ");
 }
