@@ -28,6 +28,7 @@ import { useAgentstackPanelStore } from "~/agentstackPanelStore";
 import { agentstackEnvironment } from "~/state/agentstack";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { cn } from "~/lib/utils";
+import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import {
   Dialog,
@@ -54,6 +55,7 @@ import {
   filterAgentstackLibraryItems,
   hasAgentstackFeature,
   matchAgentstackNextAction,
+  partitionAgentstackOverviewRows,
   selectAgentstackUndoEntry,
   shortDigest,
   shortenAgentstackPath,
@@ -102,13 +104,26 @@ const OUTCOME_DOT: Record<"ok" | "error" | "denied", string> = {
   error: "bg-destructive",
 };
 
-const TRUST_BADGE: Record<AgentstackTrustState, { dot: string; text: string; bg: string } | null> =
-  {
-    trusted: { dot: "bg-success", text: "text-success", bg: "bg-success/10" },
-    inert: { dot: "bg-warning", text: "text-warning", bg: "bg-warning/10" },
-    drifted: { dot: "bg-destructive", text: "text-destructive", bg: "bg-destructive/10" },
-    unknown: null,
-  };
+/** Trust state → a shared Badge variant, so the pill matches every other
+ *  status pill in the app instead of hand-rolling its own colour pairing. */
+const TRUST_BADGE: Record<
+  AgentstackTrustState,
+  { dot: string; variant: "success" | "warning" | "error" } | null
+> = {
+  trusted: { dot: "bg-success", variant: "success" },
+  inert: { dot: "bg-warning", variant: "warning" },
+  drifted: { dot: "bg-destructive", variant: "error" },
+  unknown: null,
+};
+
+/** Text colour paired with LEVEL_DOT, so a row's state is legible from the
+ *  words and not only from a 6px dot. */
+const LEVEL_TEXT: Record<AgentstackRowLevel, string> = {
+  ok: "text-foreground/80",
+  warn: "text-warning-foreground",
+  error: "text-destructive-foreground",
+  muted: "text-muted-foreground",
+};
 
 const STEP_DOT: Record<string, string> = {
   completed: "bg-success",
@@ -548,19 +563,19 @@ export function AgentstackControl({
               </span>
             ) : null}
             {trust && trustBadge ? (
-              <button
-                type="button"
-                onClick={() => setReviewing(true)}
+              <Badge
+                render={<button type="button" onClick={() => setReviewing(true)} />}
+                variant={trustBadge.variant}
+                size="sm"
                 title="Review this repo's trust surface"
-                className={cn(
-                  "ml-auto inline-flex h-5 items-center gap-1.5 rounded-md px-2 text-[11px] font-semibold transition-opacity hover:opacity-80",
-                  trustBadge.text,
-                  trustBadge.bg,
-                )}
+                // `shrink-0` + the Badge's own `whitespace-nowrap` keep the
+                // label on one line: it used to wrap inside a fixed-height
+                // pill and spill out of it.
+                className="ml-auto shrink-0 gap-1.5 px-1.5 transition-opacity hover:opacity-80"
               >
-                <span className={cn("size-[5px] rounded-full", trustBadge.dot)} />
+                <span className={cn("size-[5px] shrink-0 rounded-full", trustBadge.dot)} />
                 {trust.label}
-              </button>
+              </Badge>
             ) : null}
           </div>
 
@@ -583,7 +598,9 @@ export function AgentstackControl({
                 <span className="font-semibold">{activeRun.workflow}</span> running ·{" "}
                 {deriveWorkflowCounts(activeRun.steps).running} active
               </span>
-              <span className="ml-auto text-xs font-medium text-warning">View agents →</span>
+              <span className="ml-auto text-xs font-medium text-warning-foreground">
+                View agents →
+              </span>
             </button>
           ) : null}
 
@@ -740,7 +757,7 @@ function NotInstalled({ onRecheck }: { onRecheck: () => Promise<void> | void }) 
         trust-gated MCP servers, a pre-tool-use guard, and a per-project audit log.
       </p>
       <div className="flex flex-col gap-1.5">
-        <p className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
+        <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
           Install
         </p>
         <p>
@@ -752,7 +769,7 @@ function NotInstalled({ onRecheck }: { onRecheck: () => Promise<void> | void }) 
         </p>
       </div>
       <div className="flex flex-col gap-1.5">
-        <p className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
+        <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
           Already installed?
         </p>
         <p>
@@ -937,7 +954,7 @@ function TrustReviewPanel({
           </p>
 
           <div>
-            <p className="mb-1 text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
+            <p className="mb-1 text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
               Servers ({preview.servers.length})
             </p>
             {preview.servers.length === 0 ? (
@@ -985,7 +1002,7 @@ function TrustReviewPanel({
                   <TrustNamedList title="Skills" items={preview.skills ?? []} />
                   {preview.workflows && preview.workflows.length > 0 ? (
                     <div>
-                      <p className="mb-1 text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
+                      <p className="mb-1 text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
                         Workflows ({preview.workflows.length})
                       </p>
                       <ul className="flex flex-col gap-0.5">
@@ -1005,7 +1022,7 @@ function TrustReviewPanel({
                   ) : null}
                   {preview.extensions && preview.extensions.length > 0 ? (
                     <div>
-                      <p className="mb-1 text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
+                      <p className="mb-1 text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
                         Extensions ({preview.extensions.length})
                       </p>
                       <ul className="flex flex-col gap-0.5">
@@ -1046,7 +1063,7 @@ function TrustReviewPanel({
           </p>
 
           {!canGrant && state !== "trusted" ? (
-            <p className="text-[11px] leading-relaxed text-warning">
+            <p className="text-[11px] leading-relaxed text-warning-foreground">
               {consentDigest === null
                 ? "This agentstack CLI predates consent-bound trust (its preview has no surface digest), so granting from here is disabled. Update agentstack, or trust from a terminal where the review itself is the consent."
                 : "This agentstack CLI doesn't support consent-bound trust from t3code. Update agentstack, or trust from a terminal where the review itself is the consent."}
@@ -1062,7 +1079,12 @@ function TrustReviewPanel({
                   : "border-destructive/30 bg-destructive/[0.06]",
               )}
             >
-              <span className={cn("font-semibold", act.ok ? "text-success" : "text-destructive")}>
+              <span
+                className={cn(
+                  "font-semibold",
+                  act.ok ? "text-success-foreground" : "text-destructive-foreground",
+                )}
+              >
                 {act.ok ? "Done" : "Couldn't complete"}
               </span>
               {" — "}
@@ -1076,7 +1098,7 @@ function TrustReviewPanel({
                 type="button"
                 disabled={running}
                 onClick={() => run("trust-revoke")}
-                className="inline-flex h-7 items-center rounded-lg border border-destructive/40 bg-destructive/10 px-3 text-xs font-semibold text-destructive disabled:opacity-60"
+                className="inline-flex h-7 items-center rounded-lg border border-destructive/40 bg-destructive/10 px-3 text-xs font-semibold text-destructive-foreground disabled:opacity-60"
               >
                 {running ? "Revoking…" : "Revoke trust"}
               </button>
@@ -1085,7 +1107,7 @@ function TrustReviewPanel({
                 type="button"
                 disabled={running || !canGrant}
                 onClick={() => run("trust-grant")}
-                className="inline-flex h-7 items-center rounded-lg border border-success/40 bg-success/10 px-3 text-xs font-semibold text-success disabled:opacity-60"
+                className="inline-flex h-7 items-center rounded-lg border border-success/40 bg-success/10 px-3 text-xs font-semibold text-success-foreground disabled:opacity-60"
               >
                 {running ? "Trusting…" : "Trust this repo"}
               </button>
@@ -1110,7 +1132,7 @@ function TrustNamedList({ title, items }: { title: string; items: ReadonlyArray<
   if (items.length === 0) return null;
   return (
     <div>
-      <p className="mb-1 text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
+      <p className="mb-1 text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
         {title} ({items.length})
       </p>
       <ul className="flex flex-wrap gap-1">
@@ -1251,7 +1273,7 @@ function DriftReviewPanel({
                   type="button"
                   disabled={running}
                   onClick={() => void run(act.action)}
-                  className="inline-flex h-6 items-center rounded-md border border-warning/40 bg-warning/15 px-2.5 text-[11px] font-semibold text-warning disabled:opacity-60"
+                  className="inline-flex h-6 items-center rounded-md border border-warning/40 bg-warning/15 px-2.5 text-[11px] font-semibold text-warning-foreground disabled:opacity-60"
                 >
                   {running ? "Running…" : `Run ${ACTION_META[act.action].label.toLowerCase()}`}
                 </button>
@@ -1274,7 +1296,12 @@ function DriftReviewPanel({
                   : "border-destructive/30 bg-destructive/[0.06]",
               )}
             >
-              <span className={cn("font-semibold", act.ok ? "text-success" : "text-destructive")}>
+              <span
+                className={cn(
+                  "font-semibold",
+                  act.ok ? "text-success-foreground" : "text-destructive-foreground",
+                )}
+              >
                 {act.ok ? "Done" : "Couldn't complete"}
               </span>
               {" — "}
@@ -1316,7 +1343,7 @@ function DriftScopeSection({
 
   return (
     <div className="flex flex-col gap-2">
-      <p className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
+      <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
         {where}
       </p>
 
@@ -1338,7 +1365,7 @@ function DriftScopeSection({
                   `Keep the on-disk hand-edit in ${where} — pull it into this project's manifest. Only writes agentstack.toml; never removes anything from a CLI's config.`,
                 )
               }
-              className="inline-flex h-7 items-center rounded-lg border border-success/40 bg-success/10 px-3 text-xs font-semibold text-success disabled:opacity-60"
+              className="inline-flex h-7 items-center rounded-lg border border-success/40 bg-success/10 px-3 text-xs font-semibold text-success-foreground disabled:opacity-60"
             >
               Keep edits
             </button>
@@ -1351,7 +1378,7 @@ function DriftScopeSection({
                   `Re-render ${where} from the manifest. This OVERWRITES the hand-edit. Servers other setups applied are kept (never pruned). Reversible with agentstack restore.`,
                 )
               }
-              className="inline-flex h-7 items-center rounded-lg border border-warning/40 bg-warning/10 px-3 text-xs font-semibold text-warning disabled:opacity-60"
+              className="inline-flex h-7 items-center rounded-lg border border-warning/40 bg-warning/10 px-3 text-xs font-semibold text-warning-foreground disabled:opacity-60"
             >
               Re-render
             </button>
@@ -1468,6 +1495,7 @@ function OverviewPanel({
   onRecheck: () => Promise<void> | void;
 }) {
   if (!doctorAvailable) return <DoctorUnreadable onRecheck={onRecheck} />;
+  const { problems, healthy } = partitionAgentstackOverviewRows(rows);
   return (
     <div className="flex flex-col p-1.5">
       {chip ? (
@@ -1478,23 +1506,22 @@ function OverviewPanel({
           onRunNextAction={onRequestAction}
         />
       ) : null}
-      {rows.map((row) => (
-        <div key={row.key} className="flex items-center gap-2.5 rounded-lg px-2.5 py-[7px]">
-          <span className={cn("size-1.5 shrink-0 rounded-full", LEVEL_DOT[row.level])} />
-          <span className="w-[76px] shrink-0 text-[12.5px] font-semibold text-foreground">
-            {row.label}
-          </span>
-          <span
-            className="min-w-0 flex-1 truncate text-xs text-muted-foreground"
-            title={row.summary}
-          >
-            {row.summary}
-          </span>
+      {problems.map((row) => (
+        <div key={row.key} className="flex items-start gap-2.5 rounded-lg px-2.5 py-[7px]">
+          <span className={cn("mt-[7px] size-1.5 shrink-0 rounded-full", LEVEL_DOT[row.level])} />
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+            {/* The category is a label, not the news — it used to be bold
+                white while the actual message was muted and truncated. */}
+            <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-muted-foreground/70">
+              {row.label}
+            </span>
+            <span className={cn("text-xs leading-snug", LEVEL_TEXT[row.level])}>{row.summary}</span>
+          </div>
           {row.reviewDrift ? (
             <button
               type="button"
               onClick={onReviewDrift}
-              className="shrink-0 rounded-md border border-border/60 px-2 py-0.5 text-[10px] font-semibold text-foreground/85 transition-colors hover:border-warning/40 hover:bg-warning/10 hover:text-warning"
+              className="mt-[3px] shrink-0 rounded-md border border-border/60 px-2 py-0.5 text-[10px] font-semibold text-foreground/85 transition-colors hover:border-warning/40 hover:bg-warning/10 hover:text-warning-foreground"
             >
               Review drift
             </button>
@@ -1502,13 +1529,21 @@ function OverviewPanel({
             <button
               type="button"
               onClick={() => onRequestAction(row.action!)}
-              className="shrink-0 rounded-md border border-border/60 px-2 py-0.5 text-[10px] font-semibold text-foreground/85 transition-colors hover:border-warning/40 hover:bg-warning/10 hover:text-warning"
+              className="mt-[3px] shrink-0 rounded-md border border-border/60 px-2 py-0.5 text-[10px] font-semibold text-foreground/85 transition-colors hover:border-warning/40 hover:bg-warning/10 hover:text-warning-foreground"
             >
               {ACTION_META[row.action].label}
             </button>
           ) : null}
         </div>
       ))}
+      {healthy.length > 0 ? (
+        // Everything that is fine, in one quiet line — reassurance without
+        // four rows of it competing with the thing that needs the user.
+        <p className="flex items-center gap-2 px-2.5 py-1 text-[11px] text-muted-foreground/70">
+          <span className="size-1.5 shrink-0 rounded-full bg-success/60" />
+          {healthy.map((r) => r.label).join(" · ")} — all good
+        </p>
+      ) : null}
       {actionState.phase !== "idle" ? (
         <ActionConfirm state={actionState} onConfirm={onConfirm} onCancel={onCancel} />
       ) : null}
@@ -1589,7 +1624,7 @@ export function StatusSummary({
       </div>
       {nextAction ? (
         <div className="flex items-baseline gap-1.5">
-          <span className="shrink-0 text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
+          <span className="shrink-0 text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
             Next
           </span>
           <code className="min-w-0 wrap-break-word font-mono text-[11px] text-muted-foreground">
@@ -1752,7 +1787,9 @@ function ToolsetsCard({
             {row.blockedBecause ?? row.summary}
           </span>
           {row.active ? (
-            <span className="shrink-0 text-[10px] font-semibold text-success">in use</span>
+            <span className="shrink-0 text-[10px] font-semibold text-success-foreground">
+              in use
+            </span>
           ) : row.ready && !session && canSessions ? (
             <button
               type="button"
@@ -1770,7 +1807,7 @@ function ToolsetsCard({
         <p
           className={cn(
             "px-2.5 pb-1 text-[11px]",
-            done.ok ? "text-muted-foreground" : "text-destructive",
+            done.ok ? "text-muted-foreground" : "text-destructive-foreground",
           )}
         >
           {done.message}
@@ -2028,7 +2065,7 @@ function LibraryPanel({
             Toolsets list.
           </p>
           <label className="flex flex-col gap-1">
-            <span className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
+            <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
               Toolset name
             </span>
             <input
@@ -2068,7 +2105,7 @@ function LibraryPanel({
                   servers: [...draftServers],
                 })
               }
-              className="inline-flex h-8 items-center rounded-lg border border-success/40 bg-success/10 px-3.5 text-xs font-semibold text-success disabled:opacity-50"
+              className="inline-flex h-8 items-center rounded-lg border border-success/40 bg-success/10 px-3.5 text-xs font-semibold text-success-foreground disabled:opacity-50"
             >
               Create toolset
             </button>
@@ -2081,7 +2118,7 @@ function LibraryPanel({
             </button>
           </div>
           {draftName.length > 0 && !PROFILE_NAME_INPUT_RE.test(draftName) ? (
-            <p className="text-[10.5px] text-warning">
+            <p className="text-[10.5px] text-warning-foreground">
               Use letters, numbers, dot, dash or underscore (no spaces).
             </p>
           ) : null}
@@ -2096,7 +2133,7 @@ function LibraryPanel({
             <button
               type="button"
               onClick={() => setView({ kind: "new" })}
-              className="shrink-0 rounded-md border border-success/40 bg-success/10 px-2 py-0.5 text-[10px] font-semibold text-success transition-colors hover:bg-success/20"
+              className="shrink-0 rounded-md border border-success/40 bg-success/10 px-2 py-0.5 text-[10px] font-semibold text-success-foreground transition-colors hover:bg-success/20"
             >
               + New toolset
             </button>
@@ -2197,7 +2234,7 @@ function LibraryBrowseGroup({
 }) {
   return (
     <div className="flex flex-col gap-1">
-      <p className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
+      <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
         {title}
       </p>
       {items.length === 0 ? (
@@ -2256,7 +2293,7 @@ function LibraryBrowseGroup({
                   onClick={() => onRemove(it.name)}
                   title="Remove from your library (all projects) — recoverable"
                   aria-label={`Remove ${it.name} from your library`}
-                  className="shrink-0 rounded-md border border-transparent px-1.5 py-0.5 text-[10px] font-semibold text-destructive/80 opacity-0 transition-all hover:border-destructive/30 hover:bg-destructive/10 hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100"
+                  className="shrink-0 rounded-md border border-transparent px-1.5 py-0.5 text-[10px] font-semibold text-destructive-foreground/80 opacity-0 transition-all hover:border-destructive/30 hover:bg-destructive/10 hover:text-destructive-foreground focus-visible:opacity-100 group-hover:opacity-100"
                 >
                   Remove
                 </button>
@@ -2283,7 +2320,7 @@ function LibrarySelectGroup({
 }) {
   return (
     <div className="flex flex-col gap-1">
-      <p className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
+      <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
         {title}
       </p>
       {items.length === 0 ? (
@@ -2350,7 +2387,7 @@ function EditFlowCard({
     return (
       <div className="flex flex-col gap-3 px-4 py-4">
         <p className="text-[12.5px] font-semibold text-foreground">{flow.title}</p>
-        <p className="text-[11px] leading-relaxed text-warning">
+        <p className="text-[11px] leading-relaxed text-warning-foreground">
           This agentstack CLI's preview has no digest to confirm against, so this change can't be
           applied from here. Update agentstack, or make the change in a terminal.
         </p>
@@ -2371,7 +2408,7 @@ function EditFlowCard({
         <p className="text-[12.5px] font-semibold text-foreground">{flow.title}</p>
         {secretBlock ? (
           <div className="flex flex-col gap-2 rounded-lg border border-warning/30 bg-warning/[0.06] px-3 py-2.5 text-[11px] leading-relaxed">
-            <span className="font-semibold text-warning">Set a secret to finish</span>
+            <span className="font-semibold text-warning-foreground">Set a secret to finish</span>
             <span className="text-muted-foreground">
               The toolset was written, but a value it needs isn't set yet, so AgentStack kept the{" "}
               <code className="font-mono">
@@ -2395,7 +2432,12 @@ function EditFlowCard({
                 : "border-destructive/30 bg-destructive/[0.06]",
             )}
           >
-            <span className={cn("font-semibold", flow.ok ? "text-success" : "text-destructive")}>
+            <span
+              className={cn(
+                "font-semibold",
+                flow.ok ? "text-success-foreground" : "text-destructive-foreground",
+              )}
+            >
               {flow.ok ? "Done" : "Couldn't apply"}
             </span>
             {" — "}
@@ -2436,8 +2478,8 @@ function EditFlowCard({
           className={cn(
             "inline-flex h-8 items-center rounded-lg border px-3.5 text-xs font-semibold disabled:opacity-60",
             removing
-              ? "border-destructive/40 bg-destructive/10 text-destructive"
-              : "border-success/40 bg-success/10 text-success",
+              ? "border-destructive/40 bg-destructive/10 text-destructive-foreground"
+              : "border-success/40 bg-success/10 text-success-foreground",
           )}
         >
           {running ? (removing ? "Removing…" : "Applying…") : removing ? "Remove" : "Confirm"}
@@ -2521,7 +2563,7 @@ function RemovalConfirmBody({
       </p>
       {usedHere ? (
         <div className="rounded-lg border border-warning/30 bg-warning/[0.06] px-3 py-2 text-[11px] leading-relaxed">
-          <span className="font-semibold text-warning">This project uses it</span>
+          <span className="font-semibold text-warning-foreground">This project uses it</span>
           <span className="text-muted-foreground">
             {profiles.length > 0
               ? ` — toolset${profiles.length === 1 ? "" : "s"} ${profiles.join(", ")}. `
@@ -2623,7 +2665,7 @@ function UndoAffordance({
                 type="button"
                 disabled={act.phase === "running"}
                 onClick={() => void run()}
-                className="inline-flex h-6 items-center rounded-md border border-warning/40 bg-warning/15 px-2.5 text-[11px] font-semibold text-warning disabled:opacity-60"
+                className="inline-flex h-6 items-center rounded-md border border-warning/40 bg-warning/15 px-2.5 text-[11px] font-semibold text-warning-foreground disabled:opacity-60"
               >
                 {act.phase === "running" ? "Undoing…" : "Undo this change"}
               </button>
@@ -2645,7 +2687,12 @@ function UndoAffordance({
                   : "border-destructive/30 bg-destructive/[0.06]",
               )}
             >
-              <span className={cn("font-semibold", act.ok ? "text-success" : "text-destructive")}>
+              <span
+                className={cn(
+                  "font-semibold",
+                  act.ok ? "text-success-foreground" : "text-destructive-foreground",
+                )}
+              >
                 {act.ok ? "Undone" : "Couldn't undo"}
               </span>
               {" — "}
@@ -2655,7 +2702,7 @@ function UndoAffordance({
             <button
               type="button"
               onClick={() => setAct({ phase: "confirm" })}
-              className="self-start text-[11px] font-semibold text-warning underline-offset-2 hover:underline"
+              className="self-start text-[11px] font-semibold text-warning-foreground underline-offset-2 hover:underline"
             >
               Undo this change
             </button>
@@ -2887,7 +2934,7 @@ function SetupPanel({
               <li className="text-muted-foreground">Settings from {settingsFrom.join(", ")}</li>
             ) : null}
             {plan.conflicts.map((c) => (
-              <li key={c.name} className="text-warning">
+              <li key={c.name} className="text-warning-foreground">
                 {c.name} is defined by {c.other_definitions + 1} tools — one will be used
               </li>
             ))}
@@ -2979,7 +3026,7 @@ function SetupPanel({
       ) : null}
 
       {setupUnsupported ? (
-        <p className="text-[11px] leading-relaxed text-warning">
+        <p className="text-[11px] leading-relaxed text-warning-foreground">
           {canApply
             ? "This agentstack CLI's plan has no digest to confirm against, so setup from here is disabled. Update agentstack, or run agentstack init in a terminal."
             : "This agentstack CLI doesn't support one-click setup. Update agentstack, or run agentstack init in a terminal."}
@@ -2995,7 +3042,12 @@ function SetupPanel({
               : "border-destructive/30 bg-destructive/[0.06]",
           )}
         >
-          <span className={cn("font-semibold", act.ok ? "text-success" : "text-destructive")}>
+          <span
+            className={cn(
+              "font-semibold",
+              act.ok ? "text-success-foreground" : "text-destructive-foreground",
+            )}
+          >
             {act.ok ? "Set up" : "Couldn't set up"}
           </span>
           {" — "}
@@ -3007,7 +3059,7 @@ function SetupPanel({
             type="button"
             disabled={act.phase === "running"}
             onClick={() => void run()}
-            className="inline-flex h-7 items-center rounded-lg border border-success/40 bg-success/10 px-3 text-xs font-semibold text-success disabled:opacity-60"
+            className="inline-flex h-7 items-center rounded-lg border border-success/40 bg-success/10 px-3 text-xs font-semibold text-success-foreground disabled:opacity-60"
           >
             {act.phase === "running" ? "Setting up…" : "Confirm setup"}
           </button>
@@ -3025,7 +3077,7 @@ function SetupPanel({
           type="button"
           disabled={!canSetUp}
           onClick={() => setAct({ phase: "confirm" })}
-          className="inline-flex h-8 items-center self-start rounded-lg border border-success/40 bg-success/10 px-3.5 text-xs font-semibold text-success disabled:opacity-60"
+          className="inline-flex h-8 items-center self-start rounded-lg border border-success/40 bg-success/10 px-3.5 text-xs font-semibold text-success-foreground disabled:opacity-60"
         >
           Set up this project
         </button>
@@ -3043,10 +3095,35 @@ function SetupPanel({
   );
 }
 
+/**
+ * A labelled block inside a panel. `divided` draws a hairline above the label,
+ * which is what separates stacked sections — without it a panel reads as one
+ * continuous column of prose and the uppercase labels get lost in it. The
+ * first section in a panel passes `divided={false}`.
+ */
+function PanelSection({
+  title,
+  children,
+  divided = true,
+}: {
+  title: string;
+  children: ReactNode;
+  divided?: boolean;
+}) {
+  return (
+    <div className={cn("flex flex-col gap-1.5", divided && "border-t border-border/50 pt-3")}>
+      <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
+        {title}
+      </p>
+      {children}
+    </div>
+  );
+}
+
 function SetupGroup({ title, children }: { title: string; children: ReactNode }) {
   return (
     <div className="flex flex-col gap-1">
-      <p className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
+      <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
         {title}
       </p>
       {children}
@@ -3073,7 +3150,12 @@ function ActionConfirm({
             : "border-destructive/30 bg-destructive/[0.06] text-muted-foreground",
         )}
       >
-        <span className={cn("font-semibold", state.ok ? "text-success" : "text-destructive")}>
+        <span
+          className={cn(
+            "font-semibold",
+            state.ok ? "text-success-foreground" : "text-destructive-foreground",
+          )}
+        >
           {state.ok ? "Done" : "Failed"}
         </span>
         {" — "}
@@ -3101,7 +3183,7 @@ function ActionConfirm({
           type="button"
           disabled={running}
           onClick={() => onConfirm(action)}
-          className="inline-flex h-6 items-center rounded-md border border-warning/40 bg-warning/15 px-2.5 text-[11px] font-semibold text-warning disabled:opacity-60"
+          className="inline-flex h-6 items-center rounded-md border border-warning/40 bg-warning/15 px-2.5 text-[11px] font-semibold text-warning-foreground disabled:opacity-60"
         >
           {running ? "Running…" : `Run ${ACTION_META[action].label.toLowerCase()}`}
         </button>
@@ -3198,7 +3280,9 @@ function WorkflowPanel({
             <span
               className={cn(
                 "inline-flex h-[18px] shrink-0 items-center rounded px-1.5 text-[10px] font-semibold",
-                w.trusted ? "bg-success/10 text-success" : "bg-warning/10 text-warning",
+                w.trusted
+                  ? "bg-success/10 text-success-foreground"
+                  : "bg-warning/10 text-warning-foreground",
               )}
             >
               {w.trusted ? "trusted" : "inert"}
@@ -3208,7 +3292,7 @@ function WorkflowPanel({
                 "inline-flex h-[18px] shrink-0 items-center rounded px-1.5 text-[10px] font-medium",
                 w.lock_status === "matches"
                   ? "bg-muted-foreground/10 text-muted-foreground"
-                  : "bg-destructive/10 text-destructive",
+                  : "bg-destructive/10 text-destructive-foreground",
               )}
             >
               {w.lock_status === "matches" ? "locked" : w.lock_status}
@@ -3252,9 +3336,9 @@ function WorkflowRunHistory({
         // Calm when fine: a completed run is just a green dot. Badges are
         // reserved for the states that ask something of the user.
         const badge = r.resumable
-          ? { label: "resumable", className: "bg-warning/10 text-warning" }
+          ? { label: "resumable", className: "bg-warning/10 text-warning-foreground" }
           : r.outcome === "failed"
-            ? { label: "failed", className: "bg-destructive/10 text-destructive" }
+            ? { label: "failed", className: "bg-destructive/10 text-destructive-foreground" }
             : null;
         return (
           <button
@@ -3365,7 +3449,7 @@ function WorkflowMonitorDialog({
             {pinned ? (
               <code className="font-mono text-[10px] text-muted-foreground">pinned {pinned}</code>
             ) : null}
-            <span className="inline-flex h-[17px] items-center rounded bg-success/10 px-1.5 text-[10px] font-semibold text-success">
+            <span className="inline-flex h-[17px] items-center rounded bg-success/10 px-1.5 text-[10px] font-semibold text-success-foreground">
               every step: locked run
             </span>
             {run ? (
@@ -3456,11 +3540,11 @@ function WorkflowMonitorDialog({
                               {s.child_run_id ? ` · ${s.child_run_id}` : ""}
                             </span>
                             {inputs ? (
-                              <span className="max-w-44 shrink-0 truncate text-[10px] text-warning/90">
+                              <span className="max-w-44 shrink-0 truncate text-[10px] text-warning-foreground/90">
                                 ⇠ {inputs}
                               </span>
                             ) : null}
-                            <span className="inline-flex h-4 shrink-0 items-center rounded bg-warning/10 px-1.5 text-[10px] font-semibold text-warning">
+                            <span className="inline-flex h-4 shrink-0 items-center rounded bg-warning/10 px-1.5 text-[10px] font-semibold text-warning-foreground">
                               {s.role}
                             </span>
                           </div>
@@ -3488,12 +3572,12 @@ function WorkflowMonitorDialog({
                               {s.child_run_id ? ` · ${s.child_run_id}` : ""}
                             </span>
                             {inputs ? (
-                              <span className="truncate text-[10px] text-warning/90">
+                              <span className="truncate text-[10px] text-warning-foreground/90">
                                 ⇠ {inputs}
                               </span>
                             ) : null}
                           </div>
-                          <span className="inline-flex h-4 shrink-0 items-center rounded bg-warning/10 px-1.5 text-[10px] font-semibold text-warning">
+                          <span className="inline-flex h-4 shrink-0 items-center rounded bg-warning/10 px-1.5 text-[10px] font-semibold text-warning-foreground">
                             {s.role}
                           </span>
                         </div>
@@ -3505,7 +3589,7 @@ function WorkflowMonitorDialog({
             })}
             {summary?.resumable ? (
               <div className="mt-1 flex flex-col gap-1 rounded-lg border border-warning/25 bg-warning/[0.07] px-2.5 py-2">
-                <span className="text-[11px] font-semibold text-warning">Resumable</span>
+                <span className="text-[11px] font-semibold text-warning-foreground">Resumable</span>
                 <span className="text-[11px] text-muted-foreground">
                   No terminal outcome was recorded. Journaled steps replay without re-executing:
                 </span>
@@ -3519,17 +3603,19 @@ function WorkflowMonitorDialog({
         <DialogFooter className="items-center gap-3 text-[11px] sm:justify-start">
           {counts ? (
             <span className="text-muted-foreground">
-              <span className="font-semibold text-success">{counts.done} done</span>
+              <span className="font-semibold text-success-foreground">{counts.done} done</span>
               {counts.running > 0 ? (
                 <>
                   {" · "}
-                  <span className="font-semibold text-warning">{counts.running} running</span>
+                  <span className="font-semibold text-warning-foreground">
+                    {counts.running} running
+                  </span>
                 </>
               ) : null}
             </span>
           ) : null}
           {run?.exhausted ? (
-            <span className="font-semibold text-warning">agent ceiling exhausted</span>
+            <span className="font-semibold text-warning-foreground">agent ceiling exhausted</span>
           ) : null}
           <span className="ml-auto text-muted-foreground/70">
             roles can only narrow · ceilings frozen at spawn
@@ -3552,7 +3638,7 @@ function WorkflowMonitor({ run }: { run: AgentstackWorkflowRun }) {
         {pinned ? (
           <code className="font-mono text-[10px] text-muted-foreground">{pinned}</code>
         ) : null}
-        <span className="ml-auto inline-flex h-[18px] items-center rounded bg-success/10 px-1.5 text-[10px] font-semibold text-success">
+        <span className="ml-auto inline-flex h-[18px] items-center rounded bg-success/10 px-1.5 text-[10px] font-semibold text-success-foreground">
           every step: locked run
         </span>
       </div>
@@ -3589,7 +3675,7 @@ function WorkflowMonitor({ run }: { run: AgentstackWorkflowRun }) {
                         {s.tool_calls ? ` · ${s.tool_calls} tool calls` : ""}
                       </span>
                     </div>
-                    <span className="inline-flex h-4 shrink-0 items-center rounded bg-warning/10 px-1.5 text-[10px] font-semibold text-warning">
+                    <span className="inline-flex h-4 shrink-0 items-center rounded bg-warning/10 px-1.5 text-[10px] font-semibold text-warning-foreground">
                       {s.role}
                     </span>
                   </div>
@@ -3601,8 +3687,8 @@ function WorkflowMonitor({ run }: { run: AgentstackWorkflowRun }) {
       </div>
       <div className="flex items-center gap-3 border-t border-border/60 bg-foreground/[0.02] px-3 py-2 text-[11px]">
         <span className="text-muted-foreground">
-          <span className="font-semibold text-success">{counts.done} done</span> ·{" "}
-          <span className="font-semibold text-warning">{counts.running} running</span>
+          <span className="font-semibold text-success-foreground">{counts.done} done</span> ·{" "}
+          <span className="font-semibold text-warning-foreground">{counts.running} running</span>
         </span>
         <span className="text-muted-foreground/70">
           roles can only narrow · ceilings frozen at spawn
@@ -3638,7 +3724,7 @@ function ActivityPanel({ activity }: { activity: AgentstackActivity | null }) {
           <span
             className={cn(
               "min-w-0 flex-1 truncate font-mono",
-              row.outcome === "denied" ? "text-warning" : "text-muted-foreground",
+              row.outcome === "denied" ? "text-warning-foreground" : "text-muted-foreground",
             )}
             title={row.label}
           >
@@ -3702,17 +3788,19 @@ function AdvancedNav({
 function SharePanel({ doctor }: { doctor: AgentstackStatus["doctor"] }) {
   const facts = deriveAgentstackShareFacts(doctor);
   return (
-    <div className="flex flex-col gap-3 px-4 py-3 text-xs">
-      <p className="text-[11px] leading-relaxed text-muted-foreground">
+    <div className="flex flex-col gap-3 px-4 py-3">
+      <p className="text-xs leading-relaxed text-muted-foreground">
         The manifest and <code className="font-mono">agentstack.lock</code> are the setup. Commit
         them and another machine reproduces it — each supplies its own secret values.
       </p>
 
-      <div className="flex flex-col gap-1 rounded-lg border border-border/50 bg-foreground/[0.02] px-2.5 py-2">
-        <p className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
+      {/* The guarantee gets a surface of its own: it is the question people
+          actually have, and it should not read as one more paragraph. */}
+      <div className="flex flex-col gap-1 rounded-lg border border-border/50 bg-muted/40 px-2.5 py-2">
+        <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
           What travels
         </p>
-        <p className="text-[11px] leading-relaxed text-muted-foreground">
+        <p className="text-xs leading-relaxed text-foreground/80">
           Server and skill definitions, instructions, settings, and{" "}
           {facts.secretRefs > 0 ? (
             <>
@@ -3724,63 +3812,52 @@ function SharePanel({ doctor }: { doctor: AgentstackStatus["doctor"] }) {
             <>
               any <code className="font-mono">{"${REF}"}</code> names — placeholders only.
             </>
-          )}{" "}
-          <span className="text-muted-foreground/70">
-            Secret values never enter the manifest, the lockfile, or this panel.
-          </span>
+          )}
+        </p>
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          Secret values never enter the manifest, the lockfile, or this panel.
         </p>
       </div>
 
-      <div className="flex flex-col gap-1">
-        <p className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
-          Pin it first
-        </p>
+      <PanelSection title="Pin it first">
         {facts.pinning ? (
           <div className="flex items-start gap-2">
             <span
               className={cn("mt-1 size-1.5 shrink-0 rounded-full", LEVEL_DOT[facts.pinning.level])}
             />
-            <span className="text-[11px] leading-relaxed text-muted-foreground">
-              {facts.pinning.msg}
-            </span>
+            <span className="text-xs leading-relaxed text-foreground/80">{facts.pinning.msg}</span>
           </div>
         ) : null}
-        <p className="text-[11px] leading-relaxed text-muted-foreground">
+        <p className="text-xs leading-relaxed text-muted-foreground">
           <code className="font-mono">lock</code> resolves every reference to exact bytes, so a
           teammate gets what you got — and a later change is visible instead of silent.
         </p>
         <CommandLine text="agentstack lock --write" />
-      </div>
+      </PanelSection>
 
-      <div className="flex flex-col gap-1">
-        <p className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
-          Across your own machines
-        </p>
-        <p className="text-[11px] leading-relaxed text-muted-foreground">
+      <PanelSection title="Across your own machines">
+        <p className="text-xs leading-relaxed text-muted-foreground">
           The central library travels as a git repo; server definitions keep their{" "}
           <code className="font-mono">{"${REF}"}</code> placeholders, so no secret leaves this
           machine.
         </p>
         <CommandLine text="agentstack lib sync" />
-      </div>
+      </PanelSection>
 
-      <div className="flex flex-col gap-1">
-        <p className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
-          To a teammate
-        </p>
-        <p className="text-[11px] leading-relaxed text-muted-foreground">
+      <PanelSection title="To a teammate">
+        <p className="text-xs leading-relaxed text-muted-foreground">
           Commit the manifest and lockfile. To let them verify the lockfile is yours, sign it and
           publish the printed public key; they verify before trusting.
         </p>
         <CommandLine text="agentstack sign" />
         <CommandLine text="agentstack verify --pubkey <key>" />
-        <p className="text-[10.5px] leading-relaxed text-muted-foreground/60">
+        <p className="text-[11px] leading-relaxed text-muted-foreground/70">
           Moving a whole machine instead? <code className="font-mono">agentstack export</code>{" "}
           writes an encrypted bundle and <code className="font-mono">agentstack import</code> reads
           it — the one path that can carry secret values, behind a passphrase you type in a
           terminal.
         </p>
-      </div>
+      </PanelSection>
     </div>
   );
 }
@@ -3833,7 +3910,7 @@ function ProtectionPanel({
             <button
               type="button"
               onClick={() => onRequestAction(row.action!)}
-              className="mt-0.5 shrink-0 rounded-md border border-warning/40 bg-warning/10 px-2 py-0.5 text-[10px] font-semibold text-warning transition-colors hover:bg-warning/20"
+              className="mt-0.5 shrink-0 rounded-md border border-warning/40 bg-warning/10 px-2 py-0.5 text-[10px] font-semibold text-warning-foreground transition-colors hover:bg-warning/20"
             >
               {ACTION_META[row.action].label}
             </button>
@@ -3853,7 +3930,7 @@ function ProtectionPanel({
               <div key={row.key} className="flex items-start gap-2.5">
                 <span className={cn("mt-1 size-1.5 shrink-0 rounded-full", LEVEL_DOT[row.level])} />
                 <div className="flex min-w-0 flex-col gap-0.5">
-                  <span className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
+                  <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
                     {row.title}
                   </span>
                   <span className="text-xs leading-relaxed text-muted-foreground">{row.msg}</span>

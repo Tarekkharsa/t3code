@@ -16,6 +16,7 @@ import {
   hasAgentstackFeature,
   matchAgentstackDenial,
   matchAgentstackNextAction,
+  partitionAgentstackOverviewRows,
   shortenAgentstackPath,
   shortenAgentstackPathsIn,
   selectAgentstackUndoEntry,
@@ -623,5 +624,37 @@ describe("deriveAgentstackShareFacts", () => {
   it("is empty and safe without a report or without those sections", () => {
     expect(deriveAgentstackShareFacts(null)).toEqual({ secretRefs: 0, pinning: null });
     expect(deriveAgentstackShareFacts(report([]))).toEqual({ secretRefs: 0, pinning: null });
+  });
+});
+
+describe("partitionAgentstackOverviewRows", () => {
+  const row = (over: Record<string, unknown>) =>
+    ({ key: "k", label: "L", summary: "s", level: "ok", ...over }) as never;
+
+  it("treats errors and warnings as problems", () => {
+    const { problems, healthy } = partitionAgentstackOverviewRows([
+      row({ key: "a", level: "error" }),
+      row({ key: "b", level: "warn" }),
+      row({ key: "c", level: "ok" }),
+    ]);
+    expect(problems.map((r) => r.key)).toEqual(["a", "b"]);
+    expect(healthy.map((r) => r.key)).toEqual(["c"]);
+  });
+
+  it("never collapses a row that has an affordance, even when it reads ok", () => {
+    const { problems, healthy } = partitionAgentstackOverviewRows([
+      row({ key: "drift", level: "ok", reviewDrift: true }),
+      row({ key: "act", level: "ok", action: "apply-project" }),
+      row({ key: "quiet", level: "ok" }),
+    ]);
+    expect(problems.map((r) => r.key)).toEqual(["drift", "act"]);
+    expect(healthy.map((r) => r.key)).toEqual(["quiet"]);
+  });
+
+  it("handles all-healthy and all-problem sets", () => {
+    expect(partitionAgentstackOverviewRows([]).problems).toHaveLength(0);
+    const allOk = partitionAgentstackOverviewRows([row({ key: "a" }), row({ key: "b" })]);
+    expect(allOk.problems).toHaveLength(0);
+    expect(allOk.healthy).toHaveLength(2);
   });
 });

@@ -893,3 +893,27 @@ export function deriveAgentstackShareFacts(
 function asRowLevel(level: string): AgentstackRowLevel {
   return level === "ok" || level === "warn" || level === "error" ? level : "muted";
 }
+
+/**
+ * Split overview rows into what needs the user and what is merely fine.
+ *
+ * The panel used to render all four rows at equal weight, so a healthy
+ * "Secrets" line competed with an error on "Checkup". Problems stay expanded;
+ * the healthy ones collapse to a single reassurance line, which is the
+ * progressive-disclosure rule the product states for every other surface.
+ */
+export function partitionAgentstackOverviewRows(rows: ReadonlyArray<AgentstackOverviewRow>): {
+  readonly problems: ReadonlyArray<AgentstackOverviewRow>;
+  readonly healthy: ReadonlyArray<AgentstackOverviewRow>;
+} {
+  const problems: AgentstackOverviewRow[] = [];
+  const healthy: AgentstackOverviewRow[] = [];
+  for (const row of rows) {
+    // A row with something to click is actionable even when its level reads
+    // "ok" — never collapse away an affordance.
+    const actionable = row.reviewDrift === true || row.action !== undefined;
+    if (row.level === "error" || row.level === "warn" || actionable) problems.push(row);
+    else healthy.push(row);
+  }
+  return { problems, healthy };
+}

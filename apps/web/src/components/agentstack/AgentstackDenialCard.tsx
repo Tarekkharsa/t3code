@@ -39,14 +39,16 @@ export function AgentstackDenialCard({
   return (
     <div className="my-1 overflow-hidden rounded-xl border border-warning/30 bg-warning/[0.05]">
       <div className="flex items-center gap-2 border-b border-warning/[0.18] px-3.5 py-2.5">
-        <AgentstackMark className="size-[15px] shrink-0 text-warning" />
-        <span className="font-semibold text-[13px] text-warning">Blocked by AgentStack Guard</span>
+        <AgentstackMark className="size-[15px] shrink-0 text-warning-foreground" />
+        <span className="font-semibold text-[13px] text-warning-foreground">
+          Blocked by AgentStack Guard
+        </span>
         {time ? (
           <span className="ml-auto font-mono text-[11px] text-muted-foreground/70">{time}</span>
         ) : null}
       </div>
       <div className="flex flex-col gap-2.5 px-3.5 py-3">
-        <code className="block break-all rounded-lg border border-black/30 bg-black/30 px-3 py-2 font-mono text-[12px] text-destructive">
+        <code className="block break-all rounded-lg border border-black/30 bg-black/30 px-3 py-2 font-mono text-[12px] text-destructive-foreground">
           {denial.target}
         </code>
         <p className="text-[12.5px] leading-relaxed text-muted-foreground">
