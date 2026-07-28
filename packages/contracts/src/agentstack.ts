@@ -722,9 +722,12 @@ export type AgentstackLibraryIndexInput = typeof AgentstackLibraryIndexInput.Typ
 // change AND the current manifest bytes; the apply presents it back with
 // `--yes --consented <digest>` and the CLI refuses on any drift before writing a
 // byte. The server maps each `kind` to a fixed argv (the client never supplies a
-// command line); `kind` is both the discriminator and the CLI verb name. Every
-// mutation runs manifest → re-lock → re-render and fails closed on an unresolved
-// `${REF}` (the manifest keeps the `${REF}`, never a value; the render blocks).
+// command line); `kind` is both the discriminator and the CLI verb name. The
+// `add-*` mutations run manifest → re-lock → re-render and fail closed on an
+// unresolved `${REF}` (the manifest keeps the `${REF}`, never a value; the
+// render blocks). `create-profile` stops after the re-lock and `remove-from-
+// library` touches no project state at all — neither renders, so neither
+// activates anything (see each edit's own doc below).
 
 /**
  * Enroll or define a skill in a toolset. `git` or `path` (mutually exclusive)
@@ -767,6 +770,14 @@ export type AgentstackAddServerEdit = typeof AgentstackAddServerEdit.Type;
 /**
  * Create a new toolset from existing/library skills and servers (bare names;
  * `*` is the inline-all-skills wildcard the CLI accepts). At least one member.
+ *
+ * Naming a toolset is NOT switching to it. On a CLI advertising
+ * `toolset-create-v2` this writes the `[profiles.<name>]` entry and re-locks,
+ * and renders nothing — the toolset is declared, no native config moved, and no
+ * `${REF}` was resolved. Activation is a separate verb (`session start`, which
+ * the panel offers as "Use temporarily"). A CLI advertising only
+ * `profiles-edit-v1` still re-renders on create, which is why the panel gates
+ * its "created, now activate it" copy on the newer name rather than assuming.
  */
 export const AgentstackCreateProfileEdit = Schema.Struct({
   kind: Schema.Literal("create-profile"),

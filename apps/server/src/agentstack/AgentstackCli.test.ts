@@ -523,8 +523,9 @@ describe("AgentstackCli", () => {
       }),
     ).not.toContain("--type");
 
-    // create-profile repeats --skill/--server per member and allows unresolved
-    // to pass through only when asked.
+    // create-profile repeats --skill/--server per member. `--allow-unresolved`
+    // is never emitted even when asked: creating a toolset renders nothing
+    // (`toolset-create-v2`), so there is no render for the flag to govern.
     expect(
       AgentstackCli.profileEditArgv(
         "/proj",
@@ -546,7 +547,27 @@ describe("AgentstackCli", () => {
       "--yes",
       "--consented",
       digest,
-      "--allow-unresolved",
+    ]);
+
+    // And the bare form is a --preview, never a bare `create-profile`: on a
+    // current CLI that argv exits nonzero with prose instead of the JSON
+    // consent envelope this flow parses.
+    expect(
+      AgentstackCli.profileEditArgv("/proj", {
+        kind: "create-profile",
+        name: "web",
+        skills: ["pdf"],
+        servers: [],
+      }),
+    ).toEqual([
+      "--manifest-dir",
+      "/proj",
+      "create-profile",
+      "--name",
+      "web",
+      "--skill",
+      "pdf",
+      "--preview",
     ]);
 
     // remove-from-library: machine-wide, so no --profile and no scope. `--kind`
@@ -587,6 +608,26 @@ describe("AgentstackCli", () => {
       "--consented",
       digest,
     ]);
+  });
+
+  it("never builds a bare edit argv — every verb is a --preview or a digest-bound apply", () => {
+    // The CLI answers a bare non-interactive `create-profile` with prose and a
+    // nonzero exit, not the JSON consent envelope, and the other verbs refuse
+    // outright. Nothing here may emit that form: a preview always carries
+    // --preview, an apply always carries --yes --consented <digest>.
+    const digest = `sha256:${"c".repeat(64)}`;
+    const edits: ReadonlyArray<Parameters<typeof AgentstackCli.profileEditArgv>[1]> = [
+      { kind: "add-skill-to-profile", profile: "web", name: "pdf" },
+      { kind: "add-server-to-profile", profile: "web", name: "github" },
+      { kind: "create-profile", name: "web", skills: ["pdf"], servers: [] },
+      { kind: "remove-from-library", group: "skill", name: "pdf" },
+    ];
+    for (const edit of edits) {
+      expect(AgentstackCli.profileEditArgv("/proj", edit)).toContain("--preview");
+      const applied = AgentstackCli.profileEditArgv("/proj", edit, { digest });
+      expect(applied).not.toContain("--preview");
+      expect(applied.slice(-3)).toEqual(["--yes", "--consented", digest]);
+    }
   });
 
   it("validateProfileEdit refuses malformed names and out-of-shape edits", () => {
