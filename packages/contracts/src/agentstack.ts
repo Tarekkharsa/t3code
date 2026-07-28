@@ -515,6 +515,14 @@ export type AgentstackSetupPlan = typeof AgentstackSetupPlan.Type;
 export const AgentstackSetupPlanResult = Schema.Struct({
   installed: Schema.Boolean,
   plan: Schema.NullOr(AgentstackSetupPlan),
+  /**
+   * The host's home directory, for display only. The CLI returns absolute
+   * paths because they are a machine contract and the plan digest is taken
+   * over exactly what it sent — so the payload is never rewritten. The panel
+   * uses this to render `~/…` instead of a repeated home prefix down a 360px
+   * column. Optional so an older server still decodes.
+   */
+  home: Schema.optionalKey(Schema.String),
   checkedAt: Schema.Number,
   ...AgentstackNegotiationFields,
 });

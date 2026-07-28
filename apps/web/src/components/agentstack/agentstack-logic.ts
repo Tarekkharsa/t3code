@@ -747,3 +747,149 @@ export function matchAgentstackDenial(entry: {
     ...(dimension ? { dimension } : {}),
   };
 }
+
+// ── path display ─────────────────────────────────────────────────────────────
+
+/**
+ * Shorten an absolute path for display in the panel's narrow column.
+ *
+ * The CLI's JSON reads return absolute paths on purpose — they are a machine
+ * contract, and the setup plan's digest is taken over exactly what it sent, so
+ * the payload itself is never rewritten. This is presentation only: inside the
+ * project we show the path relative to its root, and anywhere else under the
+ * user's home we collapse the prefix to `~`. A path outside both is returned
+ * unchanged, because the whole path is then the information.
+ *
+ * `root` wins over `home` so a project inside the home directory reads
+ * `.mcp.json` rather than `~/work/proj/.mcp.json`.
+ */
+export function shortenAgentstackPath(
+  value: string,
+  context: { root?: string | undefined; home?: string | undefined },
+): string {
+  if (!value) return value;
+  const root = stripTrailingSep(context.root);
+  if (root && value.startsWith(root + "/")) {
+    const rel = value.slice(root.length + 1);
+    return rel.length > 0 ? rel : value;
+  }
+  const home = stripTrailingSep(context.home);
+  if (home && value.startsWith(home + "/")) return "~/" + value.slice(home.length + 1);
+  return value;
+}
+
+function stripTrailingSep(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  return value.endsWith("/") && value.length > 1 ? value.slice(0, -1) : value;
+}
+
+/**
+ * The same shortening applied to every absolute path *inside* a longer string
+ * — a server's launch command, where the binary and its arguments are often
+ * several home-relative paths in a row. Only `/`-rooted runs of non-space
+ * characters are considered, so quoting and shell syntax survive untouched.
+ */
+export function shortenAgentstackPathsIn(
+  value: string,
+  context: { root?: string | undefined; home?: string | undefined },
+): string {
+  if (!value) return value;
+  return value.replace(/\/[^\s'"]+/g, (match) => shortenAgentstackPath(match, context));
+}
+
+// ── the recommended next action ──────────────────────────────────────────────
+
+/**
+ * Map doctor's `next_action` command to a fixed panel action, when the panel
+ * already exposes one that does exactly that.
+ *
+ * The panel used to print the recommended command as text you could not act
+ * on, while the button that runs it lived a level deeper under "More
+ * protection" — the one place we tell you what to do next was the one place
+ * you could not do it.
+ *
+ * Deliberately a whitelist keyed on the leading verb, not a parser: an
+ * unrecognized or flag-laden recommendation returns null and still renders as
+ * a command to run in a terminal. Matching is exact after whitespace
+ * collapsing, so `apply --write --scope global` does NOT silently become the
+ * project-scoped apply.
+ */
+export function matchAgentstackNextAction(
+  nextAction: string | null | undefined,
+): AgentstackActionKind | null {
+  if (!nextAction) return null;
+  const normalized = nextAction.trim().replace(/\s+/g, " ");
+  switch (normalized) {
+    case "agentstack guard install":
+      return "guard-install";
+    case "agentstack apply --write":
+      return "apply-project";
+    default:
+      return null;
+  }
+}
+
+// ── library filtering ────────────────────────────────────────────────────────
+
+/**
+ * Case-insensitive substring filter over a library group's name and detail.
+ *
+ * The browser lists every skill and server the machine knows about in a ~360px
+ * column; a library of any real size is unusable by scrolling alone. Matching
+ * the detail text too means "postgres" finds a server whose description
+ * mentions it but whose name does not. An empty or whitespace-only query
+ * returns the list unchanged rather than nothing.
+ */
+export function filterAgentstackLibraryItems<T extends { name: string; detail: string | null }>(
+  items: ReadonlyArray<T>,
+  query: string,
+): ReadonlyArray<T> {
+  const needle = query.trim().toLowerCase();
+  if (needle.length === 0) return items;
+  return items.filter(
+    (it) =>
+      it.name.toLowerCase().includes(needle) || (it.detail ?? "").toLowerCase().includes(needle),
+  );
+}
+
+// ── sharing (rung 5) ─────────────────────────────────────────────────────────
+
+export interface AgentstackShareFacts {
+  /** How many `${REF}` names the manifest carries — placeholders, never values. */
+  readonly secretRefs: number;
+  /** The reproducibility line as doctor reported it, when there is one. */
+  readonly pinning: { readonly level: AgentstackRowLevel; readonly msg: string } | null;
+}
+
+/**
+ * What the panel can honestly say about sharing this setup, read from the
+ * doctor report it already has.
+ *
+ * Sharing has no panel *actions*: committing, signing, syncing a library and
+ * exporting a bundle are all things the CLI owns, and two of them take a key
+ * or a passphrase that must never enter a browser payload. So this view
+ * explains what travels and hands over the exact commands — the same division
+ * the secret-blocked card already uses.
+ */
+export function deriveAgentstackShareFacts(
+  report: AgentstackDoctorReport | null,
+): AgentstackShareFacts {
+  if (!report) return { secretRefs: 0, pinning: null };
+  const secrets = sectionByTitle(report, "Secrets");
+  const repro = sectionByTitle(report, "Reproducibility");
+  const first = repro?.lines[0];
+  return {
+    secretRefs: secrets?.lines.length ?? 0,
+    pinning: first ? { level: asRowLevel(first.level), msg: first.msg } : null,
+  };
+}
+
+/**
+ * Narrow a doctor line's `level` to the closed set the panel styles by. The
+ * wire type is an open string so a newer CLI can add a level without breaking
+ * decode; anything unrecognized (today: `info`) renders muted rather than
+ * borrowing the colour of a state it is not.
+ */
+function asRowLevel(level: string): AgentstackRowLevel {
+  return level === "ok" || level === "warn" || level === "error" ? level : "muted";
+}

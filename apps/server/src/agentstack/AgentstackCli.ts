@@ -39,6 +39,7 @@ import * as Option from "effect/Option";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 
+import { hostHomeDir } from "../pathExpansion.ts";
 import * as ProcessRunner from "../processRunner.ts";
 
 const COMMAND_TIMEOUT = "15 seconds";
@@ -918,6 +919,9 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
       return {
         installed: result._tag !== "NotFound",
         plan,
+        // Display only — the plan payload stays exactly as the CLI sent it,
+        // because its digest is taken over those bytes.
+        home: hostHomeDir(),
         ...negotiate(plan),
         checkedAt: yield* Clock.currentTimeMillis,
       };

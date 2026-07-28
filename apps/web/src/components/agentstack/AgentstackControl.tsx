@@ -44,15 +44,20 @@ import {
   deriveAgentstackActivityRows,
   deriveAgentstackOverviewRows,
   deriveAgentstackPolicyRows,
+  deriveAgentstackShareFacts,
   deriveAgentstackProtectionRows,
   deriveAgentstackStatusChip,
   deriveAgentstackTrustBadge,
   deriveToolsetRows,
   deriveWorkflowCounts,
   deriveWorkflowStages,
+  filterAgentstackLibraryItems,
   hasAgentstackFeature,
+  matchAgentstackNextAction,
   selectAgentstackUndoEntry,
   shortDigest,
+  shortenAgentstackPath,
+  shortenAgentstackPathsIn,
   type AgentstackActionKind as ActionKind,
   type AgentstackOverviewRow,
   type AgentstackRowLevel,
@@ -118,7 +123,7 @@ const STEP_DOT: Record<string, string> = {
 /** Poll cadence while the popover is open; nothing polls while it's closed. */
 const REFRESH_MS = 5_000;
 
-type Tab = "overview" | "workflow" | "activity" | "policy";
+type Tab = "overview" | "workflow" | "activity" | "policy" | "share";
 
 /**
  * The advanced views behind the Overview (Stage 1.4): beginner navigation is
@@ -127,6 +132,7 @@ type Tab = "overview" | "workflow" | "activity" | "policy";
  * store compatibility — it renders as "More protection".
  */
 const ADVANCED_VIEWS: Record<Exclude<Tab, "overview">, { title: string; hint: string }> = {
+  share: { title: "Share this setup", hint: "what travels, and what never does" },
   policy: { title: "More protection", hint: "stronger modes, honest coverage" },
   activity: { title: "Activity", hint: "every brokered call, newest first" },
   workflow: { title: "Workflows", hint: "governed multi-agent runs" },
@@ -661,6 +667,7 @@ export function AgentstackControl({
                       onReviewDrift={() => setReviewingDrift(true)}
                       onConfirm={onAction}
                       onCancel={() => setActionState({ phase: "idle" })}
+                      onRecheck={refresh}
                     />
                     <AdvancedNav onOpen={setTab} workflowLive={activeRun !== null} />
                   </>
@@ -674,6 +681,8 @@ export function AgentstackControl({
                   />
                 ) : tab === "activity" ? (
                   <ActivityPanel activity={activity} />
+                ) : tab === "share" ? (
+                  <SharePanel doctor={status.doctor} />
                 ) : (
                   <ProtectionPanel
                     doctor={status.doctor}
@@ -768,6 +777,55 @@ function NotInstalled({ onRecheck }: { onRecheck: () => Promise<void> | void }) 
           Re-checks automatically every few seconds, too.
         </span>
       </div>
+    </div>
+  );
+}
+
+/**
+ * `doctor` ran but its report could not be read — most often a transient race
+ * with a write agentstack itself is making (setup, apply, a toolset switch),
+ * where the read lands mid-write and comes back empty.
+ *
+ * The state used to be a bare sentence, which made a passing glitch look like
+ * a dead end at the exact moment a first setup had just succeeded. It now says
+ * what it is and offers the same recheck affordance as the not-installed
+ * state, so the user is never stranded by one failed read.
+ */
+function DoctorUnreadable({ onRecheck }: { onRecheck: () => Promise<void> | void }) {
+  const [rechecking, setRechecking] = useState(false);
+  const recheck = async () => {
+    setRechecking(true);
+    try {
+      await onRecheck();
+    } finally {
+      setRechecking(false);
+    }
+  };
+  return (
+    <div className="flex flex-col gap-3 px-4 py-4 text-xs leading-relaxed text-muted-foreground">
+      <p className="text-[12.5px] font-semibold text-foreground">Couldn't read the status</p>
+      <p>
+        agentstack is installed, but <code className="font-mono">doctor</code> returned no readable
+        report for this project. That is usually momentary — a status read that landed while
+        agentstack was writing. Any change you just made has still been applied.
+      </p>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          disabled={rechecking}
+          onClick={() => void recheck()}
+          className="inline-flex h-7 items-center rounded-lg border border-border/60 px-3 text-xs font-semibold text-muted-foreground hover:text-foreground disabled:opacity-60"
+        >
+          {rechecking ? "Checking…" : "Check again"}
+        </button>
+        <span className="text-[10.5px] text-muted-foreground/60">
+          Re-checks automatically every few seconds, too.
+        </span>
+      </div>
+      <p className="text-[10.5px] text-muted-foreground/60">
+        If it persists, <code className="font-mono">agentstack doctor</code> in a terminal shows the
+        underlying error.
+      </p>
     </div>
   );
 }
@@ -1385,6 +1443,7 @@ function OverviewPanel({
   onReviewDrift,
   onConfirm,
   onCancel,
+  onRecheck,
 }: {
   rows: AgentstackOverviewRow[];
   doctorAvailable: boolean;
@@ -1406,18 +1465,19 @@ function OverviewPanel({
   onReviewDrift: () => void;
   onConfirm: (a: ActionKind) => void;
   onCancel: () => void;
+  onRecheck: () => Promise<void> | void;
 }) {
-  if (!doctorAvailable) {
-    return (
-      <p className="px-4 py-4 text-xs text-muted-foreground">
-        agentstack is installed, but <code className="font-mono">doctor</code> produced no readable
-        report for this project.
-      </p>
-    );
-  }
+  if (!doctorAvailable) return <DoctorUnreadable onRecheck={onRecheck} />;
   return (
     <div className="flex flex-col p-1.5">
-      {chip ? <StatusSummary chip={chip} nextAction={nextAction} advisories={advisories} /> : null}
+      {chip ? (
+        <StatusSummary
+          chip={chip}
+          nextAction={nextAction}
+          advisories={advisories}
+          onRunNextAction={onRequestAction}
+        />
+      ) : null}
       {rows.map((row) => (
         <div key={row.key} className="flex items-center gap-2.5 rounded-lg px-2.5 py-[7px]">
           <span className={cn("size-1.5 shrink-0 rounded-full", LEVEL_DOT[row.level])} />
@@ -1434,7 +1494,7 @@ function OverviewPanel({
             <button
               type="button"
               onClick={onReviewDrift}
-              className="shrink-0 rounded-md border border-warning/40 bg-warning/10 px-2 py-0.5 text-[10px] font-semibold text-warning transition-colors hover:bg-warning/20"
+              className="shrink-0 rounded-md border border-border/60 px-2 py-0.5 text-[10px] font-semibold text-foreground/85 transition-colors hover:border-warning/40 hover:bg-warning/10 hover:text-warning"
             >
               Review drift
             </button>
@@ -1442,7 +1502,7 @@ function OverviewPanel({
             <button
               type="button"
               onClick={() => onRequestAction(row.action!)}
-              className="shrink-0 rounded-md border border-warning/40 bg-warning/10 px-2 py-0.5 text-[10px] font-semibold text-warning transition-colors hover:bg-warning/20"
+              className="shrink-0 rounded-md border border-border/60 px-2 py-0.5 text-[10px] font-semibold text-foreground/85 transition-colors hover:border-warning/40 hover:bg-warning/10 hover:text-warning"
             >
               {ACTION_META[row.action].label}
             </button>
@@ -1484,12 +1544,21 @@ export function StatusSummary({
   chip,
   nextAction,
   advisories,
+  onRunNextAction,
 }: {
   chip: NonNullable<ReturnType<typeof deriveAgentstackStatusChip>>;
   nextAction: string | null;
   /** Null when the CLI doesn't advertise `doctor-advisories-v1`, or none exist. */
   advisories: number | null;
+  /**
+   * Run the recommendation, when it is one of the fixed actions this panel
+   * already exposes. Omitted by callers that only display status. The command
+   * text stays on screen either way — the button is an extra affordance, not a
+   * replacement for saying what will run.
+   */
+  onRunNextAction?: ((action: ActionKind) => void) | undefined;
 }) {
+  const runnable = matchAgentstackNextAction(nextAction);
   return (
     <div className="mx-1 mb-1.5 flex flex-col gap-1.5 rounded-lg border border-border/50 bg-foreground/[0.02] px-2.5 py-2">
       <div className="flex items-center gap-2">
@@ -1523,9 +1592,18 @@ export function StatusSummary({
           <span className="shrink-0 text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
             Next
           </span>
-          <code className="min-w-0 break-all font-mono text-[11px] text-muted-foreground">
+          <code className="min-w-0 wrap-break-word font-mono text-[11px] text-muted-foreground">
             {nextAction}
           </code>
+          {runnable && onRunNextAction ? (
+            <button
+              type="button"
+              onClick={() => onRunNextAction(runnable)}
+              className="ml-auto inline-flex h-[22px] shrink-0 items-center rounded-md border border-accent/40 px-2 text-[11px] font-semibold text-accent hover:bg-accent/10"
+            >
+              {ACTION_META[runnable].label}
+            </button>
+          ) : null}
         </div>
       ) : null}
     </div>
@@ -1810,6 +1888,7 @@ function LibraryPanel({
 }) {
   const [load, setLoad] = useState<LibLoad>({ phase: "loading" });
   const [view, setView] = useState<LibView>({ kind: "browse" });
+  const [query, setQuery] = useState("");
   const [flow, setFlow] = useState<EditFlow>({ phase: "idle" });
   // New-toolset draft (only used in the "new" view).
   const [draftName, setDraftName] = useState("");
@@ -2023,15 +2102,32 @@ function LibraryPanel({
             </button>
           </div>
 
+          {/* A library of any real size is unscrollable in a 360px column. */}
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Filter skills and servers…"
+            aria-label="Filter the library"
+            className="h-7 w-full rounded-lg border border-border/60 bg-background px-2.5 text-[11px] text-foreground placeholder:text-muted-foreground/60"
+          />
+
           <LibraryBrowseGroup
             title="Skills"
-            emptyLabel="No skills in the library yet."
-            items={index.skills.map((s) => ({
-              name: s.name,
-              origin: s.origin,
-              detail: s.description,
-              inManifest: s.in_manifest,
-            }))}
+            emptyLabel={
+              query.trim().length > 0
+                ? "No skills match that filter."
+                : "No skills in the library yet."
+            }
+            items={filterAgentstackLibraryItems(
+              index.skills.map((s) => ({
+                name: s.name,
+                origin: s.origin,
+                detail: s.description,
+                inManifest: s.in_manifest,
+              })),
+              query,
+            )}
             hasToolsets={profiles.length > 0}
             onAdd={(name) => setView({ kind: "pick-target", group: "skill", name })}
             onRemove={
@@ -2042,13 +2138,20 @@ function LibraryPanel({
           />
           <LibraryBrowseGroup
             title="Servers"
-            emptyLabel="No servers in the library yet."
-            items={index.servers.map((s) => ({
-              name: s.name,
-              origin: s.origin,
-              detail: s.provenance ?? null,
-              inManifest: s.in_manifest,
-            }))}
+            emptyLabel={
+              query.trim().length > 0
+                ? "No servers match that filter."
+                : "No servers in the library yet."
+            }
+            items={filterAgentstackLibraryItems(
+              index.servers.map((s) => ({
+                name: s.name,
+                origin: s.origin,
+                detail: s.provenance ?? null,
+                inManifest: s.in_manifest,
+              })),
+              query,
+            )}
             hasToolsets={profiles.length > 0}
             onAdd={(name) => setView({ kind: "pick-target", group: "server", name })}
             onRemove={
@@ -2104,7 +2207,7 @@ function LibraryBrowseGroup({
           {items.map((it) => (
             <div
               key={`${it.origin}:${it.name}`}
-              className="flex items-center gap-2 rounded-lg px-1.5 py-[6px]"
+              className="group flex items-center gap-2 rounded-lg px-1.5 py-[6px] hover:bg-foreground/[0.03]"
             >
               <span className="size-1.5 shrink-0 rounded-full bg-muted-foreground/40" />
               <div className="flex min-w-0 flex-1 flex-col">
@@ -2117,7 +2220,10 @@ function LibraryBrowseGroup({
                   ) : null}
                 </span>
                 {it.detail ? (
-                  <span className="truncate text-[10.5px] text-muted-foreground" title={it.detail}>
+                  <span
+                    className="line-clamp-2 text-[10.5px] leading-snug text-muted-foreground"
+                    title={it.detail}
+                  >
                     {it.detail}
                   </span>
                 ) : null}
@@ -2136,12 +2242,21 @@ function LibraryBrowseGroup({
                 Add
               </button>
               {onRemove !== null && it.origin === "library" ? (
+                // `Add` enrolls this capability in a toolset for THIS project;
+                // `Remove` deletes it from the machine-wide library, for every
+                // project. Two very different blast radii, so they no longer
+                // sit side by side as equals: the destructive one appears on
+                // row hover or keyboard focus and carries destructive colour
+                // the moment it is visible. (The click still opens the
+                // digest-bound confirm — this is about not offering a
+                // machine-wide delete as a permanent neighbour of a
+                // project-scoped add.)
                 <button
                   type="button"
                   onClick={() => onRemove(it.name)}
                   title="Remove from your library (all projects) — recoverable"
                   aria-label={`Remove ${it.name} from your library`}
-                  className="shrink-0 rounded-md border border-transparent px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground/70 transition-colors hover:border-destructive/30 hover:bg-destructive/10 hover:text-destructive"
+                  className="shrink-0 rounded-md border border-transparent px-1.5 py-0.5 text-[10px] font-semibold text-destructive/80 opacity-0 transition-all hover:border-destructive/30 hover:bg-destructive/10 hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100"
                 >
                   Remove
                 </button>
@@ -2486,7 +2601,7 @@ function UndoAffordance({
         <button
           type="button"
           onClick={() => void reveal()}
-          className="self-start text-[11px] font-semibold text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+          className="inline-flex h-7 items-center self-start rounded-lg border border-border/60 px-2.5 text-[11px] font-semibold text-foreground/90 transition-colors hover:border-border hover:bg-foreground/[0.04] hover:text-foreground"
         >
           Undo last change…
         </button>
@@ -2584,7 +2699,7 @@ function UpdateNeeded({
 
 type SetupLoad =
   | { phase: "loading" }
-  | { phase: "loaded"; plan: AgentstackSetupPlan }
+  | { phase: "loaded"; plan: AgentstackSetupPlan; home?: string | undefined }
   | { phase: "error" };
 
 type SetupAct =
@@ -2663,7 +2778,11 @@ function SetupPanel({
     setReloading(true);
     void loadPlan(secretsChoice).then((result) => {
       if (!alive) return;
-      setLoad(result?.plan ? { phase: "loaded", plan: result.plan } : { phase: "error" });
+      setLoad(
+        result?.plan
+          ? { phase: "loaded", plan: result.plan, home: result.home }
+          : { phase: "error" },
+      );
       setReloading(false);
     });
     return () => {
@@ -2680,6 +2799,13 @@ function SetupPanel({
   };
 
   const plan = load.phase === "loaded" ? load.plan : null;
+  // Display context for the path lists below: inside the project we show a
+  // relative path, elsewhere under home we show `~/…`. Never applied to the
+  // payload itself — the plan digest is taken over what the CLI sent.
+  const paths = {
+    root: plan?.path,
+    home: load.phase === "loaded" ? load.home : undefined,
+  };
   const planDigest = plan?.plan_digest ?? null;
   // The genuine "can't set up from here" cases — no apply feature, or a plan
   // with no digest to bind — as opposed to a transient re-read. Drives the
@@ -2725,8 +2851,8 @@ function SetupPanel({
               <li key={d.id}>
                 <span className="font-semibold text-foreground">{d.display}</span>{" "}
                 {(d.configs?.length ?? 0) > 0 ? (
-                  <code className="break-all font-mono text-muted-foreground/90">
-                    {d.configs?.join(" · ")}
+                  <code className="wrap-break-word font-mono text-muted-foreground/90">
+                    {d.configs?.map((c) => shortenAgentstackPath(c, paths)).join(" · ")}
                   </code>
                 ) : (
                   <span className="text-muted-foreground/70">
@@ -2752,7 +2878,9 @@ function SetupPanel({
                 <span className="text-muted-foreground">
                   {s.kind === "stdio" ? "runs" : "contacts"}
                 </span>{" "}
-                <code className="break-all font-mono text-muted-foreground/90">{s.target}</code>
+                <code className="wrap-break-word font-mono text-muted-foreground/90">
+                  {shortenAgentstackPathsIn(s.target, paths)}
+                </code>
               </li>
             ))}
             {settingsFrom.length > 0 ? (
@@ -2770,14 +2898,16 @@ function SetupPanel({
       <SetupGroup title="Files AgentStack will manage">
         <ul className="flex flex-col gap-0.5 text-[11px] leading-relaxed">
           <li>
-            <code className="break-all font-mono text-muted-foreground/90">
-              {plan.manifest_path}
+            <code className="wrap-break-word font-mono text-muted-foreground/90">
+              {shortenAgentstackPath(plan.manifest_path, paths)}
             </code>{" "}
             <span className="text-muted-foreground/70">— the manifest, written by setup</span>
           </li>
           {(plan.destinations ?? []).map((d) => (
             <li key={`${d.id}:${d.path}`}>
-              <code className="break-all font-mono text-muted-foreground/90">{d.path}</code>{" "}
+              <code className="wrap-break-word font-mono text-muted-foreground/90">
+                {shortenAgentstackPath(d.path, paths)}
+              </code>{" "}
               <span className="text-muted-foreground/70">
                 — {d.display} · {d.writes.join(" + ")} (
                 {d.scope === "project" ? "this project" : "machine-wide"})
@@ -3552,6 +3682,105 @@ function AdvancedNav({
           <span className="text-[11px] text-muted-foreground/50">→</span>
         </button>
       ))}
+    </div>
+  );
+}
+
+/**
+ * "Share this setup" — rung 5 of the product's ladder, which the panel had no
+ * surface for at all: you could unify, switch, diagnose, recover and govern
+ * here, but nothing told you how to get the same setup onto a second machine
+ * or to a teammate.
+ *
+ * Read-only by design. Committing, signing, syncing a library and exporting a
+ * bundle are CLI-owned, and two of them take a signing key or a passphrase
+ * that must never enter a browser payload — so this explains what travels and
+ * hands over the exact command, the same division the secret-blocked card
+ * uses. It states the guarantee (references travel, values do not) before the
+ * mechanics, because that is the question people actually have.
+ */
+function SharePanel({ doctor }: { doctor: AgentstackStatus["doctor"] }) {
+  const facts = deriveAgentstackShareFacts(doctor);
+  return (
+    <div className="flex flex-col gap-3 px-4 py-3 text-xs">
+      <p className="text-[11px] leading-relaxed text-muted-foreground">
+        The manifest and <code className="font-mono">agentstack.lock</code> are the setup. Commit
+        them and another machine reproduces it — each supplies its own secret values.
+      </p>
+
+      <div className="flex flex-col gap-1 rounded-lg border border-border/50 bg-foreground/[0.02] px-2.5 py-2">
+        <p className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
+          What travels
+        </p>
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          Server and skill definitions, instructions, settings, and{" "}
+          {facts.secretRefs > 0 ? (
+            <>
+              the <span className="font-semibold text-foreground">{facts.secretRefs}</span> secret{" "}
+              {facts.secretRefs === 1 ? "reference" : "references"} this project uses — as{" "}
+              <code className="font-mono">{"${REF}"}</code> names only.
+            </>
+          ) : (
+            <>
+              any <code className="font-mono">{"${REF}"}</code> names — placeholders only.
+            </>
+          )}{" "}
+          <span className="text-muted-foreground/70">
+            Secret values never enter the manifest, the lockfile, or this panel.
+          </span>
+        </p>
+      </div>
+
+      <div className="flex flex-col gap-1">
+        <p className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
+          Pin it first
+        </p>
+        {facts.pinning ? (
+          <div className="flex items-start gap-2">
+            <span
+              className={cn("mt-1 size-1.5 shrink-0 rounded-full", LEVEL_DOT[facts.pinning.level])}
+            />
+            <span className="text-[11px] leading-relaxed text-muted-foreground">
+              {facts.pinning.msg}
+            </span>
+          </div>
+        ) : null}
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          <code className="font-mono">lock</code> resolves every reference to exact bytes, so a
+          teammate gets what you got — and a later change is visible instead of silent.
+        </p>
+        <CommandLine text="agentstack lock --write" />
+      </div>
+
+      <div className="flex flex-col gap-1">
+        <p className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
+          Across your own machines
+        </p>
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          The central library travels as a git repo; server definitions keep their{" "}
+          <code className="font-mono">{"${REF}"}</code> placeholders, so no secret leaves this
+          machine.
+        </p>
+        <CommandLine text="agentstack lib sync" />
+      </div>
+
+      <div className="flex flex-col gap-1">
+        <p className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground/60">
+          To a teammate
+        </p>
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          Commit the manifest and lockfile. To let them verify the lockfile is yours, sign it and
+          publish the printed public key; they verify before trusting.
+        </p>
+        <CommandLine text="agentstack sign" />
+        <CommandLine text="agentstack verify --pubkey <key>" />
+        <p className="text-[10.5px] leading-relaxed text-muted-foreground/60">
+          Moving a whole machine instead? <code className="font-mono">agentstack export</code>{" "}
+          writes an encrypted bundle and <code className="font-mono">agentstack import</code> reads
+          it — the one path that can carry secret values, behind a passphrase you type in a
+          terminal.
+        </p>
+      </div>
     </div>
   );
 }

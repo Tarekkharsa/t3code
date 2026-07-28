@@ -7,12 +7,17 @@ import {
   deriveAgentstackPolicyRows,
   deriveAgentstackProtectionRows,
   deriveAgentstackStatusChip,
+  deriveAgentstackShareFacts,
   deriveAgentstackTrustBadge,
   deriveToolsetRows,
   deriveWorkflowCounts,
   deriveWorkflowStages,
+  filterAgentstackLibraryItems,
   hasAgentstackFeature,
   matchAgentstackDenial,
+  matchAgentstackNextAction,
+  shortenAgentstackPath,
+  shortenAgentstackPathsIn,
   selectAgentstackUndoEntry,
   shortDigest,
   type AgentstackDoctorReport,
@@ -465,5 +470,158 @@ describe("deriveToolsetRows", () => {
     const rows = deriveToolsetRows([{ ...dev, active: true }, stale], "trusted");
     expect(rows[0]!.active).toBe(true);
     expect(rows[1]!.active).toBe(false);
+  });
+});
+
+describe("shortenAgentstackPath", () => {
+  const ctx = { root: "/Users/ada/proj", home: "/Users/ada" };
+
+  it("makes a path inside the project relative to its root", () => {
+    expect(shortenAgentstackPath("/Users/ada/proj/.mcp.json", ctx)).toBe(".mcp.json");
+    expect(shortenAgentstackPath("/Users/ada/proj/.codex/config.toml", ctx)).toBe(
+      ".codex/config.toml",
+    );
+  });
+
+  it("prefers the project root over home for a project inside home", () => {
+    expect(shortenAgentstackPath("/Users/ada/proj/a.json", ctx)).toBe("a.json");
+  });
+
+  it("collapses home for a path outside the project", () => {
+    expect(shortenAgentstackPath("/Users/ada/.claude.json", ctx)).toBe("~/.claude.json");
+  });
+
+  it("leaves a path outside both untouched — the whole path is the information", () => {
+    expect(shortenAgentstackPath("/opt/homebrew/bin/node", ctx)).toBe("/opt/homebrew/bin/node");
+  });
+
+  it("never returns an empty string for the root itself", () => {
+    expect(shortenAgentstackPath("/Users/ada/proj", ctx)).toBe("~/proj");
+  });
+
+  it("tolerates a trailing separator and a missing context", () => {
+    expect(shortenAgentstackPath("/Users/ada/proj/x", { root: "/Users/ada/proj/" })).toBe("x");
+    expect(shortenAgentstackPath("/Users/ada/x", {})).toBe("/Users/ada/x");
+  });
+
+  it("does not shorten a sibling directory that merely shares a prefix", () => {
+    expect(shortenAgentstackPath("/Users/ada/proj-other/x", ctx)).toBe("~/proj-other/x");
+  });
+});
+
+describe("shortenAgentstackPathsIn", () => {
+  const ctx = { root: "/Users/ada/proj", home: "/Users/ada" };
+
+  it("shortens every absolute path inside a launch command", () => {
+    expect(
+      shortenAgentstackPathsIn("/Users/ada/.nvm/bin/node /Users/ada/proj/dist/index.js", ctx),
+    ).toBe("~/.nvm/bin/node dist/index.js");
+  });
+
+  it("leaves quoting and shell syntax alone", () => {
+    expect(shortenAgentstackPathsIn("sh -c cd '/Users/ada/x' && exec node", ctx)).toBe(
+      "sh -c cd '~/x' && exec node",
+    );
+  });
+
+  it("leaves a bare launcher and its flags untouched", () => {
+    expect(shortenAgentstackPathsIn("npx -y chrome-devtools-mcp@latest", ctx)).toBe(
+      "npx -y chrome-devtools-mcp@latest",
+    );
+  });
+
+  it("does not mangle a URL", () => {
+    expect(shortenAgentstackPathsIn("https://mcp.figma.com/mcp", ctx)).toBe(
+      "https://mcp.figma.com/mcp",
+    );
+  });
+});
+
+describe("matchAgentstackNextAction", () => {
+  it("maps the recommendations the panel can actually run", () => {
+    expect(matchAgentstackNextAction("agentstack guard install")).toBe("guard-install");
+    expect(matchAgentstackNextAction("agentstack apply --write")).toBe("apply-project");
+  });
+
+  it("tolerates surrounding and repeated whitespace", () => {
+    expect(matchAgentstackNextAction("  agentstack   guard  install ")).toBe("guard-install");
+  });
+
+  it("refuses to widen scope — a global apply is not the project apply", () => {
+    expect(matchAgentstackNextAction("agentstack apply --write --scope global")).toBeNull();
+  });
+
+  it("returns null for anything it does not exactly recognize", () => {
+    expect(matchAgentstackNextAction("agentstack trust .")).toBeNull();
+    expect(matchAgentstackNextAction("agentstack secret set GH_PAT")).toBeNull();
+    expect(matchAgentstackNextAction("agentstack apply")).toBeNull();
+    expect(matchAgentstackNextAction(null)).toBeNull();
+    expect(matchAgentstackNextAction("")).toBeNull();
+  });
+});
+
+describe("filterAgentstackLibraryItems", () => {
+  const items = [
+    { name: "pg-tools", detail: "Postgres helpers" },
+    { name: "rust-testing", detail: "Rust testing patterns" },
+    { name: "figma", detail: null },
+  ];
+
+  it("returns everything for an empty or whitespace query", () => {
+    expect(filterAgentstackLibraryItems(items, "")).toHaveLength(3);
+    expect(filterAgentstackLibraryItems(items, "   ")).toHaveLength(3);
+  });
+
+  it("matches on name, case-insensitively", () => {
+    expect(filterAgentstackLibraryItems(items, "RUST").map((i) => i.name)).toEqual([
+      "rust-testing",
+    ]);
+  });
+
+  it("matches on detail, so a description finds what the name does not", () => {
+    expect(filterAgentstackLibraryItems(items, "postgres").map((i) => i.name)).toEqual([
+      "pg-tools",
+    ]);
+  });
+
+  it("tolerates a null detail", () => {
+    expect(filterAgentstackLibraryItems(items, "figma").map((i) => i.name)).toEqual(["figma"]);
+  });
+
+  it("returns nothing when nothing matches", () => {
+    expect(filterAgentstackLibraryItems(items, "kubernetes")).toHaveLength(0);
+  });
+});
+
+describe("deriveAgentstackShareFacts", () => {
+  const report = (
+    sections: Array<{ title: string; lines: Array<{ level: string; msg: string }> }>,
+  ) => ({ sections }) as never;
+
+  it("counts the secret references that travel as placeholders", () => {
+    const facts = deriveAgentstackShareFacts(
+      report([
+        {
+          title: "Secrets",
+          lines: [
+            { level: "ok", msg: "A resolved from keychain" },
+            { level: "ok", msg: "B resolved from keychain" },
+          ],
+        },
+      ]),
+    );
+    expect(facts.secretRefs).toBe(2);
+  });
+
+  it("surfaces the reproducibility line as doctor reported it", () => {
+    const facts = deriveAgentstackShareFacts(
+      report([{ title: "Reproducibility", lines: [{ level: "warn", msg: "1 skill drifted" }] }]),
+    );
+    expect(facts.pinning).toEqual({ level: "warn", msg: "1 skill drifted" });
+  });
+
+  it("is empty and safe without a report or without those sections", () => {
+    expect(deriveAgentstackShareFacts(null)).toEqual({ secretRefs: 0, pinning: null });
+    expect(deriveAgentstackShareFacts(report([]))).toEqual({ secretRefs: 0, pinning: null });
   });
 });
