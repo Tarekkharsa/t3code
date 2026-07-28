@@ -12,6 +12,10 @@ export default defineConfig({
     environment: "node",
     exclude: [
       "**/.repos/**",
+      // Agent worktrees are full checkouts living inside the repo. Without
+      // this, a path-scoped run collects their (often stale) test files and
+      // reports failures that have nothing to do with the working tree.
+      "**/.claude/worktrees/**",
       "**/node_modules/**",
       "**/dist/**",
       "**/dist-electron/**",
