@@ -1,4 +1,5 @@
 import type {
+  AgentstackActiveSession,
   AgentstackActivity,
   AgentstackDiffReport,
   AgentstackDiffResult,
@@ -13,6 +14,7 @@ import type {
   AgentstackSetupPlan,
   AgentstackSetupPlanResult,
   AgentstackStatus,
+  AgentstackToolset,
   AgentstackToolsetsResult,
   AgentstackTrustPreviewResult,
   AgentstackWorkflowData,
@@ -24,11 +26,11 @@ import type {
 } from "@t3tools/contracts";
 import { Fragment, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 
-import { useAgentstackPanelStore } from "~/agentstackPanelStore";
+import { useAgentstackPanelStore, type AgentstackPanelTab } from "~/agentstackPanelStore";
+import { useRightPanelStore } from "~/rightPanelStore";
 import { agentstackEnvironment } from "~/state/agentstack";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { cn } from "~/lib/utils";
-import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import {
   Dialog,
@@ -42,6 +44,7 @@ import {
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { AgentstackMark } from "./AgentstackMark";
 import {
+  AGENTSTACK_ACTION_META as ACTION_META,
   agentstackFeatureKnownMissing,
   deriveAgentstackActivityRows,
   deriveAgentstackFindings,
@@ -61,6 +64,7 @@ import {
   matchAgentstackNextAction,
   partitionAgentstackOverviewRows,
   selectAgentstackFindingsView,
+  selectAgentstackPrimaryConcern,
   selectAgentstackUndoEntry,
   shortDigest,
   shortenAgentstackPath,
@@ -69,8 +73,9 @@ import {
   type AgentstackActionKind as ActionKind,
   type AgentstackFinding,
   type AgentstackOverviewRow,
+  type AgentstackPrimaryConcern,
   type AgentstackRowLevel,
-  type AgentstackTrustState,
+  type AgentstackToolsetRow,
 } from "./agentstack-logic";
 
 /** End-to-end contract names the CLI advertises in its read envelope. */
@@ -111,18 +116,6 @@ const OUTCOME_DOT: Record<"ok" | "error" | "denied", string> = {
   error: "bg-destructive",
 };
 
-/** Trust state → a shared Badge variant, so the pill matches every other
- *  status pill in the app instead of hand-rolling its own colour pairing. */
-const TRUST_BADGE: Record<
-  AgentstackTrustState,
-  { dot: string; variant: "success" | "warning" | "error" } | null
-> = {
-  trusted: { dot: "bg-success", variant: "success" },
-  inert: { dot: "bg-warning", variant: "warning" },
-  drifted: { dot: "bg-destructive", variant: "error" },
-  unknown: null,
-};
-
 /**
  * Text colour paired with LEVEL_DOT.
  *
@@ -149,23 +142,47 @@ const STEP_DOT: Record<string, string> = {
   interrupted: "bg-warning",
 };
 
-/** Poll cadence while the popover is open; nothing polls while it's closed. */
-const REFRESH_MS = 5_000;
-
-type Tab = "overview" | "workflow" | "activity" | "policy" | "share";
+/**
+ * Poll cadence while a workflow run is being watched. Nothing polls while
+ * every AgentStack surface is closed.
+ */
+const LIVE_REFRESH_MS = 5_000;
 
 /**
- * The advanced views behind the Overview (Stage 1.4): beginner navigation is
- * the four jobs on the Overview itself (Setup / Toolset / Status / Undo);
- * these open one level deeper with a back row. The `policy` id is kept for
- * store compatibility — it renders as "More protection".
+ * Poll cadence when nothing is moving.
+ *
+ * Each refresh spawns FOUR `agentstack` processes, and `doctor` resolves every
+ * `${REF}` the manifest names on every run — it reads the actual value out of
+ * the OS keychain purely to print which layer it came from. On macOS each such
+ * read is an ACL check, so a project with two keychain-backed secrets was
+ * generating twenty-four keychain reads a minute for a panel sitting idle
+ * behind a dialog. Whenever the binary's identity changes (any rebuild voids
+ * the "Always Allow" grant, which is keyed to the code signature) that turns
+ * into a password prompt storm.
+ *
+ * Nothing on these surfaces except a live run changes second to second — drift
+ * and findings are the product of edits the user just made, and every write the
+ * panel performs refreshes explicitly. So the idle cadence is a heartbeat, and
+ * `LIVE_REFRESH_MS` applies only while a run is actually being watched.
  */
-const ADVANCED_VIEWS: Record<Exclude<Tab, "overview">, { title: string; hint: string }> = {
-  share: { title: "Share this setup", hint: "what travels, and what never does" },
-  policy: { title: "More protection", hint: "stronger modes, honest coverage" },
-  activity: { title: "Activity", hint: "every brokered call, newest first" },
-  workflow: { title: "Workflows", hint: "governed multi-agent runs" },
-};
+const IDLE_REFRESH_MS = 30_000;
+
+type Tab = AgentstackPanelTab;
+
+/**
+ * The Manage dialog's four tabs — the panel's entire navigation model.
+ *
+ * Everything the popover used to reach through a back-stack (Share, More
+ * protection, Activity, Workflows, Library, Checkup) is one of these four
+ * groups, side by side in a 768px dialog. No "← Back", no navigation state to
+ * remember, and each tab has room for the detail the 400px column had to clip.
+ */
+const MANAGE_TABS: ReadonlyArray<{ id: Tab; label: string }> = [
+  { id: "setup", label: "Setup" },
+  { id: "toolsets", label: "Toolsets" },
+  { id: "protection", label: "Protection" },
+  { id: "activity", label: "Activity" },
+];
 
 type ActionState =
   | { phase: "idle" }
@@ -173,33 +190,37 @@ type ActionState =
   | { phase: "running"; action: ActionKind }
   | { phase: "done"; ok: boolean; message: string };
 
-const ACTION_META: Record<ActionKind, { label: string; confirm: string }> = {
-  "adopt-project": {
-    label: "Keep edits",
-    confirm:
-      "Pull the on-disk hand-edits into this project's manifest. Only writes agentstack.toml — never rewrites or removes anything in a CLI's own config.",
-  },
-  "adopt-global": {
-    label: "Keep edits",
-    confirm:
-      "Pull the on-disk hand-edits into this project's manifest at global scope. Only writes agentstack.toml — never rewrites or removes anything in a CLI's own config.",
-  },
-  "apply-project": {
-    label: "Re-render",
-    confirm:
-      "Re-render this project's CLI config from the manifest. Overwrites hand-edits; keeps servers other setups applied and never prunes. Reversible with agentstack restore.",
-  },
-  "apply-global": {
-    label: "Re-render",
-    confirm:
-      "Re-render the global CLI config from this manifest. Overwrites hand-edits; keeps servers other setups applied and never prunes. Reversible with agentstack restore.",
-  },
-  "guard-install": {
-    label: "Enable guard",
-    confirm:
-      "Install the pre-tool-use guard into every detected CLI, machine-wide. Only adds protection; reversible with guard uninstall.",
-  },
-};
+/**
+ * Just the version, from the CLI's `agentstack 0.16.0 (sandbox: no)` line.
+ *
+ * The trailing parenthetical is a BUILD flag — whether this binary was
+ * compiled with sandbox support — and it was being drawn next to the version
+ * as if it were a fact about the user's project. Someone reading "sandbox: no"
+ * beside their version reasonably concludes their setup is unsandboxed, which
+ * is a claim about enforcement that this string is not making.
+ */
+/**
+ * `<base>/x/y` → `x/y`, or null when the path isn't inside the base.
+ *
+ * t3code's file viewer addresses files by workspace-relative path; the CLI
+ * reports the manifest as an absolute one. Null rather than a best guess: a
+ * manifest outside the workspace (an explicit `--manifest-dir`, a symlinked
+ * checkout) is exactly the case where a fabricated relative path would open
+ * some unrelated file that happens to sit at the same offset.
+ */
+function relativeToBase(base: string, absolute: string): string | null {
+  const root = base.endsWith("/") ? base : `${base}/`;
+  return absolute.startsWith(root) ? absolute.slice(root.length) : null;
+}
+
+function shortAgentstackVersion(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const version = raw
+    .replace(/^agentstack\s*/, "")
+    .replace(/\s*\(.*$/, "")
+    .trim();
+  return version.length > 0 ? `v${version}` : null;
+}
 
 function fmtDuration(ms: number | undefined | null): string | null {
   if (ms == null || ms < 0) return null;
@@ -235,7 +256,8 @@ export function AgentstackControl({
   threadId?: ThreadId;
 }) {
   const [open, setOpen] = useState(false);
-  const [tab, setTab] = useState<Tab>("overview");
+  /** Null = the Manage dialog is closed; otherwise the tab it is showing. */
+  const [manageTab, setManageTab] = useState<Tab | null>(null);
   const [status, setStatus] = useState<AgentstackStatus | null>(null);
   const [activity, setActivity] = useState<AgentstackActivity | null>(null);
   const [workflow, setWorkflow] = useState<AgentstackWorkflowData | null>(null);
@@ -244,13 +266,17 @@ export function AgentstackControl({
   const [actionState, setActionState] = useState<ActionState>({ phase: "idle" });
   const [reviewing, setReviewing] = useState(false);
   const [reviewingDrift, setReviewingDrift] = useState(false);
-  const [browsingLibrary, setBrowsingLibrary] = useState(false);
   const [settingUp, setSettingUp] = useState(false);
 
   /** Open a reading screen: the popover yields so only one surface is up. */
   const openReader = useCallback((show: (v: true) => void) => {
     setOpen(false);
     show(true);
+  }, []);
+  /** Same, for the tabbed Manage dialog. */
+  const openManage = useCallback((t: Tab) => {
+    setOpen(false);
+    setManageTab(t);
   }, []);
   // The 1c expanded monitor: which run it shows, and (for recorded runs) the
   // evidence fetched for it. A live target reads the polled activeRun instead.
@@ -309,14 +335,23 @@ export function AgentstackControl({
     setToolsets(toolsetsResult._tag === "Success" ? toolsetsResult.value : null);
   }, [environmentId, fetchStatus, fetchActivity, fetchWorkflow, fetchToolsets, input]);
 
+  // Only a run in flight justifies the fast cadence. `watchingRun` is derived
+  // from what a previous refresh already reported, so a run that starts while
+  // the panel idles is picked up on the next heartbeat and the poll speeds up
+  // from there.
+  const watchingRun =
+    monitorTarget !== null ||
+    (workflow?.activeRun != null && workflow.activeRun.outcome === "running");
   useEffect(() => {
-    // The monitor dialog keeps polling alive after the popover closes, so a
-    // live run's step tree stays current while it's being watched.
-    if (!open && monitorTarget === null) return;
+    // The monitor and Manage dialogs keep polling alive after the popover
+    // closes, so a live run's step tree — and the Manage tabs — stay current
+    // while they're being read.
+    if (!open && monitorTarget === null && manageTab === null) return;
     void refresh();
-    const timer = setInterval(() => void refresh(), REFRESH_MS);
+    const period = watchingRun ? LIVE_REFRESH_MS : IDLE_REFRESH_MS;
+    const timer = setInterval(() => void refresh(), period);
     return () => clearInterval(timer);
-  }, [open, monitorTarget, refresh]);
+  }, [open, monitorTarget, manageTab, watchingRun, refresh]);
 
   // React to "open me on tab X" requests from elsewhere (e.g. a guard-denial
   // card's "View in audit log"). The nonce makes repeat requests re-fire.
@@ -324,8 +359,8 @@ export function AgentstackControl({
   const panelRequestedTab = useAgentstackPanelStore((s) => s.requestedTab);
   useEffect(() => {
     if (panelOpenNonce === 0) return;
-    setTab(panelRequestedTab);
-    setOpen(true);
+    setOpen(false);
+    setManageTab(panelRequestedTab);
   }, [panelOpenNonce, panelRequestedTab]);
 
   const onAction = useCallback(
@@ -510,8 +545,9 @@ export function AgentstackControl({
   }, [monitorTarget, monitorIsLive, fetchWorkflowRun, environmentId, input]);
   const monitorRun = monitorTarget === null ? null : monitorIsLive ? activeRun : monitorFetched;
 
+  // Trust no longer draws a pill of its own: green said nothing, and the two
+  // states that matter (inert, drifted) are the first page's top concern.
   const trust = status?.doctor ? deriveAgentstackTrustBadge(status.doctor) : null;
-  const trustBadge = trust ? TRUST_BADGE[trust.state] : null;
 
   // Capability negotiation: an incompatible read (CLI schema newer than this
   // build understands) takes over the whole body; otherwise the advertised
@@ -554,7 +590,67 @@ export function AgentstackControl({
   // row is where they finally appear.
   const findings = useMemo(() => deriveAgentstackFindings(status?.doctor ?? null), [status]);
 
-  const anyAttention = overviewRows.some((r) => r.level === "warn" || r.level === "error");
+  // The first page shows ONE problem. Everything else it would have listed is
+  // counted here and read in Manage.
+  const concern = useMemo(
+    () =>
+      status?.doctor
+        ? selectAgentstackPrimaryConcern({
+            rows: overviewRows,
+            findings,
+            trust: trust?.state ?? "unknown",
+          })
+        : null,
+    [status, overviewRows, findings, trust],
+  );
+
+  const healthyLine = useMemo(
+    () => summarizeAgentstackHealthyRows(partitionAgentstackOverviewRows(overviewRows).healthy),
+    [overviewRows],
+  );
+
+  // Open the manifest in t3code's own file viewer.
+  //
+  // The panel can add to a toolset but cannot fix a bad server definition, and
+  // several checkup findings have no remedy except editing the manifest — so
+  // the honest affordance is to hand you the source of truth rather than a
+  // command to go type somewhere else. Null (and the button hidden) whenever
+  // we cannot name the file exactly: no thread to host the viewer, an older
+  // CLI that doesn't report the path, or a manifest outside this workspace.
+  const manifestSource = toolsets?.toolsets ?? null;
+  const onOpenManifest = useMemo(() => {
+    const absolute = manifestSource?.manifest_path ?? null;
+    const base = manifestSource?.path ?? null;
+    if (threadId === undefined || absolute === null || base === null) return null;
+    const relative = relativeToBase(base, absolute);
+    if (relative === null) return null;
+    return () => {
+      setManageTab(null);
+      useRightPanelStore.getState().openFile({ environmentId, threadId }, relative);
+    };
+  }, [manifestSource, threadId, environmentId]);
+
+  // Run the concern's one verb. `manage` and the two review kinds open a
+  // surface; only `action` writes, and it still goes through the confirm step.
+  const onConcern = useCallback(
+    (c: AgentstackPrimaryConcern) => {
+      switch (c.act.kind) {
+        case "action":
+          setActionState({ phase: "confirm", action: c.act.action });
+          break;
+        case "review-drift":
+          openReader(setReviewingDrift);
+          break;
+        case "review-trust":
+          openReader(setReviewing);
+          break;
+        case "manage":
+          openManage("setup");
+          break;
+      }
+    },
+    [openManage, openReader],
+  );
 
   return (
     <>
@@ -570,36 +666,40 @@ export function AgentstackControl({
       >
         <PopoverTrigger render={<Button aria-label="AgentStack" size="xs" variant="outline" />}>
           <AgentstackMark className="size-3.5" />
+          {/* The header dot is the same claim the panel makes when opened:
+              one concern, or a live run. Deriving it separately is how the
+              icon ends up warning about something the panel then doesn't
+              show. */}
           {activeRun ? (
             <span aria-hidden className="-mr-0.5 size-1.5 rounded-full bg-warning animate-pulse" />
-          ) : anyAttention ? (
+          ) : concern ? (
             <span aria-hidden className="-mr-0.5 size-1.5 rounded-full bg-warning" />
           ) : null}
         </PopoverTrigger>
         <PopoverPopup align="end" className="w-[400px] p-0" side="bottom">
-          {/* Header */}
+          {/* Header — the mark, the name, and one word for the state. The
+              version number, the trust pill and the readiness chip all used to
+              sit here; a build fact and two pills saying the same thing are
+              not what someone opens this for. */}
           <div className="flex items-center gap-2 px-4 pb-2.5 pt-3.5">
             <AgentstackMark className="size-[22px]" />
             <span className="font-semibold text-sm text-foreground">AgentStack</span>
-            {status?.version ? (
-              <span className="text-[11px] text-muted-foreground">
-                {status.version.replace(/^agentstack\s*/, "v")}
-              </span>
-            ) : null}
-            {trust && trustBadge ? (
-              <Badge
-                render={<button type="button" onClick={() => openReader(setReviewing)} />}
-                variant={trustBadge.variant}
-                size="sm"
-                title="Review this repo's trust surface"
-                // `shrink-0` + the Badge's own `whitespace-nowrap` keep the
-                // label on one line: it used to wrap inside a fixed-height
-                // pill and spill out of it.
-                className="ml-auto shrink-0 gap-1.5 px-1.5 transition-opacity hover:opacity-80"
+            {status?.installed && status.doctor ? (
+              <span
+                className={cn(
+                  "ml-auto flex shrink-0 items-center gap-1.5 text-[11.5px]",
+                  concern ? "text-warning-foreground" : "text-muted-foreground",
+                )}
               >
-                <span className={cn("size-[5px] shrink-0 rounded-full", trustBadge.dot)} />
-                {trust.label}
-              </Badge>
+                {/* No pulse here: the live-run strip below is already the
+                    animated thing on screen, and two of them read as two
+                    separate events. */}
+                <span
+                  aria-hidden
+                  className={cn("size-1.5 rounded-full", concern ? "bg-warning" : "bg-success")}
+                />
+                {concern ? "Needs you" : "Ready"}
+              </span>
             ) : null}
           </div>
 
@@ -628,105 +728,110 @@ export function AgentstackControl({
             </button>
           ) : null}
 
+          {/* Body — exactly one region: the blocked state, the one problem,
+              or the toolset you're working under. */}
           {status?.installed && incompatible ? (
             <UpdateNeeded incompatible={incompatible} cliVersion={status.version} />
           ) : status?.installed && setupState === "needs_setup" ? (
             <NeedsSetup onOpen={() => openReader(setSettingUp)} />
+          ) : unreachable ? (
+            <p className="px-4 py-4 text-xs text-muted-foreground">
+              Couldn't check status — the t3code server didn't answer.
+            </p>
+          ) : status === null ? (
+            <p className="px-4 py-4 text-xs text-muted-foreground">Checking…</p>
+          ) : !status.installed ? (
+            <NotInstalled onRecheck={refresh} />
+          ) : status.doctor === null ? (
+            <DoctorUnreadable onRecheck={refresh} />
           ) : (
             <>
-              {/* Advanced views carry a back row (like the review panels) so
-                  the beginner surface stays a single Overview screen. */}
-              {tab !== "overview" ? (
-                <div className="flex items-center gap-2 border-b border-border/60 px-3.5 py-2">
-                  <button
-                    type="button"
-                    onClick={() => setTab("overview")}
-                    className="text-xs font-medium text-muted-foreground hover:text-foreground"
-                  >
-                    ← Back
-                  </button>
-                  <span className="text-xs font-semibold text-foreground">
-                    {ADVANCED_VIEWS[tab].title}
-                  </span>
-                </div>
-              ) : null}
-
-              {/* Body */}
-              <div className="max-h-[420px] overflow-y-auto">
-                {unreachable ? (
-                  <p className="px-4 py-4 text-xs text-muted-foreground">
-                    Couldn't check status — the t3code server didn't answer.
-                  </p>
-                ) : status === null ? (
-                  <p className="px-4 py-4 text-xs text-muted-foreground">Checking…</p>
-                ) : !status.installed ? (
-                  <NotInstalled onRecheck={refresh} />
-                ) : tab === "overview" ? (
-                  <>
-                    <OverviewPanel
-                      rows={overviewRows}
-                      findings={findings}
-                      features={features}
-                      doctorAvailable={status.doctor !== null}
-                      chip={deriveAgentstackStatusChip({
-                        state: status.doctor?.state,
-                        protection: status.doctor?.protection,
-                      })}
-                      nextAction={status.doctor?.next_action ?? null}
-                      advisories={canReadAdvisories ? (status.doctor?.advisories ?? null) : null}
-                      loadRestoreInventory={loadRestoreInventory}
-                      onUndo={onUndo}
-                      canRestore={canRestore}
-                      toolsets={toolsets}
-                      canSessions={canSessions}
-                      sessionsKnownMissing={sessionsKnownMissing}
-                      canEditProfiles={canEditProfiles}
-                      onManageLibrary={() => openReader(setBrowsingLibrary)}
-                      onSessionStart={onSessionStart}
-                      onSessionEnd={onSessionEnd}
-                      actionState={actionState}
-                      onRequestAction={(a) => setActionState({ phase: "confirm", action: a })}
-                      onReviewDrift={() => openReader(setReviewingDrift)}
-                      onConfirm={onAction}
-                      onCancel={() => setActionState({ phase: "idle" })}
-                      onRecheck={refresh}
-                    />
-                    <AdvancedNav onOpen={setTab} workflowLive={activeRun !== null} />
-                  </>
-                ) : tab === "workflow" ? (
-                  <WorkflowPanel
-                    data={workflow}
-                    incompatible={workflowIncompatible}
-                    observeKnownMissing={workflowObserveKnownMissing}
-                    cliVersion={status.version}
-                    onOpenRun={(r) => setMonitorTarget({ runId: r.run, summary: r })}
-                  />
-                ) : tab === "activity" ? (
-                  <ActivityPanel activity={activity} />
-                ) : tab === "share" ? (
-                  <SharePanel doctor={status.doctor} />
-                ) : (
-                  <ProtectionPanel
-                    doctor={status.doctor}
-                    actionState={actionState}
-                    onRequestAction={(a) => setActionState({ phase: "confirm", action: a })}
+              {concern ? (
+                <ConcernCard concern={concern} onAct={() => onConcern(concern)} />
+              ) : (
+                <WorkingUnder
+                  toolsets={toolsets}
+                  canSessions={canSessions}
+                  onSwitch={() => openManage("toolsets")}
+                  onEnd={onSessionEnd}
+                />
+              )}
+              {/* The one write the first page can start still confirms — the
+                  confirm is the consent, and it is never skipped. */}
+              {actionState.phase !== "idle" ? (
+                <div className="px-1.5 pb-1">
+                  <ActionConfirm
+                    state={actionState}
                     onConfirm={onAction}
                     onCancel={() => setActionState({ phase: "idle" })}
                   />
-                )}
+                </div>
+              ) : null}
+
+              {/* Footer — one sentence about everything not shown, and the
+                  door to it. */}
+              <div className="flex items-center gap-2 border-t border-border/60 px-4 py-2.5">
+                <span className="min-w-0 flex-1 truncate text-[11.5px] text-muted-foreground">
+                  {concern
+                    ? concern.others > 0
+                      ? `${formatAgentstackCount(concern.others, "more finding")} in Manage`
+                      : "Nothing else needs you."
+                    : (healthyLine ?? "This project is set up and in sync.")}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => openManage("setup")}
+                  className="shrink-0 text-[11.5px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+                >
+                  Manage ›
+                </button>
               </div>
             </>
           )}
-
-          {/* Footer */}
-          <div className="flex items-center gap-2 border-t border-border/60 bg-foreground/[0.02] px-4 py-2.5">
-            <code className="font-mono text-[11px] text-muted-foreground">agentstack doctor</code>
-            <span className="text-[11px] text-muted-foreground/70">
-              — every warning names its fix
-            </span>
-          </div>
         </PopoverPopup>
       </Popover>
+      {manageTab !== null ? (
+        <ManageDialog
+          tab={manageTab}
+          onTab={setManageTab}
+          onClose={() => setManageTab(null)}
+          version={status?.version}
+          workflowLive={activeRun !== null}
+          status={status}
+          activity={activity}
+          workflow={workflow}
+          workflowIncompatible={workflowIncompatible}
+          workflowObserveKnownMissing={workflowObserveKnownMissing}
+          toolsets={toolsets}
+          rows={overviewRows}
+          findings={findings}
+          features={features}
+          advisories={canReadAdvisories ? (status?.doctor?.advisories ?? null) : null}
+          canRestore={canRestore}
+          canSessions={canSessions}
+          sessionsKnownMissing={sessionsKnownMissing}
+          canEditProfiles={canEditProfiles}
+          canRemoveFromLibrary={canRemoveFromLibrary}
+          actionState={actionState}
+          onRequestAction={(a) => setActionState({ phase: "confirm", action: a })}
+          onConfirm={onAction}
+          onCancelAction={() => setActionState({ phase: "idle" })}
+          onReviewDrift={() => {
+            setManageTab(null);
+            setReviewingDrift(true);
+          }}
+          onOpenRun={(r) => setMonitorTarget({ runId: r.run, summary: r })}
+          loadRestoreInventory={loadRestoreInventory}
+          onUndo={onUndo}
+          onSessionStart={onSessionStart}
+          onSessionEnd={onSessionEnd}
+          loadLibraryIndex={loadLibraryIndex}
+          previewProfileEdit={previewProfileEdit}
+          applyProfileEdit={applyProfileEdit}
+          onRecheck={refresh}
+          onOpenManifest={onOpenManifest}
+        />
+      ) : null}
       {/* Screens you read, not glance at — see PanelDialog. Rendered beside the
           popover rather than inside it, so opening one never blanks status. */}
       {reviewing ? (
@@ -751,21 +856,6 @@ export function AgentstackControl({
           width="max-w-3xl"
         >
           <DriftReviewPanel loadDiff={loadDiff} onAction={runDriftAction} />
-        </PanelDialog>
-      ) : null}
-      {browsingLibrary ? (
-        <PanelDialog
-          title="Library"
-          description="Tools available to bundle into a toolset for this project."
-          onClose={() => setBrowsingLibrary(false)}
-          width="max-w-3xl"
-        >
-          <LibraryPanel
-            loadIndex={loadLibraryIndex}
-            preview={previewProfileEdit}
-            apply={applyProfileEdit}
-            canRemove={canRemoveFromLibrary}
-          />
         </PanelDialog>
       ) : null}
       {settingUp ? (
@@ -810,6 +900,129 @@ function NeedsSetup({ onOpen }: { onOpen: () => void }) {
       <Button size="sm" onClick={onOpen} className="self-start">
         Review setup
       </Button>
+    </div>
+  );
+}
+
+/**
+ * The first page when something needs the user: ONE problem, said as its
+ * consequence, with one button and what that button promises.
+ *
+ * The popover used to render every non-ok row, a collapsed findings list, and
+ * a "Next: <command>" line — three ways of describing the same repair, the
+ * loudest of them a shell command the user can't type here. The command is
+ * still shown, once, at the confirm step; what leads is the sentence that says
+ * why it matters. Everything else it would have listed is counted in the
+ * footer and read in Manage.
+ */
+export function ConcernCard({
+  concern,
+  onAct,
+}: {
+  concern: AgentstackPrimaryConcern;
+  onAct: () => void;
+}) {
+  return (
+    <div className="px-2.5 pb-2.5">
+      <div className="flex flex-col gap-2 rounded-lg border border-warning/25 bg-warning/[0.07] px-3 py-2.5">
+        <p className="text-[13px] font-semibold leading-snug text-foreground">{concern.title}</p>
+        {concern.detail ? (
+          <p className="text-xs leading-relaxed text-muted-foreground">{concern.detail}</p>
+        ) : null}
+        <div className="flex items-center gap-2.5">
+          <Button size="xs" variant="default" onClick={onAct} className="font-semibold">
+            {concern.label}
+          </Button>
+          {concern.note ? (
+            <span className="min-w-0 truncate text-[11px] text-muted-foreground">
+              {concern.note}
+            </span>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The first page when nothing needs the user: which toolset this project is
+ * working under, and the one verb that changes it.
+ *
+ * This is the frame you see in nine sessions out of ten, and it used to offer
+ * a version number, a trust pill, a readiness chip, a reassurance line, a
+ * collapsed checkup, an undo button and four navigation rows — nine regions,
+ * none of which is what you opened the panel to find out. Switching toolsets
+ * is; so that is what is here.
+ */
+export function WorkingUnder({
+  toolsets,
+  canSessions,
+  onSwitch,
+  onEnd,
+}: {
+  toolsets: AgentstackToolsetsResult | null;
+  canSessions: boolean;
+  onSwitch: () => void;
+  onEnd: () => Promise<{ ok: boolean; message: string }>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const data = toolsets?.toolsets ?? null;
+  const session = data?.session ?? null;
+  const rows = useMemo(() => (data ? deriveToolsetRows(data.profiles, data.trust) : []), [data]);
+  // What the project is actually working under: the temporary session if one
+  // is open, else the profile the CLI marked active. Never guessed from the
+  // first declared profile — an unowned name here would be a lie about scope.
+  const active = session?.profile ?? rows.find((r) => r.active)?.name ?? null;
+  const row = active === null ? null : (rows.find((r) => r.name === active) ?? null);
+
+  if (active === null) {
+    return (
+      <div className="flex items-center gap-2 px-4 pb-3 pt-0.5">
+        <span className="min-w-0 flex-1 text-xs leading-relaxed text-muted-foreground">
+          {rows.length === 0
+            ? "No toolsets yet — bundle the tools this project needs into one."
+            : "No toolset is active. Pick one to apply it here."}
+        </span>
+        <Button size="xs" variant="outline" onClick={onSwitch} className="shrink-0">
+          {rows.length === 0 ? "Create one" : "Choose"}
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="px-2.5 pb-2.5">
+      <div className="flex flex-col gap-2 rounded-lg border border-border/60 bg-foreground/[0.02] px-3 py-2.5">
+        <span className="text-[10.5px] font-semibold tracking-wide text-muted-foreground">
+          WORKING UNDER
+        </span>
+        <div className="flex items-center gap-2">
+          <span className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
+            {active}
+          </span>
+          {session && canSessions ? (
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={busy}
+              onClick={() => {
+                setBusy(true);
+                void onEnd().finally(() => setBusy(false));
+              }}
+              className="shrink-0"
+            >
+              {busy ? "Stopping…" : "Stop using"}
+            </Button>
+          ) : null}
+          <Button size="xs" variant="outline" onClick={onSwitch} className="shrink-0">
+            Switch
+          </Button>
+        </div>
+        <span className="truncate text-[11.5px] text-muted-foreground" title={row?.summary}>
+          {row?.summary ?? "applied to this project"}
+          {session ? ` · in use ${fmtAgo(session.started_unix)}` : ""}
+        </span>
+      </div>
     </div>
   );
 }
@@ -1224,7 +1437,6 @@ type DriftLoad =
 
 type DriftAct =
   | { phase: "idle" }
-  | { phase: "confirm"; action: ActionKind; prompt: string }
   | { phase: "running" }
   | { phase: "done"; ok: boolean; message: string };
 
@@ -1244,6 +1456,12 @@ function keptServers(report: AgentstackDiffReport): string[] {
  *  - servers another setup applied and kept → Keep edits (`adopt`) to bring them
  *    under this manifest; `apply` is not offered because it would no-op them.
  * `--prune-foreign` is never reachable from here.
+ *
+ * The verb acts on click. This screen already shows the diff and states both
+ * outcomes beside their buttons, so the second confirm restated a decision the
+ * user had just read the evidence for — the choice IS the consent here, and
+ * the safe verb is weighted so the ranking is visible before the click, not
+ * argued about after it.
  */
 function DriftReviewPanel({
   loadDiff,
@@ -1315,34 +1533,12 @@ function DriftReviewPanel({
                 scope={scope}
                 report={report}
                 disabled={running}
-                onPick={(action, prompt) => setAct({ phase: "confirm", action, prompt })}
+                onPick={(action) => void run(action)}
               />
             ) : null,
           )}
 
-          {act.phase === "confirm" ? (
-            <div className="rounded-lg border border-warning/30 bg-warning/[0.06] px-3 py-2.5">
-              <p className="mb-2 text-[11px] leading-relaxed text-muted-foreground">{act.prompt}</p>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  disabled={running}
-                  onClick={() => void run(act.action)}
-                  className="inline-flex h-6 items-center rounded-md border border-warning/40 bg-warning/15 px-2.5 text-[11px] font-semibold text-warning-foreground disabled:opacity-60"
-                >
-                  {running ? "Running…" : `Run ${ACTION_META[act.action].label.toLowerCase()}`}
-                </button>
-                <button
-                  type="button"
-                  disabled={running}
-                  onClick={() => setAct({ phase: "idle" })}
-                  className="inline-flex h-6 items-center rounded-md px-2 text-[11px] font-medium text-muted-foreground disabled:opacity-60"
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          ) : act.phase === "done" ? (
+          {act.phase === "done" ? (
             <div
               className={cn(
                 "rounded-lg border px-3 py-2 text-[11px] leading-relaxed",
@@ -1386,7 +1582,7 @@ function DriftScopeSection({
   scope: "global" | "project";
   report: AgentstackDiffReport;
   disabled: boolean;
-  onPick: (action: ActionKind, prompt: string) => void;
+  onPick: (action: ActionKind) => void;
 }) {
   const changed = report.targets.filter((t) => t.changed);
   const kept = keptServers(report);
@@ -1406,35 +1602,40 @@ function DriftScopeSection({
             <DriftTarget key={`${scope}-${t.id}`} target={t} />
           ))}
           <p className="text-[11px] leading-relaxed text-muted-foreground">
-            The on-disk config was hand-edited. Keep the edit, or re-render from the manifest.
+            The on-disk config in {where} was hand-edited. Pick which one is the truth.
           </p>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              disabled={disabled}
-              onClick={() =>
-                onPick(
-                  adopt,
-                  `Keep the on-disk hand-edit in ${where} — pull it into this project's manifest. Only writes agentstack.toml; never removes anything from a CLI's config.`,
-                )
-              }
-              className="inline-flex h-7 items-center rounded-lg border border-success/40 bg-success/10 px-3 text-xs font-semibold text-success-foreground disabled:opacity-60"
-            >
-              Keep edits
-            </button>
-            <button
-              type="button"
-              disabled={disabled}
-              onClick={() =>
-                onPick(
-                  apply,
-                  `Re-render ${where} from the manifest. This OVERWRITES the hand-edit. Servers other setups applied are kept (never pruned). Reversible with agentstack restore.`,
-                )
-              }
-              className="inline-flex h-7 items-center rounded-lg border border-warning/40 bg-warning/10 px-3 text-xs font-semibold text-warning-foreground disabled:opacity-60"
-            >
-              Re-render
-            </button>
+          {/* Ranked, not paired: "Keep edits" only writes agentstack.toml, so
+              it is the non-destructive answer and reads as the default.
+              "Re-render" overwrites the edit and says so on its own line
+              rather than in a modal you dismiss before it takes effect. */}
+          <div className="flex flex-col gap-1.5">
+            <div className="flex items-baseline gap-2.5">
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={() => onPick(adopt)}
+                className="inline-flex h-7 shrink-0 items-center rounded-lg border border-success/40 bg-success/10 px-3 text-xs font-semibold text-success-foreground disabled:opacity-60"
+              >
+                Keep edits
+              </button>
+              <span className="text-[11px] leading-relaxed text-muted-foreground">
+                Pull the hand-edit into this project's manifest. Only writes agentstack.toml.
+              </span>
+            </div>
+            <div className="flex items-baseline gap-2.5">
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={() => onPick(apply)}
+                className="inline-flex h-7 shrink-0 items-center rounded-lg border border-border/60 px-3 text-xs font-semibold text-muted-foreground hover:text-foreground disabled:opacity-60"
+              >
+                Re-render
+              </button>
+              <span className="text-[11px] leading-relaxed text-muted-foreground">
+                Overwrite the hand-edit from the manifest. Other setups' servers are kept, never
+                pruned; reversible with <code className="font-mono">agentstack restore</code>.
+              </span>
+            </div>
           </div>
         </>
       ) : (
@@ -1459,16 +1660,7 @@ function DriftScopeSection({
             <button
               type="button"
               disabled={disabled}
-              onClick={() =>
-                onPick(
-                  adopt,
-                  `Pull ${kept.length} server${
-                    kept.length === 1 ? "" : "s"
-                  } from another setup into THIS project's manifest so it manages ${
-                    kept.length === 1 ? "it" : "them"
-                  }. Only writes agentstack.toml; nothing is removed from disk.`,
-                )
-              }
+              onClick={() => onPick(adopt)}
               className="inline-flex h-7 items-center rounded-lg border border-border/60 px-3 text-xs font-semibold text-muted-foreground hover:text-foreground disabled:opacity-60"
             >
               Adopt into this project
@@ -1502,125 +1694,811 @@ function DriftTarget({ target }: { target: AgentstackDiffTarget }) {
   );
 }
 
-function OverviewPanel({
-  rows,
-  findings,
-  features,
-  doctorAvailable,
-  chip,
-  nextAction,
-  advisories,
-  loadRestoreInventory,
-  onUndo,
-  canRestore,
-  toolsets,
-  canSessions,
-  sessionsKnownMissing,
-  canEditProfiles,
-  onManageLibrary,
-  onSessionStart,
-  onSessionEnd,
-  actionState,
-  onRequestAction,
-  onReviewDrift,
-  onConfirm,
-  onCancel,
-  onRecheck,
-}: {
-  rows: AgentstackOverviewRow[];
-  /** Every error/warning doctor reported, with its fix — shown under Checkup. */
-  findings: ReadonlyArray<AgentstackFinding>;
-  /** The contracts the CLI advertised; gates a finding's fix BUTTON only. */
-  features: ReadonlyArray<string> | undefined;
-  doctorAvailable: boolean;
-  chip: ReturnType<typeof deriveAgentstackStatusChip>;
-  nextAction: string | null;
-  advisories: number | null;
-  loadRestoreInventory: () => Promise<AgentstackRestoreInventoryResult | null>;
-  onUndo: (restoreId: string) => Promise<{ ok: boolean; message: string }>;
-  canRestore: boolean;
+/** Everything the four tabs need. One bag, so the dialog stays one component. */
+interface ManageProps {
+  tab: Tab;
+  onTab: (t: Tab) => void;
+  onClose: () => void;
+  version: string | null | undefined;
+  workflowLive: boolean;
+  status: AgentstackStatus | null;
+  activity: AgentstackActivity | null;
+  workflow: AgentstackWorkflowData | null;
+  workflowIncompatible: AgentstackIncompatible | null;
+  workflowObserveKnownMissing: boolean;
   toolsets: AgentstackToolsetsResult | null;
+  rows: ReadonlyArray<AgentstackOverviewRow>;
+  findings: ReadonlyArray<AgentstackFinding>;
+  features: ReadonlyArray<string> | undefined;
+  advisories: number | null;
+  canRestore: boolean;
   canSessions: boolean;
   sessionsKnownMissing: boolean;
   canEditProfiles: boolean;
-  onManageLibrary: () => void;
-  onSessionStart: (profile: string) => Promise<{ ok: boolean; message: string }>;
-  onSessionEnd: () => Promise<{ ok: boolean; message: string }>;
+  canRemoveFromLibrary: boolean;
   actionState: ActionState;
   onRequestAction: (a: ActionKind) => void;
-  onReviewDrift: () => void;
   onConfirm: (a: ActionKind) => void;
-  onCancel: () => void;
+  onCancelAction: () => void;
+  onReviewDrift: () => void;
+  onOpenRun: (r: AgentstackWorkflowRunSummary) => void;
+  loadRestoreInventory: () => Promise<AgentstackRestoreInventoryResult | null>;
+  onUndo: (restoreId: string) => Promise<{ ok: boolean; message: string }>;
+  onSessionStart: (profile: string) => Promise<{ ok: boolean; message: string }>;
+  onSessionEnd: () => Promise<{ ok: boolean; message: string }>;
+  loadLibraryIndex: () => Promise<AgentstackLibraryIndexResult | null>;
+  previewProfileEdit: (
+    edit: AgentstackProfileEdit,
+  ) => Promise<AgentstackProfileEditPreviewResult | null>;
+  applyProfileEdit: (
+    edit: AgentstackProfileEdit,
+    consentedDigest: string,
+  ) => Promise<{ ok: boolean; message: string }>;
   onRecheck: () => Promise<void> | void;
-}) {
-  if (!doctorAvailable) return <DoctorUnreadable onRecheck={onRecheck} />;
-  const { problems, healthy } = partitionAgentstackOverviewRows(rows);
-  const healthyLine = summarizeAgentstackHealthyRows(healthy);
+  /** Open the manifest in t3code's file viewer; null when it can't be named. */
+  onOpenManifest: (() => void) | null;
+}
+
+/**
+ * Manage — everything that isn't the glance, in one dialog with four tabs.
+ *
+ * It replaces four look-alike navigation rows, a back-stack and two sibling
+ * dialogs (Library, Checkup) with a flat, four-way choice at 768px. Nothing
+ * here is new capability: Setup, Toolsets, Protection and Activity are the
+ * screens the popover already had, given the width they were always being
+ * clipped for, and reachable in one click instead of two plus "← Back".
+ */
+function ManageDialog(props: ManageProps) {
+  const doctor = props.status?.doctor ?? null;
   return (
-    <div className="flex flex-col p-1.5">
+    <Dialog
+      open
+      onOpenChange={(next) => {
+        if (!next) props.onClose();
+      }}
+    >
+      <DialogPopup className="max-w-3xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2.5 pr-8">
+            <AgentstackMark className="size-[18px] shrink-0" />
+            <span className="truncate">Manage AgentStack</span>
+          </DialogTitle>
+        </DialogHeader>
+
+        {/* Tab bar. The version lives here — a build fact, on the surface
+            where a build fact is what you came looking for. */}
+        <div className="flex items-center gap-1 border-b border-border/60 px-1">
+          {MANAGE_TABS.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => props.onTab(t.id)}
+              className={cn(
+                "-mb-px flex items-center gap-1.5 border-b-2 px-3 py-2 text-[12.5px] transition-colors",
+                props.tab === t.id
+                  ? "border-foreground font-semibold text-foreground"
+                  : "border-transparent font-medium text-muted-foreground hover:text-foreground",
+              )}
+            >
+              {t.label}
+              {t.id === "activity" && props.workflowLive ? (
+                <span className="rounded bg-warning/15 px-1 py-px text-[10px] font-semibold text-warning-foreground">
+                  run live
+                </span>
+              ) : null}
+            </button>
+          ))}
+          {shortAgentstackVersion(props.version) ? (
+            <span className="ml-auto pr-2 font-mono text-[10.5px] text-muted-foreground/70">
+              {shortAgentstackVersion(props.version)}
+            </span>
+          ) : null}
+        </div>
+
+        {/* A FIXED frame, not a max-height.
+            With `max-h`, the dialog took its height from whichever tab was
+            open — Setup is short, Protection is three screens — so every tab
+            click resized the whole window under the pointer, and so did each
+            inner view swap. The box is now constant; only what is inside it
+            scrolls, and each tab owns its own scroll region so switching back
+            returns you to where you were rather than to the top of a
+            different-sized page. */}
+        <div className="flex h-[min(600px,68vh)] flex-col overflow-hidden">
+          {props.tab === "setup" ? (
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              <SetupTab {...props} />
+            </div>
+          ) : props.tab === "toolsets" ? (
+            <ToolsetsTab {...props} />
+          ) : props.tab === "protection" ? (
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              <TabSection title="Stronger modes" first />
+              <ProtectionPanel
+                doctor={doctor}
+                actionState={props.actionState}
+                onRequestAction={props.onRequestAction}
+                onConfirm={props.onConfirm}
+                onCancel={props.onCancelAction}
+              />
+              <TabSection title="Sharing this setup" />
+              <SharePanel doctor={doctor} />
+            </div>
+          ) : (
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              <ActivityTab {...props} />
+            </div>
+          )}
+        </div>
+      </DialogPopup>
+    </Dialog>
+  );
+}
+
+/**
+ * Setup — is this project in sync, what did the checkup find, and how to take
+ * a change back. The three questions the popover used to answer badly at
+ * 400px, with room for the findings list to simply be open.
+ */
+function SetupTab(props: ManageProps) {
+  const doctor = props.status?.doctor ?? null;
+  if (doctor === null) return <DoctorUnreadable onRecheck={props.onRecheck} />;
+  const { problems, healthy } = partitionAgentstackOverviewRows(props.rows);
+  const healthyLine = summarizeAgentstackHealthyRows(healthy);
+  const chip = deriveAgentstackStatusChip({
+    state: doctor.state,
+    protection: doctor.protection,
+  });
+  return (
+    <div className="flex flex-col p-2.5">
       {chip ? (
         <StatusSummary
           chip={chip}
-          nextAction={nextAction}
-          advisories={advisories}
-          onRunNextAction={onRequestAction}
+          nextAction={doctor.next_action ?? null}
+          advisories={props.advisories}
+          onRunNextAction={props.onRequestAction}
         />
       ) : null}
       {problems.map((row) => (
         <div key={row.key} className="flex items-start gap-2.5 rounded-lg px-2.5 py-[7px]">
           <span className={cn("mt-[7px] size-1.5 shrink-0 rounded-full", LEVEL_DOT[row.level])} />
           <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-            {/* The category is a label, not the news — it used to be bold
-                white while the actual message was muted and truncated. */}
             <span className="text-[11px] font-medium text-muted-foreground">{row.label}</span>
             <span className={cn("text-xs leading-snug", LEVEL_TEXT[row.level])}>{row.summary}</span>
           </div>
           {row.reviewDrift ? (
-            <RowAction onClick={onReviewDrift}>Review drift</RowAction>
+            <RowAction onClick={props.onReviewDrift}>Review</RowAction>
           ) : row.action ? (
-            <RowAction onClick={() => onRequestAction(row.action!)}>
+            <RowAction onClick={() => props.onRequestAction(row.action!)}>
               {ACTION_META[row.action].label}
             </RowAction>
           ) : null}
         </div>
       ))}
-      {/* After the rows, not wedged between two of them: the findings are the
-          detail behind the Checkup row, and injecting them mid-list stopped the
-          four rows reading as one list. */}
-      <CheckupFindings findings={findings} features={features} onRequestAction={onRequestAction} />
+      <CheckupFindings
+        findings={props.findings}
+        features={props.features}
+        onRequestAction={props.onRequestAction}
+        onReviewDrift={props.onReviewDrift}
+        alreadyOffered={matchAgentstackNextAction(doctor.next_action ?? null)}
+        defaultOpen
+      />
       {healthyLine !== null ? (
-        // Everything that is fine, in one quiet line — reassurance without
-        // four rows of it competing with the thing that needs the user, and
-        // stated as outcomes rather than as a list of our category names.
-        // Faint is right BESIDE problems and wrong when it is the only thing on
-        // screen, so the weight follows whether anything else is competing.
-        <p
-          className={cn(
-            "flex items-center gap-2 px-2.5 py-1 text-[11px]",
-            problems.length > 0 ? "text-muted-foreground/70" : "text-muted-foreground",
-          )}
-        >
+        <p className="flex items-center gap-2 px-2.5 py-1 text-[11px] text-muted-foreground">
           <span className="size-1.5 shrink-0 rounded-full bg-success/60" />
           {healthyLine}
         </p>
       ) : null}
-      {actionState.phase !== "idle" ? (
-        <ActionConfirm state={actionState} onConfirm={onConfirm} onCancel={onCancel} />
+      {props.actionState.phase !== "idle" ? (
+        <ActionConfirm
+          state={props.actionState}
+          onConfirm={props.onConfirm}
+          onCancel={props.onCancelAction}
+        />
       ) : null}
-      <ToolsetsCard
-        toolsets={toolsets}
-        canSessions={canSessions}
-        sessionsKnownMissing={sessionsKnownMissing}
-        canEditProfiles={canEditProfiles}
-        onManageLibrary={onManageLibrary}
-        onStart={onSessionStart}
-        onEnd={onSessionEnd}
-      />
       <UndoAffordance
-        loadInventory={loadRestoreInventory}
-        onUndo={onUndo}
-        canRestore={canRestore}
+        loadInventory={props.loadRestoreInventory}
+        onUndo={props.onUndo}
+        canRestore={props.canRestore}
       />
+      <RecheckRow onRecheck={props.onRecheck} onOpenManifest={props.onOpenManifest} />
+    </div>
+  );
+}
+
+/**
+ * Run the checkup again.
+ *
+ * The panel polls every five seconds while it's open, so this rarely changes
+ * anything a wait wouldn't — but a screen listing seven warnings and offering
+ * no way to ask "is that still true?" reads as a report you cannot argue with.
+ * After fixing something in a terminal, this is the button you want, and it is
+ * the same read `agentstack doctor` performs.
+ */
+function RecheckRow({
+  onRecheck,
+  onOpenManifest,
+}: {
+  onRecheck: () => Promise<void> | void;
+  onOpenManifest: (() => void) | null;
+}) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <div className="mx-1 mt-1.5 flex items-center gap-2 border-t border-border/40 px-1.5 pt-2">
+      <Button
+        size="xs"
+        variant="outline"
+        disabled={busy}
+        onClick={() => {
+          setBusy(true);
+          void Promise.resolve(onRecheck()).finally(() => setBusy(false));
+        }}
+      >
+        {busy ? "Checking…" : "Check again"}
+      </Button>
+      {/* Several findings ("cwd '.' resolves to the project root", a server
+          whose binary moved) have no remedy but editing the manifest, and the
+          panel has no verb for that. Handing over the source of truth is the
+          honest affordance — the manifest IS what agentstack renders from, so
+          editing it here is the supported path, not a workaround. */}
+      {onOpenManifest ? (
+        <Button size="xs" variant="outline" onClick={onOpenManifest}>
+          Open manifest
+        </Button>
+      ) : null}
+      <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground/70">
+        re-runs the same checks as <code className="font-mono">agentstack doctor</code>
+      </span>
+    </div>
+  );
+}
+
+/**
+ * Toolsets — what this project is working with, and the library it draws from,
+ * in one tab.
+ *
+ * The library used to be a second dialog opened from inside the popover, which
+ * meant "add a skill" started by leaving the screen that shows what you
+ * already have. Here they are two views of one tab, so the answer to "do I
+ * already have this?" is one click from the catalogue.
+ */
+function ToolsetsTab(props: ManageProps) {
+  const [load, setLoad] = useState<LibLoad>({ phase: "loading" });
+  const [query, setQuery] = useState("");
+  const [flow, setFlow] = useState<EditFlow>({ phase: "idle" });
+  /** Non-null while composing a new toolset: its name and picked members. */
+  const [draft, setDraft] = useState<{
+    name: string;
+    skills: ReadonlyArray<string>;
+    servers: ReadonlyArray<string>;
+  } | null>(null);
+  const [sessionBusy, setSessionBusy] = useState<string | null>(null);
+  const [sessionDone, setSessionDone] = useState<{ ok: boolean; message: string } | null>(null);
+
+  const loadIndex = props.loadLibraryIndex;
+  const reload = useCallback(async () => {
+    const r = await loadIndex();
+    setLoad(r?.index ? { phase: "loaded", index: r.index } : { phase: "error" });
+  }, [loadIndex]);
+  useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  const data = props.toolsets?.toolsets ?? null;
+  const profiles = data?.profiles ?? [];
+  const session = data?.session ?? null;
+  const rows = useMemo(
+    () => (data ? deriveToolsetRows(profiles, data.trust) : []),
+    [data, profiles],
+  );
+  const index = load.phase === "loaded" ? load.index : null;
+
+  const { previewProfileEdit, applyProfileEdit } = props;
+  const beginEdit = useCallback(
+    async (edit: AgentstackProfileEdit) => {
+      const title = describeEdit(edit);
+      setFlow({ phase: "previewing", edit, title });
+      const result = await previewProfileEdit(edit);
+      const digest = result?.preview?.consent_digest ?? null;
+      setFlow(
+        digest
+          ? {
+              phase: "confirm",
+              edit,
+              title,
+              digest,
+              note: result?.preview?.note ?? null,
+              removal: result?.preview?.removal ?? null,
+            }
+          : { phase: "unsupported", title },
+      );
+    },
+    [previewProfileEdit],
+  );
+
+  const confirmEdit = useCallback(async () => {
+    if (flow.phase !== "confirm") return;
+    const { edit, title, digest } = flow;
+    setFlow({ phase: "running", edit, title });
+    const r = await applyProfileEdit(edit, digest);
+    setFlow({ phase: "done", ok: r.ok, message: r.message, title });
+    // A successful add/create changed the manifest; a ${REF}-blocked apply
+    // wrote it too, so both re-read rather than leaving stale in-project flags.
+    if (r.ok || matchSecretBlock(r.message)) {
+      if (edit.kind === "create-profile") setDraft(null);
+      await reload();
+    }
+  }, [flow, applyProfileEdit, reload]);
+
+  const runSession = useCallback(
+    async (key: string, act: () => Promise<{ ok: boolean; message: string }>) => {
+      setSessionBusy(key);
+      setSessionDone(null);
+      const r = await act();
+      setSessionBusy(null);
+      setSessionDone(r);
+    },
+    [],
+  );
+
+  const toggleDraft = (group: "skill" | "server", name: string) =>
+    setDraft((d) => {
+      if (d === null) return d;
+      const key = group === "skill" ? "skills" : "servers";
+      const list = d[key];
+      return {
+        ...d,
+        [key]: list.includes(name) ? list.filter((n) => n !== name) : [...list, name],
+      };
+    });
+
+  return (
+    // Two panes that never leave the screen. Choosing a tool used to mean
+    // swapping the whole tab to a catalogue, then to a "which toolset?" screen,
+    // then to a confirm screen — four different layouts for one decision, and
+    // the toolsets you were deciding about were off-screen for three of them.
+    // Now the toolsets stay on the left, the library stays on the right, and
+    // every step of an edit happens where you already are.
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex min-h-0 flex-1">
+        <ToolsetRail
+          rows={rows}
+          profiles={profiles}
+          session={session}
+          canSessions={props.canSessions}
+          sessionsKnownMissing={props.sessionsKnownMissing}
+          canEditProfiles={props.canEditProfiles}
+          busy={sessionBusy}
+          done={sessionDone}
+          draft={draft}
+          onDraft={setDraft}
+          onCreate={() => {
+            if (draft) {
+              void beginEdit({
+                kind: "create-profile",
+                name: draft.name,
+                skills: [...draft.skills],
+                servers: [...draft.servers],
+              });
+            }
+          }}
+          onStart={(name) => void runSession(name, () => props.onSessionStart(name))}
+          onEnd={() => void runSession("__end__", props.onSessionEnd)}
+        />
+        {props.canEditProfiles ? (
+          <LibraryPane
+            load={load}
+            index={index}
+            query={query}
+            onQuery={setQuery}
+            profiles={profiles.map((p) => p.name)}
+            draft={draft}
+            onToggleDraft={toggleDraft}
+            canRemove={props.canRemoveFromLibrary}
+            busy={flow.phase !== "idle"}
+            onAdd={(group, name, profile) =>
+              void beginEdit(
+                group === "skill"
+                  ? { kind: "add-skill-to-profile", profile, name }
+                  : { kind: "add-server-to-profile", profile, name },
+              )
+            }
+            onRemove={(group, name) => void beginEdit({ kind: "remove-from-library", group, name })}
+          />
+        ) : (
+          <div className="flex min-h-0 flex-1 items-start px-4 py-4">
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
+              This agentstack CLI predates the library browser. Update it to add tools to a toolset
+              from here.
+            </p>
+          </div>
+        )}
+      </div>
+      {/* The consent step, anchored under the thing it is about rather than
+          replacing it. You can still see which toolset you picked and what
+          you picked it for while you decide. */}
+      {flow.phase !== "idle" ? (
+        // A pixel cap, not a percentage: a percentage max-height inside a flex
+        // child resolves against a box whose own height is being negotiated,
+        // which is how a confirm ends up either clipped or eating the panes
+        // above it depending on how much text the CLI returned.
+        <div className="max-h-[236px] shrink-0 overflow-y-auto border-t border-border/60 bg-foreground/[0.02]">
+          <EditFlowCard
+            flow={flow}
+            onConfirm={confirmEdit}
+            onBack={() => setFlow({ phase: "idle" })}
+          />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * The left rail: every toolset this project declares, what it bundles, and the
+ * verbs that change which one is in force. Always on screen — it is the thing
+ * the library is being browsed *for*.
+ */
+function ToolsetRail({
+  rows,
+  profiles,
+  session,
+  canSessions,
+  sessionsKnownMissing,
+  canEditProfiles,
+  busy,
+  done,
+  draft,
+  onDraft,
+  onCreate,
+  onStart,
+  onEnd,
+}: {
+  rows: ReadonlyArray<AgentstackToolsetRow>;
+  profiles: ReadonlyArray<AgentstackToolset>;
+  session: AgentstackActiveSession | null;
+  canSessions: boolean;
+  sessionsKnownMissing: boolean;
+  canEditProfiles: boolean;
+  busy: string | null;
+  done: { ok: boolean; message: string } | null;
+  draft: { name: string; skills: ReadonlyArray<string>; servers: ReadonlyArray<string> } | null;
+  onDraft: (
+    d: { name: string; skills: ReadonlyArray<string>; servers: ReadonlyArray<string> } | null,
+  ) => void;
+  onCreate: () => void;
+  onStart: (name: string) => void;
+  onEnd: () => void;
+}) {
+  const members = useMemo(() => new Map(profiles.map((p) => [p.name, p] as const)), [profiles]);
+  const nameOk = draft !== null && PROFILE_NAME_INPUT_RE.test(draft.name);
+  const picked = draft === null ? 0 : draft.skills.length + draft.servers.length;
+
+  return (
+    <div className="flex w-[264px] shrink-0 flex-col border-r border-border/60">
+      <div className="flex items-center gap-2 px-3 pb-1.5 pt-3">
+        <span className="text-[10.5px] font-semibold tracking-wide text-muted-foreground">
+          TOOLSETS
+        </span>
+        {/* Hidden while the rail is empty: an empty column with a 10px "+ New"
+            in its corner puts the only thing you can do here in the least
+            prominent place on the tab. The empty state below carries it. */}
+        {canEditProfiles && draft === null && rows.length > 0 ? (
+          <button
+            type="button"
+            onClick={() => onDraft({ name: "", skills: [], servers: [] })}
+            className="ml-auto shrink-0 rounded-md border border-border bg-background px-2 py-0.5 text-[10px] font-semibold text-foreground transition-colors hover:bg-accent"
+          >
+            + New
+          </button>
+        ) : null}
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+        {/* Composing a new toolset happens HERE, beside the library it draws
+            from — the old form listed the whole library a second time, in its
+            own screen, with its own checkboxes. */}
+        {draft !== null ? (
+          <div className="mb-2 flex flex-col gap-2 rounded-lg border border-success/35 bg-success/[0.06] p-2.5">
+            <input
+              value={draft.name}
+              onChange={(e) => onDraft({ ...draft, name: e.target.value })}
+              placeholder="Name it, e.g. web"
+              spellCheck={false}
+              autoFocus
+              className="h-7 rounded-md border border-border/60 bg-background px-2 text-xs text-foreground outline-none focus:border-border"
+            />
+            <p className="text-[10.5px] leading-relaxed text-muted-foreground">
+              {picked === 0
+                ? "Now click tools in the library to add them."
+                : `${formatAgentstackCount(picked, "tool")} picked.`}
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                disabled={!nameOk || picked === 0}
+                onClick={onCreate}
+                className="inline-flex h-7 items-center rounded-md border border-success/40 bg-success/15 px-2.5 text-[11px] font-semibold text-success-foreground disabled:opacity-50"
+              >
+                Create
+              </button>
+              <button
+                type="button"
+                onClick={() => onDraft(null)}
+                className="text-[11px] font-medium text-muted-foreground hover:text-foreground"
+              >
+                Cancel
+              </button>
+            </div>
+            {draft.name.length > 0 && !nameOk ? (
+              <p className="text-[10.5px] text-warning-foreground">
+                Letters, numbers, dot, dash or underscore — no spaces.
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+
+        {rows.length === 0 && draft === null ? (
+          // A toolset has to exist before anything in the library can be added
+          // to one — which is why every Add button on the right is disabled
+          // right now. That's stated here, next to the button that fixes it,
+          // rather than left for the user to infer from greyed-out controls.
+          <div className="flex flex-col gap-2 rounded-lg border border-border/50 border-dashed px-2.5 py-3">
+            <p className="text-[11.5px] font-semibold text-foreground">No toolsets yet</p>
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
+              A toolset bundles the servers and skills one kind of work needs. Nothing in the
+              library can be added until there's one to add it to.
+            </p>
+            {canEditProfiles ? (
+              <Button
+                size="xs"
+                variant="default"
+                onClick={() => onDraft({ name: "", skills: [], servers: [] })}
+                className="self-start font-semibold"
+              >
+                Create the first one
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
+
+        {rows.map((row) => {
+          const profile = members.get(row.name);
+          const inUse = row.active || session?.profile === row.name;
+          return (
+            <div
+              key={row.name}
+              className={cn(
+                "mb-1.5 flex flex-col gap-1.5 rounded-lg border px-2.5 py-2",
+                inUse ? "border-success/30 bg-success/[0.06]" : "border-border/50",
+              )}
+            >
+              <div className="flex items-center gap-2">
+                <span
+                  className={cn(
+                    "size-1.5 shrink-0 rounded-full",
+                    inUse ? "bg-success" : row.ready ? "bg-success/60" : "bg-warning",
+                  )}
+                />
+                <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-foreground">
+                  {row.name}
+                </span>
+                {inUse && canSessions ? (
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    disabled={busy !== null}
+                    onClick={onEnd}
+                    className="shrink-0"
+                  >
+                    {busy === "__end__" ? "Stopping…" : "Stop"}
+                  </Button>
+                ) : row.ready && !session && canSessions ? (
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    disabled={busy !== null}
+                    onClick={() => onStart(row.name)}
+                    title="Use this toolset temporarily — ends with your files back as they were"
+                    className="shrink-0"
+                  >
+                    {busy === row.name ? "Starting…" : "Use"}
+                  </Button>
+                ) : null}
+              </div>
+              <span className="text-[11px] text-muted-foreground">
+                {row.summary}
+                {inUse && session ? ` · in use ${fmtAgo(session.started_unix)}` : ""}
+              </span>
+              {row.blockedBecause ? (
+                <span className="text-[10.5px] leading-snug text-warning-foreground">
+                  {row.blockedBecause}
+                </span>
+              ) : null}
+              {profile && profile.servers.length + profile.skills.length > 0 ? (
+                <p className="text-[10.5px] leading-relaxed text-muted-foreground/70">
+                  {[...profile.servers, ...profile.skills].join(" · ")}
+                </p>
+              ) : null}
+            </div>
+          );
+        })}
+
+        {sessionsKnownMissing ? (
+          <p className="px-1 pt-1 text-[10.5px] text-muted-foreground/70">
+            Update agentstack to start a toolset from here.
+          </p>
+        ) : null}
+        {done ? (
+          <p
+            className={cn(
+              "px-1 pt-1 text-[11px]",
+              done.ok ? "text-muted-foreground" : "text-destructive-foreground",
+            )}
+          >
+            {done.message}
+          </p>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The right pane: the machine-wide library, with its filter pinned so it never
+ * scrolls away from the list it filters.
+ */
+function LibraryPane({
+  load,
+  index,
+  query,
+  onQuery,
+  profiles,
+  draft,
+  onToggleDraft,
+  canRemove,
+  busy,
+  onAdd,
+  onRemove,
+}: {
+  load: LibLoad;
+  index: NonNullable<AgentstackLibraryIndexResult["index"]> | null;
+  query: string;
+  onQuery: (q: string) => void;
+  /** Existing toolset names — the targets in each row's own Add menu. */
+  profiles: ReadonlyArray<string>;
+  draft: { name: string; skills: ReadonlyArray<string>; servers: ReadonlyArray<string> } | null;
+  onToggleDraft: (group: "skill" | "server", name: string) => void;
+  canRemove: boolean;
+  /** An edit is mid-flight; the rows stop offering new ones. */
+  busy: boolean;
+  onAdd: (group: "skill" | "server", name: string, profile: string) => void;
+  onRemove: (group: "skill" | "server", name: string) => void;
+}) {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex items-center gap-2 px-3 pb-2 pt-3">
+        {/* The header carries the mode. A row's button reading "Add" means
+            nothing on its own while a draft is open — add to WHAT? — so the
+            target is named once, here, instead of encoded in a second verb on
+            every row. */}
+        {draft !== null ? (
+          <span className="flex shrink-0 items-center gap-1.5 rounded-md bg-success/[0.12] px-2 py-0.5 text-[10.5px] font-semibold text-success-foreground">
+            Adding to {draft.name.trim().length > 0 ? draft.name.trim() : "new toolset"}
+          </span>
+        ) : (
+          <span className="shrink-0 text-[10.5px] font-semibold tracking-wide text-muted-foreground">
+            LIBRARY
+          </span>
+        )}
+        <input
+          type="search"
+          value={query}
+          onChange={(e) => onQuery(e.target.value)}
+          placeholder="Filter skills and servers…"
+          aria-label="Filter the library"
+          className="h-7 min-w-0 flex-1 rounded-lg border border-border/60 bg-background px-2.5 text-[11px] text-foreground placeholder:text-muted-foreground/60"
+        />
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
+        {load.phase === "loading" ? (
+          <p className="py-2 text-xs text-muted-foreground">Loading library…</p>
+        ) : index === null ? (
+          <p className="py-2 text-xs leading-relaxed text-muted-foreground">
+            Couldn't read the library — <code className="font-mono">agentstack library-index</code>{" "}
+            didn't return a catalog for this project.
+          </p>
+        ) : (
+          <div className="flex flex-col gap-3">
+            <LibraryGroup
+              title="Skills"
+              group="skill"
+              emptyLabel={
+                query.trim().length > 0 ? "No skills match." : "No skills in the library yet."
+              }
+              items={filterAgentstackLibraryItems(
+                index.skills.map((s) => ({
+                  name: s.name,
+                  origin: s.origin,
+                  detail: s.description,
+                  inManifest: s.in_manifest,
+                })),
+                query,
+              )}
+              profiles={profiles}
+              selected={draft?.skills ?? null}
+              onToggleDraft={onToggleDraft}
+              canRemove={canRemove}
+              busy={busy}
+              onAdd={onAdd}
+              onRemove={onRemove}
+            />
+            <LibraryGroup
+              title="Servers"
+              group="server"
+              emptyLabel={
+                query.trim().length > 0 ? "No servers match." : "No servers in the library yet."
+              }
+              items={filterAgentstackLibraryItems(
+                index.servers.map((s) => ({
+                  name: s.name,
+                  origin: s.origin,
+                  detail: s.provenance ?? null,
+                  inManifest: s.in_manifest,
+                })),
+                query,
+              )}
+              profiles={profiles}
+              selected={draft?.servers ?? null}
+              onToggleDraft={onToggleDraft}
+              canRemove={canRemove}
+              busy={busy}
+              onAdd={onAdd}
+              onRemove={onRemove}
+            />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Activity — every brokered call and every workflow run, in one place.
+ *
+ * They were two navigation rows answering halves of the same question ("what
+ * did my agents actually do, and did it work?"), one of which almost nobody
+ * ever saw populated. One tab, calls first because they are the common case.
+ */
+function ActivityTab(props: ManageProps) {
+  return (
+    <div className="flex flex-col">
+      <TabSection title="Brokered calls" first />
+      <ActivityPanel activity={props.activity} />
+      <TabSection title="Workflow runs" />
+      <WorkflowPanel
+        data={props.workflow}
+        incompatible={props.workflowIncompatible}
+        observeKnownMissing={props.workflowObserveKnownMissing}
+        cliVersion={props.version ?? null}
+        onOpenRun={props.onOpenRun}
+      />
+    </div>
+  );
+}
+
+/**
+ * The seam between two halves of a tab.
+ *
+ * A tab that stacks two panels reads as one long unlabelled scroll — you find
+ * out you passed a boundary by noticing the content changed. One rule and one
+ * label makes the boundary a fact instead of a surprise.
+ */
+function TabSection({ title, first = false }: { title: string; first?: boolean }) {
+  return (
+    <div className={cn("px-4 pb-1 pt-3", !first && "mt-1 border-t border-border/60")}>
+      <span className="text-[10.5px] font-semibold tracking-wide text-muted-foreground">
+        {title.toUpperCase()}
+      </span>
     </div>
   );
 }
@@ -1674,19 +2552,59 @@ export function CheckupFindings({
   findings,
   features,
   onRequestAction,
+  onReviewDrift,
+  defaultOpen = false,
+  alreadyOffered = null,
 }: {
   findings: ReadonlyArray<AgentstackFinding>;
   features: ReadonlyArray<string> | undefined;
   onRequestAction: (a: ActionKind) => void;
+  /**
+   * Start expanded. True in the Manage dialog, where the tab is 600px tall and
+   * the findings are the reason you opened Setup — a disclosure there is a
+   * click charged for hiding nothing. It stays closed anywhere the surface is
+   * short enough that an open list would push other things off it.
+   */
+  defaultOpen?: boolean;
+  /**
+   * An action a sibling on the SAME screen already offers a button for.
+   *
+   * This list already refuses to offer one action twice within itself — four
+   * providers missing the guard hook is one machine-wide write, not four
+   * repairs. Putting the status summary and the findings in one tab
+   * reintroduced exactly that from outside: "Enable guard" beside `Next`, and
+   * "Enable guard" again on the finding four rows below. The finding still
+   * shows its command; only the duplicate button goes.
+   */
+  alreadyOffered?: ActionKind | null;
+  /**
+   * Open the drift review from a Drift finding.
+   *
+   * Drift is the one finding class this list refuses to turn into a button
+   * (adopt and apply differ, and the scope has to be chosen) — but refusing
+   * the button left four rows printing a command with no way to act on it,
+   * which is a list of homework, not a checkup. The review dialog IS the
+   * honest way to act, so the row opens it. Omitted where no such surface
+   * exists to open.
+   */
+  onReviewDrift?: (() => void) | undefined;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const { visible, hidden, total } = selectAgentstackFindingsView(findings, expanded, features);
+  const view = selectAgentstackFindingsView(findings, expanded, features);
+  const { hidden, total } = view;
+  const visible =
+    alreadyOffered == null
+      ? view.visible
+      : view.visible.map((v) => (v.action === alreadyOffered ? { ...v, action: null } : v));
   if (total === 0) return null;
   return (
     // Indented to the rows' text column (px-2.5 + 6px dot + gap-2.5) and hung
     // off a rule, so it reads as the detail under the rows rather than as one
     // more, wider, sibling row.
-    <details className="group mr-1 mb-1 ml-[26px] border-border/50 border-l-2 py-1 pl-2.5 text-left">
+    <details
+      open={defaultOpen}
+      className="group mr-1 mb-1 ml-[26px] border-border/50 border-l-2 py-1 pl-2.5 text-left"
+    >
       <summary className="flex cursor-pointer select-none items-center gap-2 [&::-webkit-details-marker]:hidden">
         <span className="text-xs font-semibold text-foreground">What the checkup found</span>
         <span className="text-[11px] text-muted-foreground">
@@ -1718,6 +2636,8 @@ export function CheckupFindings({
               <RowAction onClick={() => onRequestAction(action)}>
                 {ACTION_META[action].label}
               </RowAction>
+            ) : finding.section === "Drift" && onReviewDrift ? (
+              <RowAction onClick={onReviewDrift}>Review</RowAction>
             ) : null}
           </li>
         ))}
@@ -1835,161 +2755,6 @@ type UndoAct =
   | { phase: "running" }
   | { phase: "done"; ok: boolean; message: string };
 
-/** Compact relative age from unix seconds. */
-/**
- * The toolset picker (Slice 2): every declared profile as a "toolset" row —
- * readiness, what it selects, whether it is in use — plus the temporary
- * activation verbs. "Use temporarily" starts a session (the CLI's fail-closed
- * gate enforces trust/pins); "Stop using" reverts it. The active-session line
- * renders from the CLI's own store on every read, so a session an interrupted
- * panel left behind reappears here with its safe recovery action.
- */
-function ToolsetsCard({
-  toolsets,
-  canSessions,
-  sessionsKnownMissing,
-  canEditProfiles,
-  onManageLibrary,
-  onStart,
-  onEnd,
-}: {
-  toolsets: AgentstackToolsetsResult | null;
-  canSessions: boolean;
-  sessionsKnownMissing: boolean;
-  canEditProfiles: boolean;
-  onManageLibrary: () => void;
-  onStart: (profile: string) => Promise<{ ok: boolean; message: string }>;
-  onEnd: () => Promise<{ ok: boolean; message: string }>;
-}) {
-  const [busy, setBusy] = useState<string | null>(null);
-  const [done, setDone] = useState<{ ok: boolean; message: string } | null>(null);
-
-  const data = toolsets?.toolsets ?? null;
-  const rows = useMemo(() => (data ? deriveToolsetRows(data.profiles, data.trust) : []), [data]);
-  const session = data?.session ?? null;
-
-  const start = useCallback(
-    async (profile: string) => {
-      setBusy(profile);
-      setDone(null);
-      const r = await onStart(profile);
-      setBusy(null);
-      setDone(r);
-    },
-    [onStart],
-  );
-  const end = useCallback(async () => {
-    setBusy("__end__");
-    setDone(null);
-    const r = await onEnd();
-    setBusy(null);
-    setDone(r);
-  }, [onEnd]);
-
-  // Nothing to show: no declared profiles and nothing to recover. When the CLI
-  // supports library edits we still render the header so "Browse library" (and
-  // thus "New toolset") is reachable from a fresh project with zero toolsets.
-  const empty = !data || (rows.length === 0 && !session);
-  if (empty && !canEditProfiles) return null;
-
-  return (
-    <div className="mx-1 mt-1.5 border-t border-border/40 px-1.5 pt-2">
-      <div className="flex items-center gap-2 px-1 pb-1">
-        <span className="text-xs font-semibold text-foreground">Toolsets</span>
-        {sessionsKnownMissing ? (
-          <span className="text-[10px] text-muted-foreground/70">
-            update agentstack to start one from here
-          </span>
-        ) : null}
-        {canEditProfiles ? (
-          <button
-            type="button"
-            onClick={onManageLibrary}
-            className="ml-auto shrink-0 rounded-md border border-border bg-background px-2 py-0.5 text-[10px] font-semibold text-foreground transition-colors hover:bg-accent"
-            title="Browse the skill & server library — add tools to a toolset or create a new one"
-          >
-            Browse library
-          </button>
-        ) : null}
-      </div>
-
-      {empty ? (
-        <p className="px-2.5 pb-1.5 pt-0.5 text-[11px] leading-relaxed text-muted-foreground/70">
-          No toolsets yet. Browse the library to add tools and create your first one.
-        </p>
-      ) : null}
-
-      {session ? (
-        <div className="mb-1 flex items-center gap-2 rounded-lg border border-success/25 bg-success/[0.07] px-2.5 py-2">
-          <span className="size-[7px] shrink-0 rounded-full bg-success" />
-          <span className="min-w-0 flex-1 truncate text-xs text-foreground">
-            <span className="font-semibold">{session.profile}</span> in use ·{" "}
-            {fmtAgo(session.started_unix)} — ends with your files back as they were
-          </span>
-          <Button
-            disabled={busy !== null || !canSessions}
-            onClick={() => void end()}
-            size="xs"
-            title={
-              canSessions
-                ? "Revert this temporary activation"
-                : "This agentstack CLI predates session control from the panel — run `agentstack session end` in a terminal"
-            }
-            variant="outline"
-          >
-            {busy === "__end__" ? "Stopping…" : "Stop using"}
-          </Button>
-        </div>
-      ) : null}
-
-      {rows.map((row) => (
-        <div key={row.name} className="flex items-center gap-2.5 rounded-lg px-2.5 py-[7px]">
-          <span
-            className={cn(
-              "size-1.5 shrink-0 rounded-full",
-              row.active ? "bg-success" : row.ready ? "bg-success/60" : "bg-warning",
-            )}
-          />
-          <span className="min-w-0 shrink-0 max-w-[96px] truncate text-[12.5px] font-semibold text-foreground">
-            {row.name}
-          </span>
-          <span
-            className="min-w-0 flex-1 truncate text-xs text-muted-foreground"
-            title={row.blockedBecause ?? row.summary}
-          >
-            {row.blockedBecause ?? row.summary}
-          </span>
-          {row.active ? (
-            <span className="shrink-0 text-[10px] font-semibold text-success-foreground">
-              in use
-            </span>
-          ) : row.ready && !session && canSessions ? (
-            <button
-              type="button"
-              disabled={busy !== null}
-              onClick={() => void start(row.name)}
-              className="shrink-0 rounded-md border border-border bg-background px-2 py-0.5 text-[10px] font-semibold text-foreground transition-colors hover:bg-accent disabled:opacity-50"
-            >
-              {busy === row.name ? "Starting…" : "Use temporarily"}
-            </button>
-          ) : null}
-        </div>
-      ))}
-
-      {done ? (
-        <p
-          className={cn(
-            "px-2.5 pb-1 text-[11px]",
-            done.ok ? "text-muted-foreground" : "text-destructive-foreground",
-          )}
-        >
-          {done.message}
-        </p>
-      ) : null}
-    </div>
-  );
-}
-
 function undoAge(unixSeconds: number): string {
   const secs = Math.max(0, Math.floor(Date.now() / 1000) - unixSeconds);
   if (secs < 60) return "just now";
@@ -2023,11 +2788,6 @@ type EditFlow =
   | { phase: "unsupported"; title: string }
   | { phase: "running"; edit: AgentstackProfileEdit; title: string }
   | { phase: "done"; ok: boolean; message: string; title: string };
-
-type LibView =
-  | { kind: "browse" }
-  | { kind: "pick-target"; group: "skill" | "server"; name: string }
-  | { kind: "new" };
 
 /**
  * The container for a screen you *read* — a trust surface, a drift diff, the
@@ -2117,326 +2877,43 @@ function matchSecretBlock(message: string): { ref: string | null } | null {
   return { ref };
 }
 
-/**
- * The library browser (Lane B4): reads `library-index` and lets the user add a
- * skill/server to a toolset, or create a new toolset seeded with library/inline
- * capabilities. Both mutations go through the digest-confirm flow — a preview
- * returns the CLI's consent digest over the intended change + manifest bytes,
- * and the apply presents it back (`--yes --consented`), so "the user reviewed
- * this exact change" is CLI-enforced. Activation stays fail-closed: an
- * unresolved `${REF}` blocks the render and surfaces its own next-step card.
- * The panel never composes a command line — it names an edit; the server maps it
- * to fixed argv.
- */
-function LibraryPanel({
-  loadIndex,
-  preview,
-  apply,
-  canRemove,
-}: {
-  loadIndex: () => Promise<AgentstackLibraryIndexResult | null>;
-  preview: (edit: AgentstackProfileEdit) => Promise<AgentstackProfileEditPreviewResult | null>;
-  apply: (
-    edit: AgentstackProfileEdit,
-    consentedDigest: string,
-  ) => Promise<{ ok: boolean; message: string }>;
-  /** Whether this CLI advertises `library-remove-v1`. */
-  canRemove: boolean;
-}) {
-  const [load, setLoad] = useState<LibLoad>({ phase: "loading" });
-  const [view, setView] = useState<LibView>({ kind: "browse" });
-  const [query, setQuery] = useState("");
-  const [flow, setFlow] = useState<EditFlow>({ phase: "idle" });
-  // New-toolset draft (only used in the "new" view).
-  const [draftName, setDraftName] = useState("");
-  const [draftSkills, setDraftSkills] = useState<ReadonlyArray<string>>([]);
-  const [draftServers, setDraftServers] = useState<ReadonlyArray<string>>([]);
-
-  const reload = useCallback(async () => {
-    const r = await loadIndex();
-    setLoad(r?.index ? { phase: "loaded", index: r.index } : { phase: "error" });
-  }, [loadIndex]);
-
-  useEffect(() => {
-    void reload();
-  }, [reload]);
-
-  const index = load.phase === "loaded" ? load.index : null;
-  const profiles = index?.profiles ?? [];
-
-  // Compose → preview → confirm. A preview without a digest (older CLI) can't be
-  // applied, so it lands in `unsupported` rather than offering a doomed confirm.
-  const beginEdit = useCallback(
-    async (edit: AgentstackProfileEdit) => {
-      const title = describeEdit(edit);
-      setFlow({ phase: "previewing", edit, title });
-      const result = await preview(edit);
-      const digest = result?.preview?.consent_digest ?? null;
-      if (digest) {
-        setFlow({
-          phase: "confirm",
-          edit,
-          title,
-          digest,
-          note: result?.preview?.note ?? null,
-          removal: result?.preview?.removal ?? null,
-        });
-      } else {
-        setFlow({ phase: "unsupported", title });
-      }
-    },
-    [preview],
-  );
-
-  const confirmEdit = useCallback(async () => {
-    if (flow.phase !== "confirm") return;
-    const { edit, title, digest } = flow;
-    setFlow({ phase: "running", edit, title });
-    const r = await apply(edit, digest);
-    setFlow({ phase: "done", ok: r.ok, message: r.message, title });
-    if (r.ok) {
-      // A successful add/create changed the manifest — refresh in_manifest flags
-      // and the toolset list. (A ${REF}-blocked apply also wrote the manifest, so
-      // reload there too to reflect the partial state honestly.)
-      await reload();
-    } else if (matchSecretBlock(r.message)) {
-      await reload();
-    }
-  }, [flow, apply, reload]);
-
-  // Reset the browse view + draft after a flow finishes.
-  const backToBrowse = useCallback(() => {
-    setFlow({ phase: "idle" });
-    setView({ kind: "browse" });
-    setDraftName("");
-    setDraftSkills([]);
-    setDraftServers([]);
-  }, []);
-
-  const toggle = (list: ReadonlyArray<string>, name: string): ReadonlyArray<string> =>
-    list.includes(name) ? list.filter((n) => n !== name) : [...list, name];
-
-  return (
-    <div>
-      {/* The edit flow takes over the body while active. */}
-      {flow.phase !== "idle" ? (
-        <EditFlowCard flow={flow} onConfirm={confirmEdit} onBack={backToBrowse} />
-      ) : load.phase === "loading" ? (
-        <p className="px-4 py-4 text-xs text-muted-foreground">Loading library…</p>
-      ) : load.phase === "error" || index === null ? (
-        <p className="px-4 py-4 text-xs leading-relaxed text-muted-foreground">
-          Couldn't read the library — <code className="font-mono">agentstack library-index</code>{" "}
-          didn't return a catalog for this project.
-        </p>
-      ) : view.kind === "pick-target" ? (
-        <div className="flex flex-col gap-2 px-4 py-3">
-          <p className="text-xs leading-relaxed text-muted-foreground">
-            Add the {view.group} <span className="font-semibold text-foreground">{view.name}</span>{" "}
-            to which toolset?
-          </p>
-          {profiles.length === 0 ? (
-            <p className="text-[11px] leading-relaxed text-muted-foreground/70">
-              No toolsets yet — create one first, then add tools to it.
-            </p>
-          ) : (
-            <div className="flex flex-col gap-1">
-              {profiles.map((p) => (
-                <button
-                  key={p}
-                  type="button"
-                  onClick={() =>
-                    void beginEdit(
-                      view.group === "skill"
-                        ? { kind: "add-skill-to-profile", profile: p, name: view.name }
-                        : { kind: "add-server-to-profile", profile: p, name: view.name },
-                    )
-                  }
-                  className="flex items-center gap-2 rounded-lg border border-border/50 px-2.5 py-1.5 text-left text-xs font-semibold text-foreground transition-colors hover:border-border hover:bg-accent"
-                >
-                  <span className="size-1.5 rounded-full bg-muted-foreground/40" />
-                  {p}
-                </button>
-              ))}
-            </div>
-          )}
-          <button
-            type="button"
-            onClick={() => setView({ kind: "browse" })}
-            className="self-start text-[11px] font-medium text-muted-foreground hover:text-foreground"
-          >
-            Cancel
-          </button>
-        </div>
-      ) : view.kind === "new" ? (
-        <div className="flex flex-col gap-3 px-4 py-3 text-xs">
-          <p className="text-[12.5px] leading-relaxed text-muted-foreground">
-            Name a new toolset and pick the tools it bundles. You can activate it afterward from the
-            Toolsets list.
-          </p>
-          <label className="flex flex-col gap-1">
-            <span className="text-xs font-semibold text-foreground">Toolset name</span>
-            <input
-              value={draftName}
-              onChange={(e) => setDraftName(e.target.value)}
-              placeholder="e.g. web"
-              spellCheck={false}
-              className="rounded-lg border border-border/60 bg-background px-2.5 py-1.5 text-xs text-foreground outline-none focus:border-border"
-            />
-          </label>
-
-          <LibrarySelectGroup
-            title="Skills"
-            items={index.skills.map((s) => ({ name: s.name, hint: s.origin }))}
-            selected={draftSkills}
-            onToggle={(name) => setDraftSkills((l) => toggle(l, name))}
-          />
-          <LibrarySelectGroup
-            title="Servers"
-            items={index.servers.map((s) => ({ name: s.name, hint: s.origin }))}
-            selected={draftServers}
-            onToggle={(name) => setDraftServers((l) => toggle(l, name))}
-          />
-
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              disabled={
-                !PROFILE_NAME_INPUT_RE.test(draftName) ||
-                (draftSkills.length === 0 && draftServers.length === 0)
-              }
-              onClick={() =>
-                void beginEdit({
-                  kind: "create-profile",
-                  name: draftName,
-                  skills: [...draftSkills],
-                  servers: [...draftServers],
-                })
-              }
-              className="inline-flex h-8 items-center rounded-lg border border-success/40 bg-success/10 px-3.5 text-xs font-semibold text-success-foreground disabled:opacity-50"
-            >
-              Create toolset
-            </button>
-            <button
-              type="button"
-              onClick={() => setView({ kind: "browse" })}
-              className="text-[11px] font-medium text-muted-foreground hover:text-foreground"
-            >
-              Cancel
-            </button>
-          </div>
-          {draftName.length > 0 && !PROFILE_NAME_INPUT_RE.test(draftName) ? (
-            <p className="text-[10.5px] text-warning-foreground">
-              Use letters, numbers, dot, dash or underscore (no spaces).
-            </p>
-          ) : null}
-        </div>
-      ) : (
-        <div className="flex flex-col gap-3 px-4 py-3">
-          <div className="flex items-center gap-2">
-            <p className="min-w-0 flex-1 text-xs leading-relaxed text-muted-foreground">
-              Adding one enrolls it and re-locks the toolset.
-            </p>
-            <button
-              type="button"
-              onClick={() => setView({ kind: "new" })}
-              className="shrink-0 rounded-md border border-success/40 bg-success/10 px-2 py-0.5 text-[10px] font-semibold text-success-foreground transition-colors hover:bg-success/20"
-            >
-              + New toolset
-            </button>
-          </div>
-
-          {/* A library of any real size is unscrollable in a 360px column. */}
-          <input
-            type="search"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Filter skills and servers…"
-            aria-label="Filter the library"
-            className="h-7 w-full rounded-lg border border-border/60 bg-background px-2.5 text-[11px] text-foreground placeholder:text-muted-foreground/60"
-          />
-
-          <LibraryBrowseGroup
-            title="Skills"
-            emptyLabel={
-              query.trim().length > 0
-                ? "No skills match that filter."
-                : "No skills in the library yet."
-            }
-            items={filterAgentstackLibraryItems(
-              index.skills.map((s) => ({
-                name: s.name,
-                origin: s.origin,
-                detail: s.description,
-                inManifest: s.in_manifest,
-              })),
-              query,
-            )}
-            hasToolsets={profiles.length > 0}
-            onAdd={(name) => setView({ kind: "pick-target", group: "skill", name })}
-            onRemove={
-              canRemove
-                ? (name) => void beginEdit({ kind: "remove-from-library", group: "skill", name })
-                : null
-            }
-          />
-          <LibraryBrowseGroup
-            title="Servers"
-            emptyLabel={
-              query.trim().length > 0
-                ? "No servers match that filter."
-                : "No servers in the library yet."
-            }
-            items={filterAgentstackLibraryItems(
-              index.servers.map((s) => ({
-                name: s.name,
-                origin: s.origin,
-                detail: s.provenance ?? null,
-                inManifest: s.in_manifest,
-              })),
-              query,
-            )}
-            hasToolsets={profiles.length > 0}
-            onAdd={(name) => setView({ kind: "pick-target", group: "server", name })}
-            onRemove={
-              canRemove
-                ? (name) => void beginEdit({ kind: "remove-from-library", group: "server", name })
-                : null
-            }
-          />
-        </div>
-      )}
-    </div>
-  );
-}
-
 /** Toolset-name input shape, mirrored from the server's PROFILE-name guard so
  *  the create button disables before a doomed round-trip. */
 const PROFILE_NAME_INPUT_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
-/** One browsable group (skills or servers) in the library browser. */
-function LibraryBrowseGroup({
+interface LibraryItem {
+  name: string;
+  origin: string;
+  detail: string | null;
+  inManifest: boolean;
+}
+
+/** One group (skills or servers) of the library pane. */
+function LibraryGroup({
   title,
+  group,
   emptyLabel,
   items,
-  hasToolsets,
+  profiles,
+  selected,
+  onToggleDraft,
+  canRemove,
+  busy,
   onAdd,
   onRemove,
 }: {
   title: string;
+  group: "skill" | "server";
   emptyLabel: string;
-  items: ReadonlyArray<{
-    name: string;
-    origin: string;
-    detail: string | null;
-    inManifest: boolean;
-  }>;
-  hasToolsets: boolean;
-  onAdd: (name: string) => void;
-  /** Remove from the machine-wide central library. Offered only on
-   *  `library`-origin rows — a `manifest`-origin row is this project's own
-   *  inline capability, which the library has no copy of to remove. `null` when
-   *  the CLI doesn't advertise `library-remove-v1`. */
-  onRemove: ((name: string) => void) | null;
+  items: ReadonlyArray<LibraryItem>;
+  profiles: ReadonlyArray<string>;
+  /** Non-null while a new toolset is being composed: the picked members. */
+  selected: ReadonlyArray<string> | null;
+  onToggleDraft: (group: "skill" | "server", name: string) => void;
+  canRemove: boolean;
+  busy: boolean;
+  onAdd: (group: "skill" | "server", name: string, profile: string) => void;
+  onRemove: (group: "skill" | "server", name: string) => void;
 }) {
   return (
     <div className="flex flex-col gap-1">
@@ -2446,63 +2923,18 @@ function LibraryBrowseGroup({
       ) : (
         <div className="flex flex-col gap-0.5">
           {items.map((it) => (
-            <div
+            <LibraryRow
               key={`${it.origin}:${it.name}`}
-              className="group flex items-center gap-2 rounded-lg px-1.5 py-[6px] hover:bg-foreground/[0.03]"
-            >
-              <span className="size-1.5 shrink-0 rounded-full bg-muted-foreground/40" />
-              <div className="flex min-w-0 flex-1 flex-col">
-                <span className="truncate text-[12px] font-semibold text-foreground">
-                  {it.name}
-                  {it.inManifest ? (
-                    <span className="ml-1.5 text-[10px] font-normal text-muted-foreground/60">
-                      in project
-                    </span>
-                  ) : null}
-                </span>
-                {it.detail ? (
-                  <span
-                    className="line-clamp-2 text-[10.5px] leading-snug text-muted-foreground"
-                    title={it.detail}
-                  >
-                    {it.detail}
-                  </span>
-                ) : null}
-              </div>
-              <button
-                type="button"
-                disabled={!hasToolsets}
-                onClick={() => onAdd(it.name)}
-                title={
-                  hasToolsets
-                    ? "Add this to a toolset"
-                    : "Create a toolset first, then add tools to it"
-                }
-                className="shrink-0 rounded-md border border-border bg-background px-2 py-0.5 text-[10px] font-semibold text-foreground transition-colors hover:bg-accent disabled:opacity-40"
-              >
-                Add
-              </button>
-              {onRemove !== null && it.origin === "library" ? (
-                // `Add` enrolls this capability in a toolset for THIS project;
-                // `Remove` deletes it from the machine-wide library, for every
-                // project. Two very different blast radii, so they no longer
-                // sit side by side as equals: the destructive one appears on
-                // row hover or keyboard focus and carries destructive colour
-                // the moment it is visible. (The click still opens the
-                // digest-bound confirm — this is about not offering a
-                // machine-wide delete as a permanent neighbour of a
-                // project-scoped add.)
-                <button
-                  type="button"
-                  onClick={() => onRemove(it.name)}
-                  title="Remove from your library (all projects) — recoverable"
-                  aria-label={`Remove ${it.name} from your library`}
-                  className="shrink-0 rounded-md border border-transparent px-1.5 py-0.5 text-[10px] font-semibold text-destructive-foreground/80 opacity-0 transition-all hover:border-destructive/30 hover:bg-destructive/10 hover:text-destructive-foreground focus-visible:opacity-100 group-hover:opacity-100"
-                >
-                  Remove
-                </button>
-              ) : null}
-            </div>
+              item={it}
+              group={group}
+              profiles={profiles}
+              picked={selected === null ? null : selected.includes(it.name)}
+              onToggleDraft={onToggleDraft}
+              canRemove={canRemove}
+              busy={busy}
+              onAdd={onAdd}
+              onRemove={onRemove}
+            />
           ))}
         </div>
       )}
@@ -2510,54 +2942,155 @@ function LibraryBrowseGroup({
   );
 }
 
-/** One multi-select group for the new-toolset form. */
-function LibrarySelectGroup({
-  title,
-  items,
-  selected,
-  onToggle,
+/**
+ * One library row.
+ *
+ * "Which toolset?" is answered inside the row. It used to be a whole screen:
+ * click Add, the catalogue disappeared, a list of toolset names took its
+ * place, and the confirm that followed asked the same question again in
+ * different words. Now the row grows by one line, and the thing you asked
+ * about never leaves the screen.
+ *
+ * Deliberately not a floating menu. This list lives inside a modal dialog, and
+ * a portalled popover over a focus-trapped modal is a stack of assumptions
+ * about z-order and outside-click that buys nothing here — one extra line, in
+ * place, cannot land behind anything or steal the dialog's dismiss.
+ */
+function LibraryRow({
+  item,
+  group,
+  profiles,
+  picked,
+  onToggleDraft,
+  canRemove,
+  busy,
+  onAdd,
+  onRemove,
 }: {
-  title: string;
-  items: ReadonlyArray<{ name: string; hint: string }>;
-  selected: ReadonlyArray<string>;
-  onToggle: (name: string) => void;
+  item: LibraryItem;
+  group: "skill" | "server";
+  profiles: ReadonlyArray<string>;
+  picked: boolean | null;
+  onToggleDraft: (group: "skill" | "server", name: string) => void;
+  canRemove: boolean;
+  busy: boolean;
+  onAdd: (group: "skill" | "server", name: string, profile: string) => void;
+  onRemove: (group: "skill" | "server", name: string) => void;
 }) {
+  const [choosing, setChoosing] = useState(false);
+  const composing = picked !== null;
+  // A toolset must exist before anything can be added to one, and composing a
+  // new one takes over what every row's button means.
+  const canChoose = !busy && profiles.length > 0;
   return (
-    <div className="flex flex-col gap-1">
-      <p className="text-xs font-semibold text-foreground">{title}</p>
-      {items.length === 0 ? (
-        <span className="text-[11px] text-muted-foreground/70">none available</span>
-      ) : (
-        <div className="flex flex-col gap-0.5">
-          {items.map((it) => {
-            const on = selected.includes(it.name);
-            return (
-              <button
-                key={`${it.hint}:${it.name}`}
-                type="button"
-                onClick={() => onToggle(it.name)}
-                className={cn(
-                  "flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-left transition-colors",
-                  on
-                    ? "border-success/40 bg-success/[0.07]"
-                    : "border-border/50 hover:border-border",
-                )}
-              >
-                <span
-                  className={cn(
-                    "size-2 shrink-0 rounded-full",
-                    on ? "bg-success" : "bg-muted-foreground/30",
-                  )}
-                />
-                <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-foreground">
-                  {it.name}
-                </span>
-                <span className="shrink-0 text-[10px] text-muted-foreground/60">{it.hint}</span>
-              </button>
-            );
-          })}
-        </div>
+    <div
+      className={cn(
+        "group flex flex-col rounded-lg px-1.5 py-[6px]",
+        picked === true
+          ? "bg-success/[0.08]"
+          : choosing
+            ? "bg-foreground/[0.04]"
+            : "hover:bg-foreground/[0.03]",
       )}
+    >
+      <div className="flex items-center gap-2">
+        <span
+          className={cn(
+            "size-1.5 shrink-0 rounded-full",
+            picked === true ? "bg-success" : "bg-muted-foreground/40",
+          )}
+        />
+        <div className="flex min-w-0 flex-1 flex-col">
+          <span className="truncate text-[12px] font-semibold text-foreground">
+            {item.name}
+            {item.inManifest ? (
+              <span className="ml-1.5 text-[10px] font-normal text-muted-foreground/60">
+                in project
+              </span>
+            ) : null}
+          </span>
+          {item.detail ? (
+            <span
+              className="line-clamp-2 text-[10.5px] leading-snug text-muted-foreground"
+              title={item.detail}
+            >
+              {item.detail}
+            </span>
+          ) : null}
+        </div>
+
+        {composing ? (
+          // While composing, the same row IS the picker for the new toolset —
+          // rather than a second copy of the whole library in its own form.
+          //
+          // Same verb as the normal state, deliberately. "Pick" here and "Add"
+          // one mode over was two words for one gesture, and nothing on the row
+          // said which mode it was in — so the button changed its label for
+          // reasons the reader couldn't see. It is always "Add"; what changes
+          // is what you are adding TO, which the header above now names.
+          <Button
+            size="xs"
+            variant={picked ? "default" : "outline"}
+            onClick={() => onToggleDraft(group, item.name)}
+            className="shrink-0"
+          >
+            {picked ? "Added" : "Add"}
+          </Button>
+        ) : (
+          <Button
+            size="xs"
+            variant="outline"
+            disabled={!canChoose}
+            onClick={() => setChoosing((c) => !c)}
+            title={
+              profiles.length === 0
+                ? "Create a toolset first, then add tools to it"
+                : "Add this to a toolset"
+            }
+            className="shrink-0"
+          >
+            {choosing ? "Cancel" : "Add"}
+          </Button>
+        )}
+
+        {canRemove && !composing && !choosing && item.origin === "library" ? (
+          // `Add` enrolls this capability in a toolset for THIS project;
+          // `Remove` deletes it from the machine-wide library, for every
+          // project. Two very different blast radii, so they do not sit side by
+          // side as equals: the destructive one appears on row hover or
+          // keyboard focus and carries destructive colour the moment it is
+          // visible.
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => onRemove(group, item.name)}
+            title="Remove from your library (all projects) — recoverable"
+            aria-label={`Remove ${item.name} from your library`}
+            className="shrink-0 rounded-md border border-transparent px-1.5 py-0.5 text-[10px] font-semibold text-destructive-foreground/80 opacity-0 transition-all hover:border-destructive/30 hover:bg-destructive/10 hover:text-destructive-foreground focus-visible:opacity-100 group-hover:opacity-100 disabled:opacity-0"
+          >
+            Remove
+          </button>
+        ) : null}
+      </div>
+
+      {choosing && !composing ? (
+        <div className="flex flex-wrap items-center gap-1.5 pt-1.5 pl-3.5">
+          <span className="text-[10.5px] text-muted-foreground">Add to</span>
+          {profiles.map((p) => (
+            <button
+              key={p}
+              type="button"
+              onClick={() => {
+                setChoosing(false);
+                onAdd(group, item.name, p);
+              }}
+              className="rounded-md border border-border bg-background px-2 py-0.5 text-[10.5px] font-semibold text-foreground transition-colors hover:bg-accent"
+            >
+              {p}
+            </button>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -2970,7 +3503,6 @@ type SetupLoad =
 
 type SetupAct =
   | { phase: "idle" }
-  | { phase: "confirm" }
   | { phase: "running" }
   | { phase: "done"; ok: boolean; message: string };
 
@@ -3110,6 +3642,64 @@ function SetupPanel({
         Nothing is written until you confirm.
       </p>
 
+      {/* The ONE decision, first. It used to be the fifth thing on the screen,
+          below three inventories — so the only choice setup asks you to make
+          was the one you had to scroll to find, while the reference material
+          led. Everything below this is inventory: collapsed, and true whether
+          or not it is read. */}
+      {plan.secrets.length > 0 ? (
+        <div className="flex flex-col gap-1.5">
+          <p className="text-xs font-semibold text-foreground">Where token values are stored</p>
+          <div className="flex flex-col gap-1">
+            {SECRETS_CHOICES.map((c) => {
+              const selected = secretsChoice === c.value;
+              return (
+                <button
+                  key={c.value}
+                  type="button"
+                  disabled={reloading || act.phase === "running"}
+                  onClick={() => pickSecrets(c.value)}
+                  className={cn(
+                    "flex flex-col gap-0.5 rounded-lg border px-2.5 py-1.5 text-left transition-colors disabled:opacity-60",
+                    selected
+                      ? "border-success/40 bg-success/[0.07]"
+                      : "border-border/50 hover:border-border",
+                  )}
+                >
+                  <span className="flex items-center gap-1.5 text-[11px] font-semibold text-foreground">
+                    <span
+                      className={cn(
+                        "h-2 w-2 rounded-full",
+                        selected ? "bg-success" : "bg-muted-foreground/30",
+                      )}
+                    />
+                    {c.label}
+                  </span>
+                  <span className="pl-3.5 text-[10.5px] leading-relaxed text-muted-foreground">
+                    {c.detail}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+          <p className="text-[10.5px] leading-relaxed text-muted-foreground">
+            {reloading ? (
+              "Updating the plan…"
+            ) : (
+              <>
+                Values you'll still provide:{" "}
+                {plan.secrets.map((s, i) => (
+                  <Fragment key={s.reference}>
+                    {i > 0 ? ", " : null}
+                    <code className="font-mono text-foreground">{s.reference}</code>
+                  </Fragment>
+                ))}
+              </>
+            )}
+          </p>
+        </div>
+      ) : null}
+
       <SetupGroup title="Coding tools found" count={{ n: plan.detected.length, noun: "tool" }}>
         {plan.detected.length === 0 ? (
           <span className="text-[11px] text-muted-foreground">none detected</span>
@@ -3215,62 +3805,6 @@ function SetupPanel({
         ) : null}
       </SetupGroup>
 
-      {plan.secrets.length > 0 ? (
-        <SetupGroup title="Values you'll still provide">
-          <ul className="flex flex-col gap-0.5 text-[11px] leading-relaxed text-muted-foreground">
-            {plan.secrets.map((s) => (
-              <li key={s.reference}>
-                <code className="font-mono text-foreground">{s.reference}</code>{" "}
-                <span className="text-muted-foreground/70">— {s.origin}</span>
-              </li>
-            ))}
-          </ul>
-        </SetupGroup>
-      ) : null}
-
-      {/* Where those lifted values are stored. Shown only when the plan lifts
-          secrets — no decision to surface otherwise (the default applies
-          silently). Changing it re-reads the plan for a matching digest. */}
-      {plan.secrets.length > 0 ? (
-        <SetupGroup title="Where token values are stored">
-          <div className="flex flex-col gap-1">
-            {SECRETS_CHOICES.map((c) => {
-              const selected = secretsChoice === c.value;
-              return (
-                <button
-                  key={c.value}
-                  type="button"
-                  disabled={reloading || act.phase === "running"}
-                  onClick={() => pickSecrets(c.value)}
-                  className={cn(
-                    "flex flex-col gap-0.5 rounded-lg border px-2.5 py-1.5 text-left transition-colors disabled:opacity-60",
-                    selected
-                      ? "border-success/40 bg-success/[0.07]"
-                      : "border-border/50 hover:border-border",
-                  )}
-                >
-                  <span className="flex items-center gap-1.5 text-[11px] font-semibold text-foreground">
-                    <span
-                      className={cn(
-                        "h-2 w-2 rounded-full",
-                        selected ? "bg-success" : "bg-muted-foreground/30",
-                      )}
-                    />
-                    {c.label}
-                  </span>
-                  <span className="pl-3.5 text-[10.5px] leading-relaxed text-muted-foreground">
-                    {c.detail}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-          {reloading ? (
-            <p className="text-[10.5px] text-muted-foreground/60">Updating the plan…</p>
-          ) : null}
-        </SetupGroup>
-      ) : null}
-
       {setupUnsupported ? (
         <p className="text-[11px] leading-relaxed text-warning-foreground">
           {canApply
@@ -3299,34 +3833,35 @@ function SetupPanel({
           {" — "}
           <span className="break-words font-mono text-muted-foreground">{act.message}</span>
         </div>
-      ) : act.phase === "confirm" || act.phase === "running" ? (
-        <div className="flex items-center gap-2">
+      ) : (
+        // One write, one button, and the scope stated beside it. The second
+        // screen this replaced restated the plan already on this page in
+        // shorter words — a click that changes nothing you can see, between
+        // you and the one you meant. The digest still binds: the CLI writes
+        // nothing if detection moved since this plan was read.
+        <div className="flex flex-col gap-1.5 border-t border-border/50 pt-3">
+          <p className="text-[11px] leading-relaxed text-muted-foreground">
+            Writes{" "}
+            <code className="font-mono text-foreground">
+              {shortenAgentstackPath(plan.manifest_path, paths)}
+            </code>{" "}
+            only
+            {plan.secrets.length > 0 && secretsChoice !== "skip"
+              ? `, storing ${formatAgentstackCount(plan.secrets.length, "token value")} in ${
+                  secretsChoice === "env" ? ".env" : "your system keychain"
+                }`
+              : ""}
+            . Your CLIs' own configs aren't touched until you apply the setup to them.
+          </p>
           <button
             type="button"
-            disabled={act.phase === "running"}
+            disabled={!canSetUp || act.phase === "running"}
             onClick={() => void run()}
-            className="inline-flex h-7 items-center rounded-lg border border-success/40 bg-success/10 px-3 text-xs font-semibold text-success-foreground disabled:opacity-60"
+            className="inline-flex h-8 items-center self-start rounded-lg border border-success/40 bg-success/10 px-3.5 text-xs font-semibold text-success-foreground disabled:opacity-60"
           >
-            {act.phase === "running" ? "Setting up…" : "Confirm setup"}
-          </button>
-          <button
-            type="button"
-            disabled={act.phase === "running"}
-            onClick={() => setAct({ phase: "idle" })}
-            className="inline-flex h-7 items-center rounded-lg px-2.5 text-xs font-medium text-muted-foreground disabled:opacity-60"
-          >
-            Cancel
+            {act.phase === "running" ? "Setting up…" : "Set up this project"}
           </button>
         </div>
-      ) : (
-        <button
-          type="button"
-          disabled={!canSetUp}
-          onClick={() => setAct({ phase: "confirm" })}
-          className="inline-flex h-8 items-center self-start rounded-lg border border-success/40 bg-success/10 px-3.5 text-xs font-semibold text-success-foreground disabled:opacity-60"
-        >
-          Set up this project
-        </button>
       )}
 
       {planDigest ? (
@@ -4012,41 +4547,6 @@ function ActivityPanel({ activity }: { activity: AgentstackActivity | null }) {
         </li>
       ))}
     </ul>
-  );
-}
-
-/**
- * The collapsed entry to the deeper views, rendered under the Overview. One
- * quiet row per view — a label plus its outcome hint — so the beginner surface
- * stays the four jobs while everything else remains one tap away.
- */
-function AdvancedNav({
-  onOpen,
-  workflowLive,
-}: {
-  onOpen: (tab: Tab) => void;
-  workflowLive: boolean;
-}) {
-  return (
-    <div className="mx-1.5 mb-1.5 mt-1 border-t border-border/50 pt-1.5">
-      {(Object.keys(ADVANCED_VIEWS) as Array<Exclude<Tab, "overview">>).map((t) => (
-        <button
-          key={t}
-          type="button"
-          onClick={() => onOpen(t)}
-          className="flex w-full items-center gap-2 rounded-lg px-2.5 py-[6px] text-left transition-colors hover:bg-foreground/[0.04]"
-        >
-          <span className="text-[12px] font-medium text-foreground">{ADVANCED_VIEWS[t].title}</span>
-          {t === "workflow" && workflowLive ? (
-            <span className="size-[5px] rounded-full bg-warning animate-pulse" />
-          ) : null}
-          <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground/70">
-            {ADVANCED_VIEWS[t].hint}
-          </span>
-          <span className="text-[11px] text-muted-foreground/50">→</span>
-        </button>
-      ))}
-    </div>
   );
 }
 

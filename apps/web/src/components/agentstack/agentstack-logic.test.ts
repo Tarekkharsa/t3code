@@ -24,6 +24,7 @@ import {
   matchAgentstackNextAction,
   partitionAgentstackOverviewRows,
   selectAgentstackFindingsView,
+  selectAgentstackPrimaryConcern,
   shortenAgentstackPath,
   shortenAgentstackPathsIn,
   selectAgentstackUndoEntry,
@@ -1087,5 +1088,95 @@ describe("formatAgentstackCount", () => {
     expect(formatAgentstackCount(1, "finding")).toBe("1 finding");
     expect(formatAgentstackCount(2, "finding")).toBe("2 findings");
     expect(formatAgentstackCount(0, "server")).toBe("0 servers");
+  });
+});
+
+describe("selectAgentstackPrimaryConcern", () => {
+  const guardRow: AgentstackOverviewRow = {
+    key: "guard",
+    label: "Guard",
+    summary: "guard not enabled",
+    level: "warn",
+    action: "guard-install",
+  };
+  const driftRow: AgentstackOverviewRow = {
+    key: "manifest",
+    label: "Manifest",
+    summary: "Codex CLI 10 change(s) pending",
+    level: "warn",
+    reviewDrift: true,
+  };
+
+  it("says nothing when nothing needs the user", () => {
+    expect(
+      selectAgentstackPrimaryConcern({
+        rows: [{ key: "secrets", label: "Secrets", summary: "all resolve", level: "ok" }],
+        findings: [],
+        trust: "trusted",
+      }),
+    ).toBeNull();
+  });
+
+  it("puts an unreviewed project above every other concern", () => {
+    // Nothing else on the panel can proceed while the repo is inert, so a
+    // guard warning ranked above it would be a repair you cannot benefit from.
+    const concern = selectAgentstackPrimaryConcern({
+      rows: [guardRow],
+      findings: [],
+      trust: "inert",
+    });
+    expect(concern?.act).toEqual({ kind: "review-trust" });
+    expect(concern?.others).toBe(1);
+  });
+
+  it("ranks drift above a one-click action, and never makes it one click", () => {
+    const concern = selectAgentstackPrimaryConcern({
+      rows: [guardRow, driftRow],
+      findings: [],
+      trust: "trusted",
+    });
+    expect(concern?.act).toEqual({ kind: "review-drift" });
+    expect(concern?.others).toBe(1);
+  });
+
+  it("states an action as its consequence, and promises what the button promises", () => {
+    const concern = selectAgentstackPrimaryConcern({
+      rows: [guardRow],
+      findings: [],
+      trust: "trusted",
+    });
+    expect(concern?.act).toEqual({ kind: "action", action: "guard-install" });
+    expect(concern?.label).toBe("Enable guard");
+    expect(concern?.title).toBe("Agent commands run without a pre-check");
+    expect(concern?.note).toBe("reversible · only adds protection");
+  });
+
+  it("falls through to the report's own words when it has no curated copy", () => {
+    const row: AgentstackOverviewRow = {
+      key: "library",
+      label: "Library",
+      summary: "2 skills are not installed",
+      level: "error",
+    };
+    const concern = selectAgentstackPrimaryConcern({ rows: [row], findings: [], trust: "trusted" });
+    expect(concern?.title).toBe("2 skills are not installed");
+    expect(concern?.act).toEqual({ kind: "manage" });
+  });
+
+  it("never offers a finding's fix for drift, matching the checkup rule", () => {
+    const finding: AgentstackFinding = {
+      key: "Drift:0",
+      level: "warn",
+      message: "Codex CLI 2 change(s) pending",
+      fix: "agentstack apply --write",
+      action: "apply-project",
+      section: "Drift",
+    };
+    const concern = selectAgentstackPrimaryConcern({
+      rows: [],
+      findings: [finding],
+      trust: "trusted",
+    });
+    expect(concern?.act).toEqual({ kind: "manage" });
   });
 });

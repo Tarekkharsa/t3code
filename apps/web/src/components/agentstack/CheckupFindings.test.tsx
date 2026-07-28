@@ -102,3 +102,73 @@ describe("CheckupFindings", () => {
     expect(markup).toBe("");
   });
 });
+
+describe("CheckupFindings — acting on what it found", () => {
+  const findings = deriveAgentstackFindings(report);
+  const noop = () => {};
+
+  it("gives a drift finding the review that is the honest way to act on it", () => {
+    // Drift never becomes a one-click fix (adopt and apply differ, and the
+    // scope has to be chosen) — but refusing the button left these rows
+    // printing a command with nothing to press, which is homework, not a
+    // checkup. The review dialog is what they open.
+    const markup = renderToStaticMarkup(
+      <CheckupFindings
+        findings={findings}
+        features={["status-v1"]}
+        onRequestAction={noop}
+        onReviewDrift={noop}
+        defaultOpen
+      />,
+    );
+    expect(markup).toContain("Codex CLI 2 change(s) pending");
+    expect(markup).toContain("Review");
+    // Still never the destructive verb on a drift row.
+    expect(markup).not.toContain("Re-render");
+  });
+
+  it("offers no review when the caller has no drift surface to open", () => {
+    const markup = renderToStaticMarkup(
+      <CheckupFindings
+        findings={findings}
+        features={["status-v1"]}
+        onRequestAction={noop}
+        defaultOpen
+      />,
+    );
+    expect(markup).toContain("Codex CLI 2 change(s) pending");
+    expect(markup).not.toContain(">Review<");
+  });
+
+  it("drops a button a sibling on the same screen already offers", () => {
+    // The Setup tab shows the recommended next action at the top AND this
+    // list below it. Two "Enable guard" buttons on one screen read as two
+    // repairs; there is one machine-wide write.
+    const both = renderToStaticMarkup(
+      <CheckupFindings
+        findings={findings}
+        features={["status-v1"]}
+        onRequestAction={noop}
+        defaultOpen
+      />,
+    );
+    expect(both).toContain("Enable guard");
+
+    const deduped = renderToStaticMarkup(
+      <CheckupFindings
+        findings={findings}
+        features={["status-v1"]}
+        onRequestAction={noop}
+        alreadyOffered="guard-install"
+        defaultOpen
+      />,
+    );
+    expect(deduped).not.toContain("Enable guard");
+    // The finding and its command stay — only the duplicate button goes.
+    // CommandLine wraps each token in its own nowrap span (so a flag never
+    // breaks mid-token), hence the command is asserted token-wise.
+    expect(deduped).toContain("guard hooks do not cover the detected providers");
+    expect(deduped).toContain(">guard</span>");
+    expect(deduped).toContain(">install</span>");
+  });
+});

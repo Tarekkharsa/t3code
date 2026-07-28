@@ -626,6 +626,17 @@ export type AgentstackActiveSession = typeof AgentstackActiveSession.Type;
 
 export const AgentstackToolsets = Schema.Struct({
   path: Schema.String,
+  /**
+   * Absolute path to the manifest FILE this project loads — the source of
+   * truth the panel offers to open.
+   *
+   * `path` above is the project base; the manifest inside it may be at
+   * `.agentstack/agentstack.toml` (preferred) or a legacy root
+   * `agentstack.toml`, and only the CLI's own layout resolution knows which
+   * without guessing. Optional for version tolerance: an older binary omits
+   * it and the panel simply doesn't offer to open anything.
+   */
+  manifest_path: Schema.optionalKey(Schema.NullOr(Schema.String)),
   /** Project trust state: `trusted`, `drifted`, or `untrusted`. */
   trust: Schema.String,
   profiles: Schema.Array(AgentstackToolset),

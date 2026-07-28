@@ -1183,6 +1183,202 @@ export function selectAgentstackFindingsView(
   return { visible, hidden: ranked.length - visible.length, total: ranked.length };
 }
 
+// ── the one concern the first page shows ─────────────────────────────────────
+
+/**
+ * What each governed action is called, and what it promises.
+ *
+ * Lives here rather than in the component because the first page now picks a
+ * concern and renders its verb from the same table the confirm step uses — two
+ * copies of "Enable guard" is how the button and the sentence under it drift
+ * apart.
+ */
+export const AGENTSTACK_ACTION_META: Record<
+  AgentstackActionKind,
+  { readonly label: string; readonly confirm: string; readonly note: string }
+> = {
+  "adopt-project": {
+    label: "Keep edits",
+    confirm:
+      "Pull the on-disk hand-edits into this project's manifest. Only writes agentstack.toml — never rewrites or removes anything in a CLI's own config.",
+    note: "only writes agentstack.toml",
+  },
+  "adopt-global": {
+    label: "Keep edits",
+    confirm:
+      "Pull the on-disk hand-edits into this project's manifest at global scope. Only writes agentstack.toml — never rewrites or removes anything in a CLI's own config.",
+    note: "only writes agentstack.toml",
+  },
+  "apply-project": {
+    label: "Re-render",
+    confirm:
+      "Re-render this project's CLI config from the manifest. Overwrites hand-edits; keeps servers other setups applied and never prunes. Reversible with agentstack restore.",
+    note: "reversible · never prunes",
+  },
+  "apply-global": {
+    label: "Re-render",
+    confirm:
+      "Re-render the global CLI config from this manifest. Overwrites hand-edits; keeps servers other setups applied and never prunes. Reversible with agentstack restore.",
+    note: "reversible · never prunes",
+  },
+  "guard-install": {
+    label: "Enable guard",
+    confirm:
+      "Install the pre-tool-use guard into every detected CLI, machine-wide. Only adds protection; reversible with guard uninstall.",
+    note: "reversible · only adds protection",
+  },
+};
+
+/** Where the first page's one button goes. */
+export type AgentstackConcernAct =
+  | { readonly kind: "action"; readonly action: AgentstackActionKind }
+  | { readonly kind: "review-drift" }
+  | { readonly kind: "review-trust" }
+  /** Nothing this panel can run — open Manage, where the detail lives. */
+  | { readonly kind: "manage" };
+
+export interface AgentstackPrimaryConcern {
+  readonly key: string;
+  /** The consequence, in the user's terms — not the doctor's section name. */
+  readonly title: string;
+  /** One sentence of why it matters. Null when the title says it all. */
+  readonly detail: string | null;
+  readonly act: AgentstackConcernAct;
+  readonly label: string;
+  /** What the button promises, e.g. "reversible · only adds protection". */
+  readonly note: string | null;
+  /** Everything else that needs the user, counted rather than listed. */
+  readonly others: number;
+}
+
+/**
+ * Curated copy for the concerns worth stating as a consequence.
+ *
+ * Doctor writes for an operator reading a report ("guard not enabled"); the
+ * first page has room for exactly one problem and has to say why a stranger
+ * should care. Only the cases we can recognise precisely get rewritten — every
+ * other concern falls through to the report's own words, which is the honest
+ * default. Nothing here changes what is true, only which side of it is said
+ * first.
+ */
+const CONCERN_COPY: Record<string, { readonly title: string; readonly detail: string }> = {
+  "guard-install": {
+    title: "Agent commands run without a pre-check",
+    detail:
+      "Full-access mode turns off the provider's own approval prompts. The guard puts one back, machine-wide.",
+  },
+  "trust-inert": {
+    title: "This project hasn't been reviewed yet",
+    detail:
+      "Until you review it, its servers and skills stay inert — nothing it declares can start or reach the network.",
+  },
+  "trust-drifted": {
+    title: "Reviewed content changed on disk",
+    detail:
+      "Something this project pinned was edited since you approved it, so it is inert again until you review the new bytes.",
+  },
+  drift: {
+    title: "A CLI config was hand-edited",
+    detail: "Keep the edit or re-render from the manifest — you choose which truth to keep.",
+  },
+};
+
+/**
+ * The single thing the first page shows, and how much else is waiting.
+ *
+ * The popover used to render every non-ok row, a collapsed findings list, a
+ * healthy line and four nav rows at once — nine regions for a surface whose job
+ * is "is this fine, and if not what do I press". This picks one: an unreviewed
+ * or re-gated project first (it makes everything else moot), then drift (whose
+ * verb is a choice, never a click), then any row or finding carrying an action,
+ * then a bare error. Everything not picked becomes `others`, and lives one tap
+ * away in Manage.
+ */
+export function selectAgentstackPrimaryConcern(input: {
+  readonly rows: ReadonlyArray<AgentstackOverviewRow>;
+  readonly findings: ReadonlyArray<AgentstackFinding>;
+  readonly trust: AgentstackTrustState;
+}): AgentstackPrimaryConcern | null {
+  const { problems } = partitionAgentstackOverviewRows(input.rows);
+  const total = problems.length + input.findings.length;
+  /** Everything not shown here. Trust is picked from outside the rows, so it
+   *  consumes none of them; every other branch consumes the one it picked. */
+  const rest = (picked: number) => Math.max(0, total - picked);
+
+  if (input.trust === "inert" || input.trust === "drifted") {
+    const copy = CONCERN_COPY[input.trust === "inert" ? "trust-inert" : "trust-drifted"]!;
+    return {
+      key: `trust:${input.trust}`,
+      title: copy.title,
+      detail: copy.detail,
+      act: { kind: "review-trust" },
+      label: "Review this project",
+      note: "you approve exact bytes",
+      others: rest(0),
+    };
+  }
+
+  const driftRow = problems.find((r) => r.reviewDrift === true);
+  if (driftRow) {
+    const copy = CONCERN_COPY.drift!;
+    return {
+      key: driftRow.key,
+      title: copy.title,
+      detail: driftRow.summary || copy.detail,
+      act: { kind: "review-drift" },
+      label: "Review",
+      note: null,
+      others: rest(1),
+    };
+  }
+
+  const actionRow = problems.find((r) => r.action !== undefined);
+  if (actionRow?.action) {
+    const copy = CONCERN_COPY[actionRow.action];
+    const meta = AGENTSTACK_ACTION_META[actionRow.action];
+    return {
+      key: actionRow.key,
+      title: copy?.title ?? actionRow.summary,
+      detail: copy?.detail ?? null,
+      act: { kind: "action", action: actionRow.action },
+      label: meta.label,
+      note: meta.note,
+      others: rest(1),
+    };
+  }
+
+  const actionFinding = input.findings.find((f) => f.action !== null && f.section !== "Drift");
+  if (actionFinding?.action) {
+    const copy = CONCERN_COPY[actionFinding.action];
+    const meta = AGENTSTACK_ACTION_META[actionFinding.action];
+    return {
+      key: actionFinding.key,
+      title: copy?.title ?? actionFinding.message,
+      detail: copy?.detail ?? null,
+      act: { kind: "action", action: actionFinding.action },
+      label: meta.label,
+      note: meta.note,
+      others: rest(1),
+    };
+  }
+
+  const worst =
+    problems.find((r) => r.level === "error") ??
+    input.findings.find((f) => f.level === "error") ??
+    problems[0] ??
+    input.findings[0];
+  if (!worst) return null;
+  return {
+    key: worst.key,
+    title: "summary" in worst ? worst.summary : worst.message,
+    detail: null,
+    act: { kind: "manage" },
+    label: "Open setup",
+    note: null,
+    others: rest(1),
+  };
+}
+
 // ── setup plan ───────────────────────────────────────────────────────────────
 
 /**
