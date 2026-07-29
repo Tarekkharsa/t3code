@@ -102,7 +102,8 @@ export interface AgentstackSetupPlanRequest {
  * carries the parameterized change (the discriminated union the panel composed);
  * `consented` is present only on an apply — its digest maps to `--consented` and
  * is refused before spawn when malformed. `allowUnresolved` maps to
- * `--allow-unresolved` (off by default).
+ * `--allow-unresolved` (off by default) for the edits that render; it is
+ * dropped for `create-profile` and `remove-from-library`, which render nothing.
  */
 export interface AgentstackProfileEditRequest {
   readonly workspaceRoot: string;
@@ -548,10 +549,17 @@ export function profileEditArgv(
       return [...argv, ...consentFlags];
     }
     case "create-profile": {
+      // Naming a toolset is not switching to it: on a `toolset-create-v2` CLI
+      // this writes the manifest entry and re-locks, and renders NOTHING — so
+      // `--allow-unresolved` (which only governs a render) has nothing left to
+      // govern and is never emitted, exactly as for `remove-from-library`. On
+      // an older binary the flag still means something, and dropping it there
+      // only makes an unresolved `${REF}` fail closed instead of rendering a
+      // placeholder — the safe direction, and no caller here asks for it.
       const argv = [...base, "create-profile", "--name", edit.name];
       for (const s of edit.skills) argv.push("--skill", s);
       for (const s of edit.servers) argv.push("--server", s);
-      return [...argv, ...consentFlags];
+      return [...argv, ...(consent ? ["--yes", "--consented", consent.digest] : ["--preview"])];
     }
     case "edit-profile": {
       // One argv carries the whole batch, so the CLI writes once and renders

@@ -113,6 +113,14 @@ const FEATURE_LIBRARY_REMOVE = "library-remove-v1";
 const FEATURE_PROFILES_BATCH = "profiles-edit-batch-v1";
 const FEATURE_TOOLSET_RENAME = "toolset-rename-v1";
 const FEATURE_TOOLSET_DELETE = "toolset-delete-v1";
+/** Creating a toolset stopped activating it: on a CLI advertising this,
+ *  `create-profile` writes the manifest entry and re-locks and renders NOTHING,
+ *  so the new toolset is declared but not in use. Its own name rather than a
+ *  wider reading of `profiles-edit-v1`, because a binary advertising only that
+ *  older name legitimately DOES re-render on create — telling that user to
+ *  "activate it now" would offer a second activation of something already
+ *  active. Absent/unknown features therefore keep the old reading. */
+const FEATURE_TOOLSET_CREATE_V2 = "toolset-create-v2";
 /** Structured workflow observation — the enveloped `workflow list`/`runs` reads
  *  the monitor consumes. Absent on legacy binaries (monitor still renders from
  *  whatever the reads return); a CLI that positively advertises other contracts
@@ -595,6 +603,12 @@ export function AgentstackControl({
   const canBatchEdit = hasAgentstackFeature(features, FEATURE_PROFILES_BATCH);
   const canRenameToolset = hasAgentstackFeature(features, FEATURE_TOOLSET_RENAME);
   const canDeleteToolset = hasAgentstackFeature(features, FEATURE_TOOLSET_DELETE);
+  // Creating a toolset no longer renders it into the CLI configs, so the panel
+  // must stop implying the new toolset is in use and point at the activation
+  // step instead. Gated positively: an older auto-rendering binary (or a CLI
+  // that advertises nothing) keeps the previous copy, so nobody is nudged into
+  // activating what is already active.
+  const createNeedsActivation = hasAgentstackFeature(features, FEATURE_TOOLSET_CREATE_V2);
   const canReadAdvisories = hasAgentstackFeature(features, FEATURE_DOCTOR_ADVISORIES);
   // The workflow monitor negotiates off its OWN enveloped read, not the doctor
   // status: a newer CLI's workflow reads can be schema-incompatible even when
@@ -841,6 +855,7 @@ export function AgentstackControl({
           canBatchEdit={canBatchEdit}
           canRenameToolset={canRenameToolset}
           canDeleteToolset={canDeleteToolset}
+          createNeedsActivation={createNeedsActivation}
           actionState={actionState}
           onRequestAction={(a) => setActionState({ phase: "confirm", action: a })}
           onConfirm={onAction}
@@ -1820,6 +1835,10 @@ interface ManageProps {
   canBatchEdit: boolean;
   canRenameToolset: boolean;
   canDeleteToolset: boolean;
+  /** Whether this CLI advertises `toolset-create-v2` — i.e. whether creating a
+   *  toolset leaves it declared but NOT in use. False on an older binary, which
+   *  still re-renders on create; the confirm copy and outcome card follow. */
+  createNeedsActivation: boolean;
   actionState: ActionState;
   onRequestAction: (a: ActionKind) => void;
   onConfirm: (a: ActionKind) => void;
@@ -2141,7 +2160,7 @@ function ToolsetsTab(props: ManageProps) {
     const { edit, title, digest } = flow;
     setFlow({ phase: "running", edit, title });
     const r = await applyProfileEdit(edit, digest);
-    setFlow({ phase: "done", ok: r.ok, message: r.message, title });
+    setFlow({ phase: "done", ok: r.ok, message: r.message, title, edit });
     // A successful add/create changed the manifest; a ${REF}-blocked apply
     // wrote it too, so both re-read rather than leaving stale in-project flags.
     if (r.ok || matchSecretBlock(r.message)) {
@@ -2353,6 +2372,12 @@ function ToolsetsTab(props: ManageProps) {
         <div className="max-h-[236px] shrink-0 overflow-y-auto border-t border-border/60 bg-foreground/[0.02]">
           <EditFlowCard
             flow={flow}
+            createNeedsActivation={props.createNeedsActivation}
+            // The activation the CLI stopped performing on create, offered in
+            // the same reversible verb the rail uses. Null without
+            // `sessions-v1`, where the card names the command instead of
+            // offering a button that cannot work.
+            onActivate={props.canSessions ? props.onSessionStart : null}
             onConfirm={confirmEdit}
             onBack={() => setFlow({ phase: "idle" })}
           />
@@ -3260,7 +3285,10 @@ type EditFlow =
     }
   | { phase: "unsupported"; title: string }
   | { phase: "running"; edit: AgentstackProfileEdit; title: string }
-  | { phase: "done"; ok: boolean; message: string; title: string };
+  // The applied `edit` rides along into `done` because the outcome card is
+  // per-verb: a finished `create-profile` has an activation step to offer, and
+  // needs the toolset's name to offer it.
+  | { phase: "done"; ok: boolean; message: string; title: string; edit: AgentstackProfileEdit };
 
 /**
  * The container for a screen you *read* — a trust surface, a drift diff, the
@@ -3660,14 +3688,24 @@ function LibraryRow({
  * A preview without a digest disables the confirm (`unsupported`); the applied
  * result shows a plain success line, or — when an unresolved `${REF}` blocked
  * the render — a what/why/next-step card naming the exact `agentstack secret
- * set` command, never a bare red failure.
+ * set` command, never a bare red failure. A finished `create-profile` on a
+ * `toolset-create-v2` CLI gets its own outcome card ([`CreatedToolsetCard`]),
+ * because there the change is written but nothing is in use yet.
+ *
+ * Exported for its own render test: what this card CLAIMS happened is the whole
+ * point of the H3 change, so it is asserted on rendered output.
  */
-function EditFlowCard({
+export function EditFlowCard({
   flow,
+  createNeedsActivation,
+  onActivate,
   onConfirm,
   onBack,
 }: {
   flow: Exclude<EditFlow, { phase: "idle" }>;
+  /** See [`LibraryPanel`]: true only when the CLI advertises `toolset-create-v2`. */
+  createNeedsActivation: boolean;
+  onActivate: ((profile: string) => Promise<{ ok: boolean; message: string }>) | null;
   onConfirm: () => void;
   onBack: () => void;
 }) {
@@ -3697,6 +3735,20 @@ function EditFlowCard({
     );
   }
   if (flow.phase === "done") {
+    // A created toolset is written but not in use — its own card, with the
+    // activation step the CLI stopped performing. Only on a CLI that says so:
+    // an older binary rendered on create, so the plain success line is right
+    // there and an Activate button would be a second activation.
+    if (flow.ok && flow.edit.kind === "create-profile" && createNeedsActivation) {
+      return (
+        <CreatedToolsetCard
+          name={flow.edit.name}
+          cliLine={flow.message}
+          onActivate={onActivate}
+          onBack={onBack}
+        />
+      );
+    }
     const secretBlock = flow.ok ? null : matchSecretBlock(flow.message);
     return (
       <div className="flex flex-col gap-3 px-4 py-4">
@@ -3753,16 +3805,21 @@ function EditFlowCard({
   const running = flow.phase === "running";
   const removing = flow.edit.kind === "remove-from-library";
   const removal = flow.phase === "confirm" ? flow.removal : null;
+  // Creating stops after the re-lock on a `toolset-create-v2` CLI, so the
+  // render/`${REF}` clauses below would be false for it.
+  const creatingOnly = flow.edit.kind === "create-profile" && createNeedsActivation;
   return (
     <div className="flex flex-col gap-3 px-4 py-4">
       <p className="text-[12.5px] font-semibold text-foreground">{flow.title}</p>
       {removing ? (
         <RemovalConfirmBody removal={removal} />
-      ) : flow.edit.kind === "create-profile" ? (
+      ) : creatingOnly ? (
         // Naming a toolset is not switching to it: the CLI writes the manifest
         // entry and pins the members, then stops — no native config file moves
         // and no `${REF}` is resolved. Promising a render here would describe
-        // a write that never happens.
+        // a write that never happens. Gated on `toolset-create-v2`: an older
+        // binary really does render on create, and falls through to the
+        // render copy below.
         <p className="text-[11px] leading-relaxed text-muted-foreground">
           Creating writes the toolset and pins what&apos;s in it. Nothing is rendered — your CLIs
           stay as they are until you use it. Nothing is written until you confirm.
@@ -3817,6 +3874,106 @@ function EditFlowCard({
           </code>
         </details>
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * The outcome of a successful `create-profile` on a CLI that advertises
+ * `toolset-create-v2`: the toolset exists and is locked, and NOTHING was
+ * rendered — no native config moved, so no CLI gained a tool. Saying "Done" and
+ * dropping the user back into the library would leave them believing the
+ * opposite, which is exactly the mis-affordance the CLI removed.
+ *
+ * So the card states what happened and offers the step the CLI stopped taking:
+ * "Use temporarily", the same reversible session the Toolsets list offers, in
+ * the same words. It is deliberately the session verb and not a permanent
+ * render — activation is fail-closed in the CLI (a fresh toolset's new pins can
+ * legitimately make the project's trust stale), and when it refuses, the CLI's
+ * own line says why. Without `sessions-v1` there is no button, only the command.
+ */
+function CreatedToolsetCard({
+  name,
+  cliLine,
+  onActivate,
+  onBack,
+}: {
+  name: string;
+  /** The CLI's own last line — quoted verbatim, as everywhere else in the panel. */
+  cliLine: string;
+  onActivate: ((profile: string) => Promise<{ ok: boolean; message: string }>) | null;
+  onBack: () => void;
+}) {
+  const [act, setAct] = useState<
+    { phase: "idle" } | { phase: "running" } | { phase: "done"; ok: boolean; message: string }
+  >({ phase: "idle" });
+
+  const activate = useCallback(async () => {
+    if (onActivate === null) return;
+    setAct({ phase: "running" });
+    const r = await onActivate(name);
+    setAct({ phase: "done", ok: r.ok, message: r.message });
+  }, [onActivate, name]);
+
+  // Once a session starts, "nothing was rendered" stops being true — the card
+  // has to stop saying it rather than leave a stale claim on screen.
+  const inUse = act.phase === "done" && act.ok;
+
+  return (
+    <div className="flex flex-col gap-3 px-4 py-4">
+      <p className="text-[12.5px] font-semibold text-foreground">Toolset "{name}" created</p>
+      <div className="flex flex-col gap-2 rounded-lg border border-success/30 bg-success/[0.06] px-3 py-2.5 text-[11px] leading-relaxed">
+        <span className="font-semibold text-success">
+          {inUse ? "In use" : "Written and locked"}
+        </span>
+        <span className="text-muted-foreground">
+          {inUse
+            ? "Started as a temporary session — end it from the Toolsets list and your files go back as they were."
+            : "Nothing was rendered — your CLIs still have exactly the tools they had. Naming a toolset isn't switching to it; activating is a separate step."}
+        </span>
+        {cliLine ? (
+          <span className="break-words font-mono text-muted-foreground/70">{cliLine}</span>
+        ) : null}
+      </div>
+
+      {act.phase === "done" ? (
+        <p
+          className={cn(
+            "text-[11px] leading-relaxed",
+            act.ok ? "text-muted-foreground" : "text-destructive",
+          )}
+        >
+          {act.message}
+        </p>
+      ) : null}
+
+      {onActivate === null ? (
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          This agentstack CLI predates session control from the panel — activate it in a terminal:
+          <CommandLine text={`agentstack session start ${name}`} />
+        </p>
+      ) : null}
+
+      <div className="flex items-center gap-2">
+        {onActivate !== null && !inUse ? (
+          <button
+            type="button"
+            disabled={act.phase === "running"}
+            onClick={() => void activate()}
+            title="Start a reversible session with this toolset — ends with your files back as they were"
+            className="inline-flex h-8 items-center rounded-lg border border-success/40 bg-success/10 px-3.5 text-xs font-semibold text-success disabled:opacity-60"
+          >
+            {act.phase === "running" ? "Starting…" : "Use temporarily"}
+          </button>
+        ) : null}
+        <button
+          type="button"
+          onClick={onBack}
+          className="inline-flex h-8 items-center rounded-lg px-2.5 text-xs font-medium text-muted-foreground"
+        >
+          ← Back to library
+        </button>
+      </div>
     </div>
   );
 }
