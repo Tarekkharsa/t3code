@@ -436,6 +436,74 @@ describe("deriveAgentstackActivityRows", () => {
     expect(rows[0]!.label.endsWith("\u2026")).toBe(true);
     expect(rows[1]).toMatchObject({ outcome: "ok", label: "figma__get_file", age: "2h ago" });
   });
+
+  it("carries the reason a call failed, which is the question the feed exists to answer", () => {
+    const now = 10_000;
+    const [denied, errored] = deriveAgentstackActivityRows(
+      [
+        {
+          ts: now - 30,
+          server: "github",
+          tool: "create_pr",
+          outcome: "error",
+          ms: 1_500,
+          run: "w-9f2a41bc77",
+          args_digest: "0123456789abcdef",
+          detail: "upstream-error",
+        },
+        {
+          ts: now - 10,
+          server: "host-guard",
+          tool: "bash: rm -rf /",
+          outcome: "denied",
+          ms: 2,
+          detail: "policy.filesystem deny: /",
+        },
+      ],
+      now,
+    ).slice(0, 2);
+    expect(denied).toMatchObject({ outcome: "denied", reason: "policy.filesystem deny: /" });
+    expect(errored).toMatchObject({
+      outcome: "error",
+      reason: "upstream-error",
+      run: "w-9f2a41bc77",
+      runShort: "w-9f2a41",
+      digest: "0123456789ab",
+      duration: "1.5s",
+    });
+  });
+
+  it("never explains a call that succeeded, and never invents fields the event omits", () => {
+    const now = 10_000;
+    const [row] = deriveAgentstackActivityRows(
+      // A detail on an `ok` outcome is not a failure reason; showing it would
+      // be an explanation of nothing.
+      [{ ts: now, server: "figma", tool: "get_file", outcome: "ok", detail: "cached" }],
+      now,
+    );
+    expect(row).not.toHaveProperty("reason");
+    expect(row).not.toHaveProperty("run");
+    expect(row).not.toHaveProperty("digest");
+    expect(row).not.toHaveProperty("duration");
+  });
+
+  it("bounds a reason, because the row is where recorded text reaches the DOM", () => {
+    const now = 10_000;
+    const [row] = deriveAgentstackActivityRows(
+      [
+        {
+          ts: now,
+          server: "s",
+          tool: "t",
+          outcome: "denied",
+          detail: `deny ${"y".repeat(400)}`,
+        },
+      ],
+      now,
+    );
+    expect(row!.reason!.length).toBeLessThanOrEqual(120);
+    expect(row!.reason!.endsWith("…")).toBe(true);
+  });
 });
 
 describe("deriveToolsetRows", () => {

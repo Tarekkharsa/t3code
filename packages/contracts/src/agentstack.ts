@@ -161,6 +161,17 @@ export const AgentstackActivity = Schema.Struct({
   installed: Schema.Boolean,
   /** Newest last, matching audit-log append order. */
   events: Schema.Array(AgentstackCallEvent),
+  /**
+   * The read itself failed — the CLI is present but `report calls` could not be
+   * run or its output could not be parsed.
+   *
+   * Without this an unreadable log and an empty log are the same payload
+   * (`events: []`), and the panel says "nothing recorded yet" — a statement
+   * about the world — when the truth is that it does not know. `optionalKey`
+   * so a client can still decode a payload from a server that predates it;
+   * absent is read as "the read succeeded".
+   */
+  readFailed: Schema.optionalKey(Schema.Boolean),
   checkedAt: Schema.Number,
 });
 export type AgentstackActivity = typeof AgentstackActivity.Type;

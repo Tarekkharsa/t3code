@@ -331,11 +331,15 @@ const decodeCallEvents = Schema.decodeUnknownOption(
   Schema.fromJsonString(Schema.Struct({ events: Schema.Array(AgentstackCallEvent) })),
 );
 
-export function parseCallEvents(stdout: string): ReadonlyArray<AgentstackCallEvent> {
-  return Option.match(decodeCallEvents(stdout), {
-    onNone: () => [],
-    onSome: (r) => r.events,
-  });
+/**
+ * The events, or `null` when the payload could not be decoded at all.
+ *
+ * Deliberately not a `[]` fallback: the Activity feed has to tell "no calls
+ * were brokered" apart from "we could not read the log", because only one of
+ * those is a statement about what the agents did.
+ */
+export function readCallEvents(stdout: string): ReadonlyArray<AgentstackCallEvent> | null {
+  return Option.getOrNull(decodeCallEvents(stdout))?.events ?? null;
 }
 
 const decodeWorkflowList = Schema.decodeUnknownOption(
@@ -778,9 +782,21 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
           onSuccess: (result) => ({ _tag: "Success", result }) as const,
         }),
       );
+      // A failed read and an empty log are different facts, and collapsing
+      // them into `events: []` makes the panel state "nothing was recorded"
+      // when the truth is that it does not know. The read counts as failed
+      // when the process could not run, exited non-zero, or produced output
+      // that would not decode.
+      const events =
+        result._tag === "Success" && result.result.code === 0
+          ? readCallEvents(result.result.stdout)
+          : null;
       return {
         installed: result._tag !== "NotFound",
-        events: result._tag === "Success" ? parseCallEvents(result.result.stdout) : [],
+        events: events ?? [],
+        // Never claimed when the binary is simply absent — that is its own
+        // state, and the panel already says so.
+        ...(events === null && result._tag !== "NotFound" ? { readFailed: true } : {}),
         checkedAt: yield* Clock.currentTimeMillis,
       };
     },

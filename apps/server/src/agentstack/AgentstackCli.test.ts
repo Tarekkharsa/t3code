@@ -96,6 +96,107 @@ describe("AgentstackCli", () => {
     }).pipe(Effect.provide(ProcessRunnerTest));
   });
 
+  it.effect("tells an unreadable call log apart from an empty one", () => {
+    // Both produce zero rows, but only one of them is a statement about what
+    // the agents did. Collapsing them makes the panel claim "nothing was
+    // recorded" from no evidence at all.
+    const empty = vi.fn<ProcessRunner.ProcessRunner["Service"]["run"]>(() =>
+      Effect.succeed(okOutput(JSON.stringify({ events: [] }))),
+    );
+    const layer = (fn: ProcessRunner.ProcessRunner["Service"]["run"]) =>
+      Layer.succeed(ProcessRunner.ProcessRunner, ProcessRunner.ProcessRunner.of({ run: fn }));
+
+    return Effect.gen(function* () {
+      const a = yield* AgentstackCli.make();
+      const clean = yield* a.activity({ workspaceRoot: "/proj", limit: 20 });
+      expect(clean.events).toEqual([]);
+      expect(clean.readFailed).toBeUndefined();
+      expect(clean.installed).toBe(true);
+    }).pipe(Effect.provide(layer(empty)));
+  });
+
+  it.effect("a non-zero exit is a failed read", () =>
+    Effect.gen(function* () {
+      const a = yield* AgentstackCli.make();
+      const r = yield* a.activity({ workspaceRoot: "/proj", limit: 20 });
+      expect(r.readFailed).toBe(true);
+      expect(r.installed).toBe(true);
+    }).pipe(
+      Effect.provide(
+        Layer.succeed(
+          ProcessRunner.ProcessRunner,
+          ProcessRunner.ProcessRunner.of({
+            run: vi.fn<ProcessRunner.ProcessRunner["Service"]["run"]>(() =>
+              Effect.succeed({
+                stdout: "",
+                stderr: "error: could not read the audit log",
+                code: ChildProcessSpawner.ExitCode(1),
+                timedOut: false,
+                stdoutTruncated: false,
+                stderrTruncated: false,
+              } as const),
+            ),
+          }),
+        ),
+      ),
+    ),
+  );
+
+  it.effect("a missing binary is not-installed, never a failed read", () =>
+    // These are different states with different copy — "not installed" already
+    // has its own screen, and labelling it a read failure would send the user
+    // looking for a corrupt log that does not exist.
+    Effect.gen(function* () {
+      const a = yield* AgentstackCli.make();
+      const r = yield* a.activity({ workspaceRoot: "/proj", limit: 20 });
+      expect(r.installed).toBe(false);
+      expect(r.readFailed).toBeUndefined();
+    }).pipe(
+      Effect.provide(
+        Layer.succeed(
+          ProcessRunner.ProcessRunner,
+          ProcessRunner.ProcessRunner.of({
+            run: vi.fn<ProcessRunner.ProcessRunner["Service"]["run"]>(() =>
+              Effect.fail(
+                new ProcessRunner.ProcessSpawnError({
+                  command: "agentstack",
+                  argumentCount: 8,
+                  cause: PlatformError.systemError({
+                    _tag: "NotFound",
+                    module: "ChildProcess",
+                    method: "spawn",
+                    pathOrDescriptor: "agentstack",
+                  }),
+                }),
+              ),
+            ),
+          }),
+        ),
+      ),
+    ),
+  );
+
+  it.effect("flags an undecodable call log as a failed read, not an empty one", () =>
+    Effect.gen(function* () {
+      const a = yield* AgentstackCli.make();
+      const broken = yield* a.activity({ workspaceRoot: "/proj", limit: 20 });
+      expect(broken.events).toEqual([]);
+      expect(broken.readFailed).toBe(true);
+      expect(broken.installed).toBe(true);
+    }).pipe(
+      Effect.provide(
+        Layer.succeed(
+          ProcessRunner.ProcessRunner,
+          ProcessRunner.ProcessRunner.of({
+            run: vi.fn<ProcessRunner.ProcessRunner["Service"]["run"]>(() =>
+              Effect.succeed(okOutput("not json at all")),
+            ),
+          }),
+        ),
+      ),
+    ),
+  );
+
   it.effect("diff runs the scoped diff --json and parses the report", () => {
     const run = vi.fn<ProcessRunner.ProcessRunner["Service"]["run"]>(() =>
       Effect.succeed(

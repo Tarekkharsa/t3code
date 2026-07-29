@@ -2545,7 +2545,19 @@ function LibraryPane({
 function ActivityTab(props: ManageProps) {
   return (
     <div className="flex flex-col">
-      <TabSection title="Brokered calls" first />
+      {/* The audit log is machine-wide; this feed is narrowed to one project.
+          Saying so makes an empty list read as an empty scope rather than an
+          empty history.
+
+          "MCP arguments", not "arguments": a host-guard row's label IS the
+          blocked command, because there the command is the subject of the
+          denial rather than an argument to a tool. An absolute "never values"
+          would be contradicted by the row directly below it. */}
+      <TabSection
+        title="Brokered calls"
+        note="this project · MCP arguments are digests, never values"
+        first
+      />
       <ActivityPanel activity={props.activity} />
       <TabSection title="Workflow runs" />
       <WorkflowPanel
@@ -2566,12 +2578,27 @@ function ActivityTab(props: ManageProps) {
  * out you passed a boundary by noticing the content changed. One rule and one
  * label makes the boundary a fact instead of a surprise.
  */
-function TabSection({ title, first = false }: { title: string; first?: boolean }) {
+function TabSection({
+  title,
+  note,
+  first = false,
+}: {
+  title: string;
+  /** A short scope or caveat, shown beside the label. */
+  note?: string;
+  first?: boolean;
+}) {
   return (
-    <div className={cn("px-4 pb-1 pt-3", !first && "mt-1 border-t border-border/60")}>
+    <div
+      className={cn(
+        "flex items-baseline gap-2 px-4 pb-1 pt-3",
+        !first && "mt-1 border-t border-border/60",
+      )}
+    >
       <span className="text-[10.5px] font-semibold tracking-wide text-muted-foreground">
         {title.toUpperCase()}
       </span>
+      {note ? <span className="text-[10px] text-muted-foreground/60">{note}</span> : null}
     </div>
   );
 }
@@ -4652,29 +4679,96 @@ function ActivityPanel({ activity }: { activity: AgentstackActivity | null }) {
     activity && activity.events.length > 0
       ? deriveAgentstackActivityRows(activity.events, Date.now() / 1_000)
       : [];
-  if (rows.length === 0) {
+
+  // A read that failed is not a log that is empty. Saying "nothing recorded"
+  // here would be a claim about what the agents did, made from no evidence.
+  //
+  // `null` belongs in this branch too: it is the pre-first-fetch state AND the
+  // RPC-failed state, so treating it as "no rows" would reintroduce the same
+  // false claim one layer above the one this guard exists to prevent.
+  if (activity === null || activity.readFailed === true) {
     return (
       <p className="px-4 py-4 text-xs leading-relaxed text-muted-foreground">
-        No brokered calls recorded for this project yet. Every tool call the gateway brokers lands
-        here with a keyed argument digest — never the values.
+        Couldn&apos;t read the call log for this project. This is a read failure, not an empty log —
+        nothing here says whether calls were made.
       </p>
+    );
+  }
+
+  if (rows.length === 0) {
+    return (
+      <div className="flex flex-col gap-1.5 px-4 py-4">
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          Nothing recorded for this project yet.
+        </p>
+        {/* The load-bearing sentence. In host mode — the default, where the
+            harness talks to its servers directly — nothing is recorded at all,
+            so without this an empty list reads as an all-clear while an agent
+            makes hundreds of unrecorded calls. "Brokers or blocks", not "routed
+            through the gateway": the host guard also writes denials here
+            without the gateway being involved. */}
+        <p className="text-[11px] leading-relaxed text-muted-foreground/80">
+          Only calls AgentStack brokers or blocks are recorded. An agent talking to its servers
+          directly leaves no rows here, so an empty list is not evidence that nothing ran.
+        </p>
+      </div>
     );
   }
   return (
     <ul className="flex flex-col gap-1 p-2">
       {rows.map((row) => (
-        <li className="flex items-center gap-2 px-1 text-[11px]" key={row.key}>
-          <span className={cn("size-1.5 shrink-0 rounded-full", OUTCOME_DOT[row.outcome])} />
-          <span
-            className={cn(
-              "min-w-0 flex-1 truncate font-mono",
-              row.outcome === "denied" ? "text-warning-foreground" : "text-muted-foreground",
-            )}
-            title={row.label}
-          >
-            {row.label}
-          </span>
-          <span className="shrink-0 text-muted-foreground/60">{row.age}</span>
+        <li className="flex flex-col gap-0.5 px-1 text-[11px]" key={row.key}>
+          <div className="flex items-center gap-2">
+            <span className={cn("size-1.5 shrink-0 rounded-full", OUTCOME_DOT[row.outcome])} />
+            <span
+              className={cn(
+                "min-w-0 flex-1 truncate font-mono",
+                row.outcome === "denied" ? "text-warning-foreground" : "text-muted-foreground",
+              )}
+              title={row.label}
+            >
+              {row.label}
+            </span>
+            {/* A call made inside a workflow run is otherwise indistinguishable
+                from one the user made directly. */}
+            {row.runShort ? (
+              <span
+                className="shrink-0 rounded bg-foreground/[0.05] px-1 font-mono text-[10px] text-muted-foreground/70"
+                title={`Brokered inside run ${row.run}`}
+              >
+                run {row.runShort}
+              </span>
+            ) : null}
+            {/* The digest rides on the same line rather than claiming a second
+                one: it is here so repeated identical calls are recognisable,
+                which does not warrant doubling the height of every row. */}
+            {row.digest ? (
+              <span
+                className="shrink-0 font-mono text-[10px] text-muted-foreground/45"
+                title="Digest of this call's arguments — the values are never recorded"
+              >
+                {row.digest}
+              </span>
+            ) : null}
+            {row.duration ? (
+              <span className="shrink-0 tabular-nums text-muted-foreground/50">{row.duration}</span>
+            ) : null}
+            <span className="shrink-0 text-muted-foreground/60">{row.age}</span>
+          </div>
+          {/* Why it ended that way — the whole reason this feed exists, and the
+              only thing that earns a second line. */}
+          {row.reason ? (
+            <span
+              className={cn(
+                "pl-3.5 leading-snug",
+                row.outcome === "denied"
+                  ? "text-warning-foreground/90"
+                  : "text-destructive-foreground/90",
+              )}
+            >
+              {row.reason}
+            </span>
+          ) : null}
         </li>
       ))}
     </ul>

@@ -609,7 +609,10 @@ export interface AgentstackActivityEventLike {
   readonly server: string;
   readonly tool: string;
   readonly outcome: "ok" | "error" | "denied";
+  readonly ms?: number;
   readonly run?: string;
+  readonly args_digest?: string;
+  readonly detail?: string;
 }
 
 export interface AgentstackActivityRow {
@@ -619,9 +622,35 @@ export interface AgentstackActivityRow {
   label: string;
   age: string;
   run?: string;
+  /** Short run id for display; the full value stays in `run`. */
+  runShort?: string;
+  /**
+   * Why this call ended the way it did — the policy rule that denied it, or
+   * the fixed class an error was reduced to. Only ever set on a call that did
+   * not succeed: a "reason" on an ok row would be an explanation of nothing.
+   */
+  reason?: string;
+  /** First hex chars of the argument digest. Never an argument value. */
+  digest?: string;
+  duration?: string;
 }
 
 const ACTIVITY_LABEL_MAX = 48;
+/**
+ * An `error` detail is one of a handful of fixed classes the gateway
+ * substitutes for upstream text, so a hostile server cannot choose it. A
+ * `denied` detail is NOT so constrained: a gateway denial renders a policy rule
+ * out of the project manifest, and a host-guard denial embeds the path the
+ * agent asked for — both repository- or agent-influenced, i.e. hostile input.
+ *
+ * That is safe to render as a text child (React escapes it) once it is bounded
+ * and flattened, which is what this does: control characters out, whitespace
+ * collapsed, length capped. The recorder's own guarantees are about what it
+ * writes; this is the one place that text reaches the DOM.
+ */
+const ACTIVITY_REASON_MAX = 120;
+/** Digests are already 12 hex chars from the recorder; bounded anyway. */
+const ACTIVITY_DIGEST_MAX = 12;
 
 function formatAge(seconds: number): string {
   if (seconds < 60) return "now";
@@ -648,9 +677,38 @@ export function deriveAgentstackActivityRows(
       outcome: e.outcome,
       label,
       age: formatAge(Math.max(0, nowEpochSeconds - e.ts)),
-      ...(e.run ? { run: e.run } : {}),
+      ...(e.run ? { run: e.run, runShort: e.run.slice(0, 8) } : {}),
+      // The question this feed exists to answer is "why did it fail", so the
+      // reason rides on the row rather than waiting behind an expander — but
+      // only where there is a failure to explain.
+      ...(e.detail && e.outcome !== "ok"
+        ? {
+            reason: clamp(
+              // Control characters first: a filename may legally contain them,
+              // and they survive a whitespace collapse.
+              e.detail
+                .replaceAll(/[\u0000-\u001f\u007f]/g, " ")
+                .replace(/\s+/g, " ")
+                .trim(),
+              ACTIVITY_REASON_MAX,
+            ),
+          }
+        : {}),
+      // Sliced, not clamped: an ellipsis would read as part of the digest, and
+      // the recorder already emits exactly this many hex chars.
+      ...(e.args_digest ? { digest: e.args_digest.slice(0, ACTIVITY_DIGEST_MAX) } : {}),
+      // A guard denial records no duration at all (it never called anything),
+      // so a literal "0ms" on every blocked row would be noise dressed as data.
+      ...(typeof e.ms === "number" && Number.isFinite(e.ms) && e.ms > 0
+        ? { duration: formatMs(e.ms) }
+        : {}),
     };
   });
+}
+
+function formatMs(ms: number): string {
+  const v = Math.max(0, Math.round(ms));
+  return v < 1_000 ? `${v}ms` : `${(v / 1_000).toFixed(v < 10_000 ? 1 : 0)}s`;
 }
 
 // ── workflow tab ─────────────────────────────────────────────────────────────
