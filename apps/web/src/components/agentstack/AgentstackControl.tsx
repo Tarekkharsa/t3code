@@ -8,6 +8,7 @@ import type {
   AgentstackLibraryIndexResult,
   AgentstackProfileEdit,
   AgentstackProfileEditPreview,
+  DesktopUpdateActionResult,
   AgentstackProfileEditPreviewResult,
   AgentstackRestoreInventoryResult,
   AgentstackSecretsDestination,
@@ -31,6 +32,16 @@ import { useRightPanelStore } from "~/rightPanelStore";
 import { agentstackEnvironment } from "~/state/agentstack";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { cn } from "~/lib/utils";
+import { isElectron } from "../../env";
+import { useDesktopUpdateState } from "../../state/desktopUpdate";
+import {
+  canCheckForUpdate,
+  getDesktopUpdateActionError,
+  getDesktopUpdateInstallConfirmationMessage,
+  resolveDesktopUpdateButtonAction,
+  shouldToastDesktopUpdateActionResult,
+} from "../desktopUpdate.logic";
+import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Button } from "../ui/button";
 import {
   Dialog,
@@ -54,8 +65,10 @@ import {
   deriveAgentstackProtectionRows,
   deriveAgentstackStatusChip,
   deriveAgentstackTrustBadge,
+  AGENTSTACK_HOST_NAME,
   deriveToolsetRows,
   deriveTrustSurface,
+  selectAgentstackUpdateOffer,
   deriveWorkflowCounts,
   deriveWorkflowStages,
   filterAgentstackLibraryItems,
@@ -737,7 +750,7 @@ export function AgentstackControl({
             <NeedsSetup onOpen={() => openReader(setSettingUp)} />
           ) : unreachable ? (
             <p className="px-4 py-4 text-xs text-muted-foreground">
-              Couldn't check status — the t3code server didn't answer.
+              Couldn't check status — the {AGENTSTACK_HOST_NAME} server didn't answer.
             </p>
           ) : status === null ? (
             <p className="px-4 py-4 text-xs text-muted-foreground">Checking…</p>
@@ -1396,7 +1409,7 @@ function TrustReviewPanel({
             <p className="text-[11px] leading-relaxed text-warning-foreground">
               {consentDigest === null
                 ? "This agentstack CLI predates consent-bound trust (its preview has no surface digest), so granting from here is disabled. Update agentstack, or trust from a terminal where the review itself is the consent."
-                : "This agentstack CLI doesn't support consent-bound trust from t3code. Update agentstack, or trust from a terminal where the review itself is the consent."}
+                : `This agentstack CLI doesn't support consent-bound trust from ${AGENTSTACK_HOST_NAME}. Update agentstack, or trust from a terminal where the review itself is the consent.`}
             </p>
           ) : null}
 
@@ -3685,8 +3698,15 @@ function UndoAffordance({
 
 /**
  * The capability-negotiation body: shown when a read reports a `schema_version`
- * higher than this t3code build supports. Names both versions so the user knows
- * which side to update; actions are unavailable in this state.
+ * higher than this host build supports. Names both versions so the user knows
+ * which side to update; the panel's own governed actions stay disabled while
+ * it is showing.
+ *
+ * It used to stop there, which made a correct refusal into a dead end: the
+ * screen said "update" in a product that already knows how to update itself.
+ * The host's own update path is offered here when it exists, and named for
+ * what it would do; when it does not exist, the screen says where to get a
+ * newer build rather than showing a button that cannot work.
  */
 function UpdateNeeded({
   incompatible,
@@ -3695,9 +3715,96 @@ function UpdateNeeded({
   incompatible: { cliSchema: number; supported: number };
   cliVersion: string | null;
 }) {
+  const updateState = useDesktopUpdateState();
+  const offer = selectAgentstackUpdateOffer({
+    isDesktop: isElectron,
+    action: updateState ? resolveDesktopUpdateButtonAction(updateState) : "none",
+    canCheck: canCheckForUpdate(updateState),
+    status: updateState?.status,
+  });
+  const [busy, setBusy] = useState(false);
+
+  // The same bridge calls, guards and confirmations the sidebar pill makes —
+  // this screen is a third entry point to one update path, never a second
+  // implementation of it. In particular the install confirmation is not
+  // optional here: installing restarts the app, and this is a product where
+  // "any running tasks will be interrupted" means an agent mid-run.
+  const act = useCallback(() => {
+    const bridge = window.desktopBridge;
+    if (!bridge || offer.kind === "none" || busy || !updateState) return;
+
+    // A resolved promise does not mean the action succeeded — the bridge
+    // reports refusals in the result. Rejections and refusals both have to
+    // surface, or the button silently does nothing.
+    const finish = (title: string) => (result: DesktopUpdateActionResult) => {
+      setBusy(false);
+      if (!shouldToastDesktopUpdateActionResult(result)) return;
+      const message = getDesktopUpdateActionError(result);
+      if (!message) return;
+      toastManager.add(stackedThreadToast({ type: "error", title, description: message }));
+    };
+    const fail = (title: string) => (error: unknown) => {
+      setBusy(false);
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title,
+          // Not "try the sidebar": the update pill only appears when an update
+          // is downloading or actionable, so after a failed check there is no
+          // pill to try. The neutral fallback both existing callers use.
+          description: error instanceof Error ? error.message : "An unexpected error occurred.",
+        }),
+      );
+    };
+
+    if (offer.kind === "install") {
+      const confirmed = window.confirm(
+        getDesktopUpdateInstallConfirmationMessage(updateState, navigator.platform),
+      );
+      if (!confirmed) return;
+      setBusy(true);
+      void bridge
+        .installUpdate()
+        .then(finish("Could not install update"))
+        .catch(fail("Could not install update"));
+      return;
+    }
+    setBusy(true);
+    if (offer.kind === "download") {
+      void bridge
+        .downloadUpdate()
+        .then(finish("Could not download update"))
+        .catch(fail("Could not start update download"));
+      return;
+    }
+    if (typeof bridge.checkForUpdate !== "function") {
+      setBusy(false);
+      return;
+    }
+    void bridge
+      .checkForUpdate()
+      .then((result) => {
+        setBusy(false);
+        // `checked: false` is a refusal, not an error — it resolves, so only
+        // an explicit check surfaces it.
+        if (result.checked) return;
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not check for updates",
+            description:
+              result.state.message ?? "Automatic updates are not available in this build.",
+          }),
+        );
+      })
+      .catch(fail("Could not check for updates"));
+  }, [offer, busy, updateState]);
+
   return (
     <div className="flex flex-col gap-3 px-4 py-4 text-xs leading-relaxed text-muted-foreground">
-      <p className="text-[12.5px] font-semibold text-foreground">Update t3code to continue</p>
+      <p className="text-[12.5px] font-semibold text-foreground">
+        Update {AGENTSTACK_HOST_NAME} to continue
+      </p>
       <p>
         This project's <code className="font-mono">agentstack</code> CLI
         {cliVersion ? (
@@ -3706,10 +3813,23 @@ function UpdateNeeded({
             (<span className="font-mono">{cliVersion.replace(/^agentstack\s*/, "v")}</span>)
           </>
         ) : null}{" "}
-        speaks a newer data format (schema {incompatible.cliSchema}) than this t3code build
-        understands (schema {incompatible.supported}). Update t3code to read this AgentStack CLI —
-        until then, the panel's actions are disabled to avoid acting on data it can't fully read.
+        speaks a newer data format (schema {incompatible.cliSchema}) than this{" "}
+        {AGENTSTACK_HOST_NAME} build understands (schema {incompatible.supported}). Until they
+        match, the panel's actions stay disabled rather than act on data it can't fully read.
       </p>
+      {offer.kind === "none" ? (
+        <p className="text-[11px] text-muted-foreground/80">{offer.note}</p>
+      ) : (
+        <Button
+          size="xs"
+          variant="default"
+          disabled={busy}
+          onClick={act}
+          className="self-start font-semibold"
+        >
+          {busy ? "Working…" : offer.label}
+        </Button>
+      )}
     </div>
   );
 }

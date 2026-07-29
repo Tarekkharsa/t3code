@@ -1670,3 +1670,91 @@ export function deriveTrustSurface(
     summary: servers.length === 0 && parts.length <= 1 ? "nothing declared" : parts.join(" · "),
   };
 }
+
+// ── version mismatch ─────────────────────────────────────────────────────────
+
+/**
+ * The one place this panel names the application hosting it.
+ *
+ * The panel is one host integration, not the product — so the handful of
+ * strings that must name a host name it here rather than inline, and a second
+ * host changes one line instead of hunting three. (The CLI itself never needs
+ * this: it is the authority in every integration.)
+ */
+export const AGENTSTACK_HOST_NAME = "t3code";
+
+/** What the version-mismatch screen can offer as a way out. */
+export type AgentstackUpdateOffer =
+  | { readonly kind: "install"; readonly label: string }
+  | { readonly kind: "download"; readonly label: string }
+  | { readonly kind: "check"; readonly label: string }
+  | { readonly kind: "none"; readonly note: string };
+
+/**
+ * Turn the host's update state into the one verb this screen should offer.
+ *
+ * The screen correctly refuses to act on data it cannot fully read, but it
+ * offered no way forward — a dead end in a product that already knows how to
+ * update itself. Where that path exists it is named precisely (downloading and
+ * installing are different acts with different costs); where it does not, the
+ * screen says so instead of showing a button that cannot work.
+ */
+export function selectAgentstackUpdateOffer(input: {
+  /** False in a browser, where there is no self-update path to offer. */
+  readonly isDesktop: boolean;
+  readonly action: "download" | "install" | "none";
+  readonly canCheck: boolean;
+  /**
+   * The host's update status, so work already in flight can be named.
+   *
+   * Spelled out rather than typed `string`: this module declares its own
+   * unions instead of importing, and a `string` would let a typo fall silently
+   * into the "unavailable" copy — the exact falsehood this argument exists to
+   * prevent. `undefined` means the host has not reported yet, which is not the
+   * same as having nothing to report.
+   */
+  readonly status?:
+    | "disabled"
+    | "idle"
+    | "checking"
+    | "up-to-date"
+    | "available"
+    | "downloading"
+    | "downloaded"
+    | "error"
+    | undefined;
+}): AgentstackUpdateOffer {
+  if (!input.isDesktop) {
+    return {
+      kind: "none",
+      note: `Open this project in the ${AGENTSTACK_HOST_NAME} desktop app to update, or downgrade the CLI to the version this build understands.`,
+    };
+  }
+  // Ordered by how far along the update already is, so the button never asks
+  // for work the host has already done.
+  if (input.action === "install") return { kind: "install", label: "Restart to update" };
+  if (input.action === "download") return { kind: "download", label: "Download update" };
+  // An update already in flight also has no button — but it is emphatically
+  // not "unavailable", and saying so while one downloads would be false. Both
+  // of these states make `canCheck` false, so they must be answered before the
+  // unavailable case rather than falling into it.
+  if (input.status === "downloading") {
+    return {
+      kind: "none",
+      note: "An update is downloading. You'll be able to restart into it once it finishes.",
+    };
+  }
+  if (input.status === "checking") {
+    return { kind: "none", note: "Checking for updates…" };
+  }
+  if (input.canCheck) return { kind: "check", label: "Check for updates" };
+  // The host has not reported yet. That is not the same as having no update
+  // path, and claiming one would be asserting something we have not been told.
+  if (input.status === undefined) {
+    return { kind: "none", note: "Checking for updates…" };
+  }
+  return {
+    kind: "none",
+    note: `Automatic updates are unavailable in this build. Install a newer ${AGENTSTACK_HOST_NAME}, or downgrade the CLI to the version it understands.`,
+  };
+}

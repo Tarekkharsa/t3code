@@ -26,6 +26,7 @@ import {
   partitionAgentstackOverviewRows,
   selectAgentstackFindingsView,
   selectAgentstackPrimaryConcern,
+  selectAgentstackUpdateOffer,
   shortenAgentstackPath,
   shortenAgentstackPathsIn,
   selectAgentstackUndoEntry,
@@ -1417,5 +1418,91 @@ describe("deriveTrustSurface", () => {
     });
     expect(s.groups.map((g) => g.key)).toEqual(["unresolvable"]);
     expect(s.serverCount).toBe(1);
+  });
+});
+
+describe("selectAgentstackUpdateOffer", () => {
+  it("offers the furthest-along step, so it never asks for work already done", () => {
+    // A downloaded update needs restarting, not downloading again.
+    expect(
+      selectAgentstackUpdateOffer({ isDesktop: true, action: "install", canCheck: true }),
+    ).toEqual({ kind: "install", label: "Restart to update" });
+    expect(
+      selectAgentstackUpdateOffer({ isDesktop: true, action: "download", canCheck: true }),
+    ).toEqual({ kind: "download", label: "Download update" });
+    expect(
+      selectAgentstackUpdateOffer({ isDesktop: true, action: "none", canCheck: true }),
+    ).toEqual({ kind: "check", label: "Check for updates" });
+  });
+
+  it("says where to get a newer build instead of a button that cannot work", () => {
+    // The whole point of the change: a correct refusal must not be a dead end,
+    // but offering an update button in a browser would be a different lie.
+    const web = selectAgentstackUpdateOffer({ isDesktop: false, action: "none", canCheck: false });
+    expect(web.kind).toBe("none");
+    expect(web.kind === "none" && web.note).toContain("desktop app");
+
+    // `status: "disabled"` specifically — an omitted status means "the host
+    // hasn't reported yet", which must NOT read as unavailable.
+    const disabled = selectAgentstackUpdateOffer({
+      isDesktop: true,
+      action: "none",
+      canCheck: false,
+      status: "disabled",
+    });
+    expect(disabled.kind).toBe("none");
+    expect(disabled.kind === "none" && disabled.note).toContain(
+      "Automatic updates are unavailable",
+    );
+  });
+
+  it("never calls an update in flight 'unavailable'", () => {
+    // Both of these make `canCheck` false, so without their own branch they
+    // fall into the unavailable copy — telling the user updates are
+    // unavailable while one is literally downloading.
+    const downloading = selectAgentstackUpdateOffer({
+      isDesktop: true,
+      action: "none",
+      canCheck: false,
+      status: "downloading",
+    });
+    expect(downloading.kind).toBe("none");
+    expect(downloading.kind === "none" && downloading.note).toContain("downloading");
+    expect(downloading.kind === "none" && downloading.note).not.toContain("unavailable");
+
+    const checking = selectAgentstackUpdateOffer({
+      isDesktop: true,
+      action: "none",
+      canCheck: false,
+      status: "checking",
+    });
+    expect(checking.kind === "none" && checking.note).toContain("Checking");
+  });
+
+  it("does not call updates unavailable before the host has reported", () => {
+    // The state arrives asynchronously, so an early desktop render has no
+    // status at all. That is ignorance, not absence, and the copy must not
+    // turn one into the other.
+    const early = selectAgentstackUpdateOffer({ isDesktop: true, action: "none", canCheck: false });
+    expect(early.kind).toBe("none");
+    expect(early.kind === "none" && early.note).not.toContain("unavailable");
+  });
+
+  it("still prefers a ready action over an in-flight status", () => {
+    // A downloaded update reports status "downloaded"; the verb wins.
+    expect(
+      selectAgentstackUpdateOffer({
+        isDesktop: true,
+        action: "install",
+        canCheck: false,
+        status: "downloaded",
+      }),
+    ).toEqual({ kind: "install", label: "Restart to update" });
+  });
+
+  it("never offers a self-update path in a browser, whatever the host state says", () => {
+    expect(
+      selectAgentstackUpdateOffer({ isDesktop: false, action: "install", canCheck: true }).kind,
+    ).toBe("none");
   });
 });
