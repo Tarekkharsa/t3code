@@ -13,6 +13,7 @@ import {
   deriveAgentstackShareFacts,
   deriveAgentstackTrustBadge,
   deriveToolsetRows,
+  deriveTrustSurface,
   deriveWorkflowCounts,
   deriveWorkflowStages,
   filterAgentstackLibraryItems,
@@ -1307,5 +1308,114 @@ describe("selectAgentstackPrimaryConcern", () => {
       trust: "trusted",
     });
     expect(concern?.act).toEqual({ kind: "manage" });
+  });
+});
+
+describe("deriveTrustSurface", () => {
+  const srv = (name: string, kind: string, target: string) => ({ name, kind, target });
+
+  it("leads with what cannot be judged, then what runs, then what reaches the network", () => {
+    // A repo declaring many servers buries the one entry that deserved a
+    // second look; the unresolvable band exists so it is never the fifteenth
+    // row down.
+    const s = deriveTrustSurface(
+      [
+        srv("figma", "http", "mcp.figma.com"),
+        srv("github", "stdio", "npx -y @modelcontextprotocol/server-github"),
+        srv("broken", "unresolvable", "${MISSING} did not resolve"),
+        srv("pg", "stdio", "postgres-mcp"),
+      ],
+      { skills: 2, workflows: 0, extensions: 0, instructions: 0, secrets: 1 },
+    );
+    expect(s.groups.map((g) => g.key)).toEqual(["unresolvable", "stdio", "http"]);
+    expect(s.groups[0]!.servers.map((x) => x.name)).toEqual(["broken"]);
+    expect(s.groups[0]!.level).toBe("warn");
+    // Manifest order is preserved inside a band — two reviews of one repo must
+    // not look different.
+    expect(s.groups[1]!.servers.map((x) => x.name)).toEqual(["github", "pg"]);
+  });
+
+  it("omits a band nobody declared, rather than showing an empty heading", () => {
+    const s = deriveTrustSurface([srv("figma", "http", "mcp.figma.com")], {
+      skills: 0,
+      workflows: 0,
+      extensions: 0,
+      instructions: 0,
+      secrets: 0,
+    });
+    expect(s.groups.map((g) => g.key)).toEqual(["http"]);
+    expect(s.summary).toBe("1 server · 1 reaches the network");
+  });
+
+  it("summarizes what approving covers, naming secrets last and never dropping them", () => {
+    const s = deriveTrustSurface(
+      [srv("a", "stdio", "x"), srv("b", "http", "y"), srv("c", "unresolvable", "z")],
+      { skills: 4, workflows: 0, extensions: 0, instructions: 0, secrets: 2 },
+    );
+    expect(s.summary).toBe(
+      "3 servers · 1 runs a command · 1 reaches the network · 1 unresolvable · 4 skills · 2 secrets",
+    );
+    expect(s.serverCount).toBe(3);
+  });
+
+  it("says nothing is declared rather than showing a bare zero", () => {
+    const s = deriveTrustSurface([], {
+      skills: 0,
+      workflows: 0,
+      extensions: 0,
+      instructions: 0,
+      secrets: 0,
+    });
+    expect(s.groups).toEqual([]);
+    expect(s.summary).toBe("nothing declared");
+  });
+
+  it("never files a changed-since-pinned server under 'can't be resolved'", () => {
+    // `unverified` means the definition on disk no longer matches its lockfile
+    // pin — the opposite of a typo, and the highest-stakes row on the screen.
+    // Merging it into the unresolvable band makes it read as a benign
+    // misconfiguration.
+    const s = deriveTrustSurface(
+      [
+        srv("figma", "http", "mcp.figma.com"),
+        srv("swapped", "unverified", "library definition does not match the lockfile pin"),
+        srv("gone", "unresolvable", "${MISSING} did not resolve"),
+      ],
+      { skills: 0, workflows: 0, extensions: 0, instructions: 0, secrets: 0 },
+    );
+    expect(s.groups.map((g) => g.key)).toEqual(["unverified", "unresolvable", "http"]);
+    expect(s.groups[0]!.servers.map((x) => x.name)).toEqual(["swapped"]);
+    expect(s.groups[0]!.level).toBe("warn");
+    expect(s.groups[0]!.title).not.toMatch(/resolve/i);
+    expect(s.summary).toContain("1 changed since pinned");
+  });
+
+  it("counts every declared capability, so the bar never says 'nothing' over a real surface", () => {
+    // A repo can declare no servers and still declare workflows that name the
+    // agent roles they may spawn. "nothing declared" there would be false in
+    // the one line guaranteed to be on screen at the moment of consent.
+    const s = deriveTrustSurface([], {
+      skills: 0,
+      workflows: 3,
+      extensions: 2,
+      instructions: 1,
+      secrets: 0,
+    });
+    expect(s.summary).toBe("0 servers · 3 workflows · 2 extensions · 1 instruction");
+    expect(s.summary).not.toContain("nothing declared");
+  });
+
+  it("treats an unrecognized kind as unjudgeable rather than dropping the row", () => {
+    // A newer CLI could emit a kind this build has never seen. Silently
+    // omitting it would understate the surface being consented to.
+    const s = deriveTrustSurface([srv("odd", "websocket", "wss://x")], {
+      skills: 0,
+      workflows: 0,
+      extensions: 0,
+      instructions: 0,
+      secrets: 0,
+    });
+    expect(s.groups.map((g) => g.key)).toEqual(["unresolvable"]);
+    expect(s.serverCount).toBe(1);
   });
 });

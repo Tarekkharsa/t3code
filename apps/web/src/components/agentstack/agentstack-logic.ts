@@ -687,6 +687,8 @@ export function deriveAgentstackActivityRows(
               // Control characters first: a filename may legally contain them,
               // and they survive a whitespace collapse.
               e.detail
+                // Stripping control characters is the entire point here.
+                // eslint-disable-next-line no-control-regex
                 .replaceAll(/[\u0000-\u001f\u007f]/g, " ")
                 .replace(/\s+/g, " ")
                 .trim(),
@@ -1526,4 +1528,145 @@ export function formatAgentstackImportSummary(input: {
   if (servers === 0 && settings === null) return "nothing to import";
   const serverPart = servers > 0 ? countOf(servers, "server") : "no servers";
   return [serverPart, settings].filter((p): p is string => p !== null).join(" · ");
+}
+
+// ── trust review ─────────────────────────────────────────────────────────────
+
+export interface AgentstackTrustServerLike {
+  readonly name: string;
+  /** stdio | http | unverified | unresolvable */
+  readonly kind: string;
+  readonly target: string;
+}
+
+/** One risk-ordered band of the servers a repo declares. */
+export interface AgentstackTrustGroup {
+  readonly key: "unverified" | "unresolvable" | "stdio" | "http";
+  /** What consenting to this band actually permits, in plain words. */
+  readonly title: string;
+  readonly note: string;
+  readonly level: AgentstackRowLevel;
+  readonly servers: ReadonlyArray<AgentstackTrustServerLike>;
+}
+
+export interface AgentstackTrustSurface {
+  readonly groups: ReadonlyArray<AgentstackTrustGroup>;
+  /** One line for the pinned verdict bar: what saying yes covers. */
+  readonly summary: string;
+  readonly serverCount: number;
+}
+
+/**
+ * Order the trust surface by what consenting to it actually grants, and
+ * summarize it in one line.
+ *
+ * The review is a wall when a repo declares twenty servers: a flat list buries
+ * both the decision and the one entry that deserved a second look. Four bands,
+ * most-consequential first:
+ *
+ *   1. unverified — the definition on disk no longer matches its lockfile pin.
+ *      The highest-stakes row on the screen, and the one most easily mistaken
+ *      for a benign misconfiguration, so it leads and it is never merged with
+ *      the band below.
+ *   2. unresolvable — the name resolves to nothing, so it will not run and
+ *      cannot be judged.
+ *   3. stdio — runs a command on this machine. The broadest capability here.
+ *   4. http — reaches a host over the network.
+ *
+ * Ordering within a band is left exactly as the CLI emitted it: the preview's
+ * order is the manifest's order, and reordering it would make two reviews of
+ * the same repo look different for no reason.
+ */
+export function deriveTrustSurface(
+  servers: ReadonlyArray<AgentstackTrustServerLike>,
+  extra: {
+    readonly skills: number;
+    readonly workflows: number;
+    readonly extensions: number;
+    readonly instructions: number;
+    readonly secrets: number;
+  },
+): AgentstackTrustSurface {
+  const of = (kind: string) => servers.filter((s) => s.kind === kind);
+  const stdio = of("stdio");
+  const http = of("http");
+  const unverified = of("unverified");
+  // Everything else, including a kind a newer CLI invents: over-warning is the
+  // safe direction, and silently dropping a row would understate the surface.
+  const unresolvable = servers.filter(
+    (s) => s.kind !== "stdio" && s.kind !== "http" && s.kind !== "unverified",
+  );
+
+  const groups: AgentstackTrustGroup[] = [];
+  if (unverified.length > 0) {
+    groups.push({
+      key: "unverified",
+      // NOT "can't be resolved": this one resolves fine. Its bytes changed
+      // since they were pinned, which is the opposite of a typo and reads as
+      // one if the two are shown under a single heading.
+      title: "Changed since it was pinned",
+      note: "The definition on disk no longer matches the lockfile pin, so what it would run can't be shown or checked.",
+      level: "warn",
+      servers: unverified,
+    });
+  }
+  if (unresolvable.length > 0) {
+    groups.push({
+      key: "unresolvable",
+      title: "Can't be resolved",
+      note: "You can't see what these would run. Approving covers them anyway.",
+      level: "warn",
+      servers: unresolvable,
+    });
+  }
+  if (stdio.length > 0) {
+    groups.push({
+      key: "stdio",
+      title: "Run a command on this machine",
+      note: "Each one starts the program named below, with your user's access.",
+      level: "ok",
+      servers: stdio,
+    });
+  }
+  if (http.length > 0) {
+    groups.push({
+      key: "http",
+      title: "Reach a host over the network",
+      note: "Each one can send and receive data from the address below.",
+      level: "ok",
+      servers: http,
+    });
+  }
+
+  const parts = [
+    countOf(servers.length, "server"),
+    // Verb agreement matters here: this line is read at the moment of consent,
+    // and "1 run commands" is the kind of seam that makes a reader wonder what
+    // else on the screen was generated rather than written.
+    stdio.length > 0
+      ? `${stdio.length} ${stdio.length === 1 ? "runs a command" : "run commands"}`
+      : null,
+    http.length > 0
+      ? `${http.length} ${http.length === 1 ? "reaches the network" : "reach the network"}`
+      : null,
+    unverified.length > 0 ? `${unverified.length} changed since pinned` : null,
+    unresolvable.length > 0 ? `${unresolvable.length} unresolvable` : null,
+    // Everything else the repo declares. Omitting these let the bar read
+    // "nothing declared" for a repo with no servers but three workflows —
+    // each of which names the agent roles it may spawn — which is a false
+    // statement in the one line guaranteed to be on screen at consent.
+    extra.skills > 0 ? countOf(extra.skills, "skill") : null,
+    extra.workflows > 0 ? countOf(extra.workflows, "workflow") : null,
+    extra.extensions > 0 ? countOf(extra.extensions, "extension") : null,
+    extra.instructions > 0 ? countOf(extra.instructions, "instruction") : null,
+    // Named last and never omitted when present: these are the values the
+    // project's declared capabilities become able to read.
+    extra.secrets > 0 ? countOf(extra.secrets, "secret") : null,
+  ].filter((p): p is string => p !== null);
+
+  return {
+    groups,
+    serverCount: servers.length,
+    summary: servers.length === 0 && parts.length <= 1 ? "nothing declared" : parts.join(" · "),
+  };
 }

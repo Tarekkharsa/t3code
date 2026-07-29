@@ -55,6 +55,7 @@ import {
   deriveAgentstackStatusChip,
   deriveAgentstackTrustBadge,
   deriveToolsetRows,
+  deriveTrustSurface,
   deriveWorkflowCounts,
   deriveWorkflowStages,
   filterAgentstackLibraryItems,
@@ -839,6 +840,7 @@ export function AgentstackControl({
           title="Review this project"
           description="What this project would be allowed to run here, before you approve it."
           onClose={() => setReviewing(false)}
+          bodyScroll={false}
         >
           <TrustReviewPanel
             loadPreview={loadPreview}
@@ -1215,8 +1217,20 @@ function TrustReviewPanel({
     if (result) setLoad({ phase: "loaded", result });
   };
 
+  // Named lists when a newer CLI emits them, the counts otherwise — the same
+  // fallback the evidence below uses, so the bar can never summarize a smaller
+  // surface than the one on screen.
+  const surface = deriveTrustSurface(preview?.servers ?? [], {
+    skills: preview?.skills?.length ?? preview?.counts.skills ?? 0,
+    workflows: preview?.workflows?.length ?? preview?.counts.workflows ?? 0,
+    extensions: preview?.extensions?.length ?? preview?.counts.extensions ?? 0,
+    instructions: preview?.instructions?.length ?? preview?.counts.instructions ?? 0,
+    secrets: preview?.secrets.length ?? 0,
+  });
+
   return (
-    <div>
+    // A column, not a block: the evidence scrolls and the verdict bar does not.
+    <div className="flex min-h-0 flex-1 flex-col">
       {load.phase === "loading" ? (
         <p className="px-4 py-4 text-xs text-muted-foreground">Loading review…</p>
       ) : preview === null ? (
@@ -1224,7 +1238,7 @@ function TrustReviewPanel({
           Couldn't load the trust review — the CLI didn't return one for this project.
         </p>
       ) : (
-        <div className="flex flex-col gap-3 px-4 py-3">
+        <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-4 py-3">
           <p className="text-[12.5px] leading-relaxed text-muted-foreground">
             {state === "trusted"
               ? "This repo is trusted at its current bytes. Editing the manifest or lockfile re-gates it."
@@ -1234,38 +1248,61 @@ function TrustReviewPanel({
             {preview.re_trust && state !== "trusted" ? " You trusted it before." : ""}
           </p>
 
-          <div>
-            <p className="mb-1 text-xs font-semibold text-foreground">
-              Servers ({preview.servers.length})
-            </p>
-            {preview.servers.length === 0 ? (
+          {surface.serverCount === 0 ? (
+            <div>
+              <p className="mb-1 text-xs font-semibold text-foreground">Servers (0)</p>
               <p className="text-[11px] text-muted-foreground">none</p>
-            ) : (
-              <ul className="flex flex-col gap-1">
-                {preview.servers.map((srv) => (
-                  <li key={srv.name} className="text-[11px] leading-relaxed">
-                    <span className="font-semibold text-foreground">{srv.name}</span>{" "}
-                    <span className="text-muted-foreground">
-                      {srv.kind === "stdio"
-                        ? "runs"
-                        : srv.kind === "http"
-                          ? "contacts"
-                          : "unresolvable —"}
-                    </span>{" "}
-                    <code className="break-all font-mono text-muted-foreground/90">
-                      {srv.target}
-                    </code>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
+            </div>
+          ) : (
+            // Banded by what approving actually permits, not listed flat: in a
+            // repo declaring twenty servers, the one entry that deserved a
+            // second look is otherwise indistinguishable from the fifteen
+            // ordinary ones above it.
+            surface.groups.map((group) => (
+              <div key={group.key}>
+                <p
+                  className={cn(
+                    "mb-1 text-xs font-semibold",
+                    group.level === "warn" ? "text-warning-foreground" : "text-foreground",
+                  )}
+                >
+                  {group.title} ({group.servers.length})
+                </p>
+                <p className="mb-1.5 text-[10.5px] leading-relaxed text-muted-foreground/70">
+                  {group.note}
+                </p>
+                <ul className="flex flex-col gap-1">
+                  {group.servers.map((srv) => (
+                    <li key={srv.name} className="text-[11px] leading-relaxed">
+                      <span className="font-semibold text-foreground">{srv.name}</span>{" "}
+                      <code className="break-all font-mono text-muted-foreground/90">
+                        {srv.target}
+                      </code>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))
+          )}
 
           {preview.secrets.length > 0 ? (
-            <p className="text-[11px] text-muted-foreground">
-              <span className="font-semibold text-foreground">Secrets:</span>{" "}
-              {preview.secrets.join(", ")}
-            </p>
+            // Not a trailing footnote: these are the values the project's
+            // declared capabilities become able to read, which is the
+            // highest-stakes fact on screen.
+            //
+            // "this project", not "these servers": the CLI's list is every
+            // `${REF}` the manifest references, which includes hooks as well as
+            // servers — and a `${REF}` in one server's env is readable by that
+            // server, not by all of them. The narrower phrasing would be wrong
+            // in both directions.
+            <div className="rounded-lg border border-warning/25 bg-warning/[0.06] px-2.5 py-2">
+              <p className="text-[11px] font-semibold text-warning-foreground">
+                Secrets this project can read ({preview.secrets.length})
+              </p>
+              <p className="mt-0.5 break-all font-mono text-[10.5px] text-muted-foreground">
+                {preview.secrets.join(" · ")}
+              </p>
+            </div>
           ) : null}
 
           {(() => {
@@ -1338,6 +1375,18 @@ function TrustReviewPanel({
             ) : null;
           })()}
 
+          {/* Said here rather than left to be discovered by looking for a
+              control that does not exist. Trust is granted over one digest of
+              the whole surface, so there is no per-item opt-out to hunt for —
+              and the way to exclude something is named. */}
+          {state !== "trusted" ? (
+            <p className="text-[10.5px] leading-relaxed text-muted-foreground/70">
+              Approving covers this whole list — there is no per-item opt-out, because trust is
+              granted over one digest of the entire surface. To leave something out, remove it from
+              the project&apos;s manifest and review again.
+            </p>
+          ) : null}
+
           <p className="text-[10.5px] leading-relaxed text-muted-foreground/60">
             Full line-by-line review:{" "}
             <code className="font-mono">agentstack trust {preview.path}</code> in a terminal.
@@ -1372,8 +1421,23 @@ function TrustReviewPanel({
               <span className="break-words font-mono text-muted-foreground">{act.message}</span>
             </div>
           ) : null}
+        </div>
+      )}
 
-          <div className="flex items-center gap-2 pt-0.5">
+      {/* The verdict bar. Pinned outside the scrolling evidence, so the
+          decision and what it covers stay on screen however long the list is —
+          a consent button below the fold is a consent button nobody read down
+          to. */}
+      {preview !== null ? (
+        <div className="flex flex-none items-center gap-3 border-t border-border/60 bg-background px-4 py-2.5">
+          <span
+            className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground"
+            title={surface.summary}
+          >
+            {state === "trusted" ? "Trusted: " : "You would be approving: "}
+            <span className="text-foreground">{surface.summary}</span>
+          </span>
+          <div className="flex flex-none items-center gap-2">
             {state === "trusted" ? (
               <button
                 type="button"
@@ -1403,7 +1467,7 @@ function TrustReviewPanel({
             </button>
           </div>
         </div>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -2928,12 +2992,20 @@ function PanelDialog({
   onClose,
   children,
   width = "max-w-2xl",
+  bodyScroll = true,
 }: {
   title: string;
   description?: string | undefined;
   onClose: () => void;
   children: ReactNode;
   width?: string;
+  /**
+   * False when the child manages its own scrolling — which a screen with a
+   * decision at the end of it must, so the verb can stay pinned while the
+   * evidence above it scrolls. Scrolling the whole body instead pushes the
+   * button below the fold exactly when there is most to read.
+   */
+  bodyScroll?: boolean;
 }) {
   return (
     <Dialog
@@ -2950,7 +3022,14 @@ function PanelDialog({
           </DialogTitle>
           {description ? <DialogDescription>{description}</DialogDescription> : null}
         </DialogHeader>
-        <div className="max-h-[70vh] overflow-y-auto">{children}</div>
+        <div
+          className={cn(
+            "max-h-[70vh]",
+            bodyScroll ? "overflow-y-auto" : "flex min-h-0 flex-col overflow-hidden",
+          )}
+        >
+          {children}
+        </div>
       </DialogPopup>
     </Dialog>
   );
