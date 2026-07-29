@@ -3579,6 +3579,18 @@ function LibraryRow({
               {item.detail}
             </span>
           ) : null}
+          {item.origin === "manifest" ? (
+            // A library row that is also "in project" says where it lives
+            // through its own remove button ("Remove from library"). This row
+            // has no such tell: the definition exists nowhere but this
+            // project's agentstack.toml, and nothing on screen said so — the
+            // reader was left to infer it from the absence of a button. One
+            // visible line, not a tooltip, per the same rule as the labels:
+            // what a row IS shouldn't need a hover to discover.
+            <span className="text-[10.5px] leading-snug text-muted-foreground/70">
+              Defined in this project&apos;s agentstack.toml — not in your library.
+            </span>
+          ) : null}
         </div>
 
         {canTick ? (
