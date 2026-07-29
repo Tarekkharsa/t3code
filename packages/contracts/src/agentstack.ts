@@ -816,6 +816,31 @@ export const AgentstackRemoveFromLibraryEdit = Schema.Struct({
 export type AgentstackRemoveFromLibraryEdit = typeof AgentstackRemoveFromLibraryEdit.Type;
 
 /**
+ * Change one toolset's membership as a single batch: every add and every
+ * removal in one manifest write, under one `consent_digest`, followed by one
+ * re-lock and one re-render.
+ *
+ * This is what lets the browser be a set of ticks rather than a list of Add
+ * buttons. The per-capability verbs have no inverse — `remove-from-library` is
+ * machine-wide and deletes the capability itself — so un-ticking had nothing to
+ * call. Removal here ends a MEMBERSHIP: the capability stays declared and stays
+ * in the library.
+ *
+ * The preview returns the resulting `skills`/`servers` as well as the deltas,
+ * so the digest binds the end state the user was actually looking at. Gate on
+ * `profiles-edit-batch-v1`.
+ */
+export const AgentstackEditProfileEdit = Schema.Struct({
+  kind: Schema.Literal("edit-profile"),
+  profile: Schema.String,
+  addSkills: Schema.Array(Schema.String),
+  removeSkills: Schema.Array(Schema.String),
+  addServers: Schema.Array(Schema.String),
+  removeServers: Schema.Array(Schema.String),
+});
+export type AgentstackEditProfileEdit = typeof AgentstackEditProfileEdit.Type;
+
+/**
  * Rename a toolset, keeping its members. Renames the manifest entry and nothing
  * else — nothing is rendered, so no `${REF}` is resolved.
  *
@@ -853,6 +878,7 @@ export const AgentstackProfileEdit = Schema.Union([
   AgentstackAddSkillEdit,
   AgentstackAddServerEdit,
   AgentstackCreateProfileEdit,
+  AgentstackEditProfileEdit,
   AgentstackRenameProfileEdit,
   AgentstackDeleteProfileEdit,
   AgentstackRemoveFromLibraryEdit,

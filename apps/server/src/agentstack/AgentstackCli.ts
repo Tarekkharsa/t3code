@@ -279,6 +279,32 @@ export function validateProfileEdit(edit: AgentstackProfileEdit): string | null 
       if (!edit.servers.every((s) => isPlainName(s))) return "a server name looks malformed";
       return null;
     }
+    case "edit-profile": {
+      if (!isPlainName(edit.profile)) return "toolset name looks malformed";
+      const lists = [edit.addSkills, edit.removeSkills, edit.addServers, edit.removeServers];
+      if (lists.some((l) => l.length > PROFILE_EDIT_MAX_LIST_LEN)) {
+        return "too many changes for one edit";
+      }
+      if (lists.every((l) => l.length === 0)) return "nothing to apply";
+      // `*` is the CLI's inline-all-skills wildcard; every other member is a
+      // plain capability name.
+      const okName = (n: string) => n === "*" || isPlainName(n);
+      if (!edit.addSkills.every(okName) || !edit.removeSkills.every(okName)) {
+        return "a skill name looks malformed";
+      }
+      if (!edit.addServers.every(isPlainName) || !edit.removeServers.every(isPlainName)) {
+        return "a server name looks malformed";
+      }
+      // A name on both sides is an intent nobody can act on. The CLI refuses it
+      // too; catching it here keeps it off the argv and lets the panel say so
+      // without a round-trip.
+      const both = (a: ReadonlyArray<string>, b: ReadonlyArray<string>) =>
+        a.some((n) => b.includes(n));
+      if (both(edit.addSkills, edit.removeSkills) || both(edit.addServers, edit.removeServers)) {
+        return "the same name is being both added and removed";
+      }
+      return null;
+    }
     case "rename-profile": {
       if (!isPlainName(edit.name)) return "toolset name looks malformed";
       // The new name becomes a TOML table key in the manifest, so it is held to
@@ -525,6 +551,16 @@ export function profileEditArgv(
       const argv = [...base, "create-profile", "--name", edit.name];
       for (const s of edit.skills) argv.push("--skill", s);
       for (const s of edit.servers) argv.push("--server", s);
+      return [...argv, ...consentFlags];
+    }
+    case "edit-profile": {
+      // One argv carries the whole batch, so the CLI writes once and renders
+      // once. This one DOES render, so `--allow-unresolved` passes through.
+      const argv = [...base, "edit-profile", "--profile", edit.profile];
+      for (const n of edit.addSkills) argv.push("--add-skill", n);
+      for (const n of edit.addServers) argv.push("--add-server", n);
+      for (const n of edit.removeSkills) argv.push("--remove-skill", n);
+      for (const n of edit.removeServers) argv.push("--remove-server", n);
       return [...argv, ...consentFlags];
     }
     case "rename-profile": {

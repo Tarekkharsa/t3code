@@ -693,6 +693,39 @@ describe("AgentstackCli", () => {
       "--allow-unresolved",
     ]);
 
+    // The whole batch travels in one argv, so the CLI writes once and renders
+    // once. This one DOES render, so --allow-unresolved passes through.
+    expect(
+      AgentstackCli.profileEditArgv(
+        "/proj",
+        {
+          kind: "edit-profile",
+          profile: "backend",
+          addSkills: ["pdf"],
+          removeSkills: [],
+          addServers: ["figma"],
+          removeServers: ["github"],
+        },
+        { digest, allowUnresolved: true },
+      ),
+    ).toEqual([
+      "--manifest-dir",
+      "/proj",
+      "edit-profile",
+      "--profile",
+      "backend",
+      "--add-skill",
+      "pdf",
+      "--add-server",
+      "figma",
+      "--remove-server",
+      "github",
+      "--yes",
+      "--consented",
+      digest,
+      "--allow-unresolved",
+    ]);
+
     // rename/delete render nothing, so `--allow-unresolved` is never emitted
     // even when asked: an extra flag would move the CLI's digest for no reason.
     expect(
@@ -783,6 +816,26 @@ describe("AgentstackCli", () => {
         path: "./skills/pdf",
       }),
     ).not.toBeNull();
+    // A batch with nothing in it, or with a name on both sides, is refused
+    // before it reaches an argv — the second is an intent nobody can act on.
+    const batch = (over: Record<string, ReadonlyArray<string>>) =>
+      AgentstackCli.validateProfileEdit({
+        kind: "edit-profile",
+        profile: "backend",
+        addSkills: [],
+        removeSkills: [],
+        addServers: [],
+        removeServers: [],
+        ...over,
+      });
+    expect(batch({ addSkills: ["pdf"] })).toBeNull();
+    expect(batch({ removeServers: ["github"] })).toBeNull();
+    expect(batch({})).not.toBeNull();
+    expect(batch({ addServers: ["x"], removeServers: ["x"] })).not.toBeNull();
+    expect(batch({ addSkills: ["../etc"] })).not.toBeNull();
+    // `*` stays the legal inline-all-skills wildcard on both sides.
+    expect(batch({ addSkills: ["*"] })).toBeNull();
+
     // A rename TARGET becomes a bare TOML table key, so it is held to the CLI's
     // stricter rule: a dot would nest one toolset's entry inside another's, and
     // uppercase is not a bare key the CLI accepts.

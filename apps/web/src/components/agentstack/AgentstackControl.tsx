@@ -107,6 +107,10 @@ const FEATURE_LIBRARY_REMOVE = "library-remove-v1";
 /** Renaming and deleting a toolset. Advertised separately from each other and
  *  from the edits above, because a CLI can have any subset — and an affordance
  *  the binary cannot honor is worse than no affordance. */
+/** Batched membership edits — the contract that lets the browser be a set of
+ *  ticks rather than a list of Add buttons, because un-ticking finally has a
+ *  verb to call. Without it the pane falls back to the add-only affordances. */
+const FEATURE_PROFILES_BATCH = "profiles-edit-batch-v1";
 const FEATURE_TOOLSET_RENAME = "toolset-rename-v1";
 const FEATURE_TOOLSET_DELETE = "toolset-delete-v1";
 /** Structured workflow observation — the enveloped `workflow list`/`runs` reads
@@ -588,6 +592,7 @@ export function AgentstackControl({
   // Removal is its own contract: a CLI that can add to toolsets may predate it,
   // and a Remove button it can't honor is worse than no button.
   const canRemoveFromLibrary = hasAgentstackFeature(features, FEATURE_LIBRARY_REMOVE);
+  const canBatchEdit = hasAgentstackFeature(features, FEATURE_PROFILES_BATCH);
   const canRenameToolset = hasAgentstackFeature(features, FEATURE_TOOLSET_RENAME);
   const canDeleteToolset = hasAgentstackFeature(features, FEATURE_TOOLSET_DELETE);
   const canReadAdvisories = hasAgentstackFeature(features, FEATURE_DOCTOR_ADVISORIES);
@@ -833,6 +838,7 @@ export function AgentstackControl({
           sessionsKnownMissing={sessionsKnownMissing}
           canEditProfiles={canEditProfiles}
           canRemoveFromLibrary={canRemoveFromLibrary}
+          canBatchEdit={canBatchEdit}
           canRenameToolset={canRenameToolset}
           canDeleteToolset={canDeleteToolset}
           actionState={actionState}
@@ -1811,6 +1817,7 @@ interface ManageProps {
   sessionsKnownMissing: boolean;
   canEditProfiles: boolean;
   canRemoveFromLibrary: boolean;
+  canBatchEdit: boolean;
   canRenameToolset: boolean;
   canDeleteToolset: boolean;
   actionState: ActionState;
@@ -2070,6 +2077,23 @@ function ToolsetsTab(props: ManageProps) {
   } | null>(null);
   const [sessionBusy, setSessionBusy] = useState<string | null>(null);
   const [sessionDone, setSessionDone] = useState<{ ok: boolean; message: string } | null>(null);
+  /**
+   * Which toolset the library pane is showing the membership OF. The rail
+   * carries the destination, so no row-level verb has to name it — which is
+   * what lets a tick mean "in this toolset" and read the same in both
+   * directions.
+   */
+  const [selected, setSelected] = useState<string | null>(null);
+  /**
+   * Ticks made since the last apply, as an intent rather than a set of writes.
+   * Nothing has happened on disk while this is non-empty: the bar collects the
+   * whole change and applies it once, under one digest, so Reset costs nothing
+   * and a six-capability edit is one re-lock and one re-render instead of six.
+   */
+  const [pending, setPending] = useState<{
+    readonly add: ReadonlyArray<string>;
+    readonly remove: ReadonlyArray<string>;
+  }>({ add: [], remove: [] });
 
   const loadIndex = props.loadLibraryIndex;
   const reload = useCallback(async () => {
@@ -2122,6 +2146,10 @@ function ToolsetsTab(props: ManageProps) {
     // wrote it too, so both re-read rather than leaving stale in-project flags.
     if (r.ok || matchSecretBlock(r.message)) {
       if (edit.kind === "create-profile") setDraft(null);
+      // The batch landed (or landed in the manifest and was blocked at the
+      // render), so the ticks are now the on-disk truth and the intent is
+      // spent. Leaving them would re-offer changes that already happened.
+      if (edit.kind === "edit-profile") setPending({ add: [], remove: [] });
       await reload();
     }
   }, [flow, applyProfileEdit, reload]);
@@ -2147,6 +2175,64 @@ function ToolsetsTab(props: ManageProps) {
         [key]: list.includes(name) ? list.filter((n) => n !== name) : [...list, name],
       };
     });
+
+  // The toolset whose membership the ticks describe: an unsaved draft behaves
+  // exactly like a saved row, which is the point — creating stops being a mode
+  // with its own gestures.
+  const target = draft !== null ? draft.name : selected;
+  const targetMembers = useMemo(() => {
+    if (draft !== null) return new Set([...draft.skills, ...draft.servers]);
+    const p = selected === null ? undefined : profiles.find((x) => x.name === selected);
+    return new Set(p ? [...p.skills, ...p.servers] : []);
+  }, [draft, selected, profiles]);
+
+  /** What a row's tick shows: current membership, with pending ticks applied. */
+  const isTicked = useCallback(
+    (name: string) =>
+      pending.add.includes(name) || (targetMembers.has(name) && !pending.remove.includes(name)),
+    [pending, targetMembers],
+  );
+
+  const toggleMember = useCallback(
+    (group: "skill" | "server", name: string) => {
+      if (draft !== null) {
+        toggleDraft(group, name);
+        return;
+      }
+      // A tick that undoes an untick is not a change — drop it from the batch
+      // rather than sending an add and a remove the CLI would refuse.
+      setPending((p) => {
+        const member = targetMembers.has(name);
+        const on = p.add.includes(name) || (member && !p.remove.includes(name));
+        if (on) {
+          return member
+            ? { add: p.add.filter((n) => n !== name), remove: [...p.remove, name] }
+            : { add: p.add.filter((n) => n !== name), remove: p.remove };
+        }
+        return member
+          ? { add: p.add, remove: p.remove.filter((n) => n !== name) }
+          : { add: [...p.add, name], remove: p.remove.filter((n) => n !== name) };
+      });
+    },
+    [draft, targetMembers],
+  );
+
+  const resetPending = useCallback(() => setPending({ add: [], remove: [] }), []);
+  const pendingCount = pending.add.length + pending.remove.length;
+
+  /** Apply the collected ticks as ONE batch under one digest. */
+  const applyPending = useCallback(() => {
+    if (selected === null || pendingCount === 0 || index === null) return;
+    const isSkill = (n: string) => index.skills.some((s) => s.name === n);
+    void beginEdit({
+      kind: "edit-profile",
+      profile: selected,
+      addSkills: pending.add.filter(isSkill),
+      addServers: pending.add.filter((n) => !isSkill(n)),
+      removeSkills: pending.remove.filter(isSkill),
+      removeServers: pending.remove.filter((n) => !isSkill(n)),
+    });
+  }, [selected, pending, pendingCount, index, beginEdit]);
 
   return (
     // Two panes that never leave the screen. Choosing a tool used to mean
@@ -2178,6 +2264,13 @@ function ToolsetsTab(props: ManageProps) {
               });
             }
           }}
+          selected={selected}
+          onSelect={(name) => {
+            // Switching target abandons ticks aimed at the previous one rather
+            // than silently re-aiming them at a different toolset.
+            setSelected((cur) => (cur === name ? null : name));
+            setPending({ add: [], remove: [] });
+          }}
           canRename={props.canRenameToolset}
           canDelete={props.canDeleteToolset}
           onRename={(name, to) => void beginEdit({ kind: "rename-profile", name, to })}
@@ -2195,6 +2288,10 @@ function ToolsetsTab(props: ManageProps) {
             draft={draft}
             onToggleDraft={toggleDraft}
             canRemove={props.canRemoveFromLibrary}
+            target={target}
+            canTick={props.canBatchEdit || draft !== null}
+            isTicked={isTicked}
+            onToggleMember={toggleMember}
             untrusted={data !== null && data.trust !== "trusted"}
             busy={flow.phase !== "idle"}
             onAdd={(group, name, profile) =>
@@ -2215,6 +2312,36 @@ function ToolsetsTab(props: ManageProps) {
           </div>
         )}
       </div>
+      {/* The pending bar. Ticking writes nothing — this collects the whole
+          change and applies it once, under one digest, which is why Reset
+          costs nothing and why a six-capability edit is one re-lock and one
+          re-render instead of six. It appears only when there is something to
+          apply, so the common case is not a permanently-parked toolbar. */}
+      {pendingCount > 0 && selected !== null && flow.phase === "idle" ? (
+        <div className="flex flex-none items-center gap-3 border-t border-border/60 bg-background px-4 py-2">
+          <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground">
+            <span className="font-semibold text-foreground">{selected}</span>
+            {": "}
+            {[
+              pending.add.length > 0 ? `+${pending.add.length}` : null,
+              pending.remove.length > 0 ? `−${pending.remove.length}` : null,
+            ]
+              .filter((p): p is string => p !== null)
+              .join("  ")}
+            <span className="text-muted-foreground/60"> · nothing written yet</span>
+          </span>
+          <button
+            type="button"
+            onClick={resetPending}
+            className="shrink-0 text-[11px] font-medium text-muted-foreground hover:text-foreground"
+          >
+            Reset
+          </button>
+          <Button size="xs" variant="default" onClick={applyPending} className="font-semibold">
+            Apply
+          </Button>
+        </div>
+      ) : null}
       {/* The consent step, anchored under the thing it is about rather than
           replacing it. You can still see which toolset you picked and what
           you picked it for while you decide. */}
@@ -2252,6 +2379,8 @@ function ToolsetRail({
   draft,
   onDraft,
   onCreate,
+  selected,
+  onSelect,
   canRename,
   canDelete,
   onRename,
@@ -2272,6 +2401,9 @@ function ToolsetRail({
     d: { name: string; skills: ReadonlyArray<string>; servers: ReadonlyArray<string> } | null,
   ) => void;
   onCreate: () => void;
+  /** The toolset the library pane is showing the membership of. */
+  selected: string | null;
+  onSelect: (name: string) => void;
   canRename: boolean;
   canDelete: boolean;
   onRename: (name: string, to: string) => void;
@@ -2411,12 +2543,37 @@ function ToolsetRail({
           // Sessions are one-at-a-time, so every other ready row loses Use
           // while one is open. Say why rather than silently dropping the verb.
           const sessionElsewhere = session != null && !held ? session : null;
+          const isSelected = selected === row.name && draft === null;
           return (
+            // The row is the destination: selecting it is what makes a tick in
+            // the library mean "in THIS toolset", so no row-level verb has to
+            // carry the name.
             <div
               key={row.name}
+              role="button"
+              tabIndex={0}
+              aria-pressed={isSelected}
+              // The row carries its own verbs (Stop/Use/Rename/Delete) and a
+              // rename input; a click that landed on one of those was aimed at
+              // it, not at selecting the row.
+              onClick={(e) => {
+                if ((e.target as HTMLElement).closest("button,input")) return;
+                onSelect(row.name);
+              }}
+              onKeyDown={(e) => {
+                if (e.target !== e.currentTarget) return;
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  onSelect(row.name);
+                }
+              }}
               className={cn(
-                "mb-1.5 flex flex-col gap-1.5 rounded-lg border px-2.5 py-2",
-                inUse ? "border-success/30 bg-success/[0.06]" : "border-border/50",
+                "mb-1.5 flex cursor-pointer flex-col gap-1.5 rounded-lg border px-2.5 py-2",
+                isSelected
+                  ? "border-foreground/30 bg-foreground/[0.05]"
+                  : inUse
+                    ? "border-success/30 bg-success/[0.06]"
+                    : "border-border/50",
               )}
             >
               <div className="flex items-center gap-2">
@@ -2584,6 +2741,10 @@ function LibraryPane({
   draft,
   onToggleDraft,
   canRemove,
+  target,
+  canTick,
+  isTicked,
+  onToggleMember,
   untrusted,
   busy,
   onAdd,
@@ -2598,6 +2759,12 @@ function LibraryPane({
   draft: { name: string; skills: ReadonlyArray<string>; servers: ReadonlyArray<string> } | null;
   onToggleDraft: (group: "skill" | "server", name: string) => void;
   canRemove: boolean;
+  /** The toolset the ticks describe — the pane is titled after it. */
+  target: string | null;
+  /** The CLI advertises the batch contract (or a draft is being composed). */
+  canTick: boolean;
+  isTicked: (name: string) => boolean;
+  onToggleMember: (group: "skill" | "server", name: string) => void;
   /**
    * The project has not been reviewed. Adding still writes the manifest, but
    * the render that would follow is refused target by target — so the verb is
@@ -2617,9 +2784,14 @@ function LibraryPane({
             nothing on its own while a draft is open — add to WHAT? — so the
             target is named once, here, instead of encoded in a second verb on
             every row. */}
-        {draft !== null ? (
-          <span className="flex shrink-0 items-center gap-1.5 rounded-md bg-success/[0.12] px-2 py-0.5 text-[10.5px] font-semibold text-success-foreground">
-            Adding to {draft.name.trim().length > 0 ? draft.name.trim() : "new toolset"}
+        {/* Titled after what the ticks describe. "WHAT'S IN BACKEND" is why a
+            tick needs no verb: the pane names the destination once, so the row
+            only has to say whether this capability is in it — and that reads
+            the same in both directions, which "Add" never could. */}
+        {target !== null && canTick ? (
+          <span className="flex shrink-0 items-center gap-1.5 rounded-md bg-foreground/[0.06] px-2 py-0.5 text-[10.5px] font-semibold tracking-wide text-foreground">
+            WHAT&apos;S IN{" "}
+            {(target.trim().length > 0 ? target.trim() : "NEW TOOLSET").toUpperCase()}
           </span>
         ) : (
           <span className="shrink-0 text-[10.5px] font-semibold tracking-wide text-muted-foreground">
@@ -2676,6 +2848,9 @@ function LibraryPane({
               )}
               profiles={profiles}
               selected={draft?.skills ?? null}
+              canTick={canTick}
+              isTicked={isTicked}
+              onToggleMember={onToggleMember}
               onToggleDraft={onToggleDraft}
               canRemove={canRemove}
               busy={busy}
@@ -2699,6 +2874,9 @@ function LibraryPane({
               )}
               profiles={profiles}
               selected={draft?.servers ?? null}
+              canTick={canTick}
+              isTicked={isTicked}
+              onToggleMember={onToggleMember}
               onToggleDraft={onToggleDraft}
               canRemove={canRemove}
               busy={busy}
@@ -3163,6 +3341,14 @@ function describeEdit(edit: AgentstackProfileEdit): string {
         parts.push(`${edit.servers.length} server${edit.servers.length === 1 ? "" : "s"}`);
       return `New toolset "${edit.name}"${parts.length > 0 ? ` with ${parts.join(" and ")}` : ""}`;
     }
+    case "edit-profile": {
+      const adds = edit.addSkills.length + edit.addServers.length;
+      const removes = edit.removeSkills.length + edit.removeServers.length;
+      const parts: string[] = [];
+      if (adds > 0) parts.push(`add ${adds}`);
+      if (removes > 0) parts.push(`remove ${removes}`);
+      return `Update toolset "${edit.profile}" — ${parts.join(", ")}`;
+    }
     case "rename-profile":
       return `Rename toolset "${edit.name}" to "${edit.to}"`;
     case "delete-profile":
@@ -3228,6 +3414,9 @@ function LibraryGroup({
   items,
   profiles,
   selected,
+  canTick,
+  isTicked,
+  onToggleMember,
   onToggleDraft,
   canRemove,
   busy,
@@ -3241,6 +3430,9 @@ function LibraryGroup({
   profiles: ReadonlyArray<string>;
   /** Non-null while a new toolset is being composed: the picked members. */
   selected: ReadonlyArray<string> | null;
+  canTick: boolean;
+  isTicked: (name: string) => boolean;
+  onToggleMember: (group: "skill" | "server", name: string) => void;
   onToggleDraft: (group: "skill" | "server", name: string) => void;
   canRemove: boolean;
   busy: boolean;
@@ -3261,6 +3453,9 @@ function LibraryGroup({
               group={group}
               profiles={profiles}
               picked={selected === null ? null : selected.includes(it.name)}
+              canTick={canTick}
+              ticked={isTicked(it.name)}
+              onToggleMember={onToggleMember}
               onToggleDraft={onToggleDraft}
               canRemove={canRemove}
               busy={busy}
@@ -3293,6 +3488,9 @@ function LibraryRow({
   group,
   profiles,
   picked,
+  canTick,
+  ticked,
+  onToggleMember,
   onToggleDraft,
   canRemove,
   busy,
@@ -3303,6 +3501,10 @@ function LibraryRow({
   group: "skill" | "server";
   profiles: ReadonlyArray<string>;
   picked: boolean | null;
+  /** The batch contract is available, so membership is a tick. */
+  canTick: boolean;
+  ticked: boolean;
+  onToggleMember: (group: "skill" | "server", name: string) => void;
   onToggleDraft: (group: "skill" | "server", name: string) => void;
   canRemove: boolean;
   busy: boolean;
@@ -3351,7 +3553,28 @@ function LibraryRow({
           ) : null}
         </div>
 
-        {composing ? (
+        {canTick ? (
+          // The tick IS the membership. It needs no verb because the pane
+          // above names the destination, and it reads the same in both
+          // directions — which is what gives un-ticking an obvious meaning
+          // that "Add" could never have had an inverse for.
+          <button
+            type="button"
+            role="switch"
+            aria-checked={ticked}
+            aria-label={`${ticked ? "Remove" : "Add"} ${item.name}`}
+            disabled={busy}
+            onClick={() => onToggleMember(group, item.name)}
+            className={cn(
+              "flex size-5 shrink-0 items-center justify-center rounded border text-[11px] font-bold transition-colors disabled:opacity-50",
+              ticked
+                ? "border-success/50 bg-success/20 text-success-foreground"
+                : "border-border/60 text-transparent hover:border-border hover:text-muted-foreground/40",
+            )}
+          >
+            ✓
+          </button>
+        ) : composing ? (
           // While composing, the same row IS the picker for the new toolset —
           // rather than a second copy of the whole library in its own form.
           //
