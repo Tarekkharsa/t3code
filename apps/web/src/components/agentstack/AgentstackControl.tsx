@@ -104,6 +104,11 @@ const FEATURE_PROFILES_EDIT = "profiles-edit-v1";
  *  the CLI moves it to the library trash). Advertised separately from the
  *  toolset edits, so the Remove affordance only appears on a CLI that has it. */
 const FEATURE_LIBRARY_REMOVE = "library-remove-v1";
+/** Renaming and deleting a toolset. Advertised separately from each other and
+ *  from the edits above, because a CLI can have any subset — and an affordance
+ *  the binary cannot honor is worse than no affordance. */
+const FEATURE_TOOLSET_RENAME = "toolset-rename-v1";
+const FEATURE_TOOLSET_DELETE = "toolset-delete-v1";
 /** Structured workflow observation — the enveloped `workflow list`/`runs` reads
  *  the monitor consumes. Absent on legacy binaries (monitor still renders from
  *  whatever the reads return); a CLI that positively advertises other contracts
@@ -583,6 +588,8 @@ export function AgentstackControl({
   // Removal is its own contract: a CLI that can add to toolsets may predate it,
   // and a Remove button it can't honor is worse than no button.
   const canRemoveFromLibrary = hasAgentstackFeature(features, FEATURE_LIBRARY_REMOVE);
+  const canRenameToolset = hasAgentstackFeature(features, FEATURE_TOOLSET_RENAME);
+  const canDeleteToolset = hasAgentstackFeature(features, FEATURE_TOOLSET_DELETE);
   const canReadAdvisories = hasAgentstackFeature(features, FEATURE_DOCTOR_ADVISORIES);
   // The workflow monitor negotiates off its OWN enveloped read, not the doctor
   // status: a newer CLI's workflow reads can be schema-incompatible even when
@@ -826,6 +833,8 @@ export function AgentstackControl({
           sessionsKnownMissing={sessionsKnownMissing}
           canEditProfiles={canEditProfiles}
           canRemoveFromLibrary={canRemoveFromLibrary}
+          canRenameToolset={canRenameToolset}
+          canDeleteToolset={canDeleteToolset}
           actionState={actionState}
           onRequestAction={(a) => setActionState({ phase: "confirm", action: a })}
           onConfirm={onAction}
@@ -1802,6 +1811,8 @@ interface ManageProps {
   sessionsKnownMissing: boolean;
   canEditProfiles: boolean;
   canRemoveFromLibrary: boolean;
+  canRenameToolset: boolean;
+  canDeleteToolset: boolean;
   actionState: ActionState;
   onRequestAction: (a: ActionKind) => void;
   onConfirm: (a: ActionKind) => void;
@@ -2167,6 +2178,10 @@ function ToolsetsTab(props: ManageProps) {
               });
             }
           }}
+          canRename={props.canRenameToolset}
+          canDelete={props.canDeleteToolset}
+          onRename={(name, to) => void beginEdit({ kind: "rename-profile", name, to })}
+          onDelete={(name) => void beginEdit({ kind: "delete-profile", name })}
           onStart={(name) => void runSession(name, () => props.onSessionStart(name))}
           onEnd={() => void runSession("__end__", props.onSessionEnd)}
         />
@@ -2237,6 +2252,10 @@ function ToolsetRail({
   draft,
   onDraft,
   onCreate,
+  canRename,
+  canDelete,
+  onRename,
+  onDelete,
   onStart,
   onEnd,
 }: {
@@ -2253,10 +2272,18 @@ function ToolsetRail({
     d: { name: string; skills: ReadonlyArray<string>; servers: ReadonlyArray<string> } | null,
   ) => void;
   onCreate: () => void;
+  canRename: boolean;
+  canDelete: boolean;
+  onRename: (name: string, to: string) => void;
+  onDelete: (name: string) => void;
   onStart: (name: string) => void;
   onEnd: () => void;
 }) {
   const members = useMemo(() => new Map(profiles.map((p) => [p.name, p] as const)), [profiles]);
+  // Which row is being renamed, and the text so far. Renaming in place keeps
+  // the toolset you are renaming visible next to its neighbours — the names it
+  // must not collide with are the point of the decision.
+  const [renaming, setRenaming] = useState<{ name: string; to: string } | null>(null);
   const nameOk = draft !== null && PROFILE_NAME_INPUT_RE.test(draft.name);
   const picked = draft === null ? 0 : draft.skills.length + draft.servers.length;
 
@@ -2399,9 +2426,27 @@ function ToolsetRail({
                     inUse ? "bg-success" : row.ready ? "bg-success/60" : "bg-warning",
                   )}
                 />
-                <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-foreground">
-                  {row.name}
-                </span>
+                {renaming?.name === row.name ? (
+                  <input
+                    value={renaming.to}
+                    onChange={(e) => setRenaming({ name: row.name, to: e.target.value })}
+                    onKeyDown={(e) => {
+                      if (e.key === "Escape") setRenaming(null);
+                      if (e.key === "Enter" && TOOLSET_RENAME_INPUT_RE.test(renaming.to)) {
+                        onRename(row.name, renaming.to);
+                        setRenaming(null);
+                      }
+                    }}
+                    aria-label={`New name for ${row.name}`}
+                    spellCheck={false}
+                    autoFocus
+                    className="h-6 min-w-0 flex-1 rounded-md border border-border/60 bg-background px-1.5 text-[12.5px] font-semibold text-foreground outline-none focus:border-border"
+                  />
+                ) : (
+                  <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-foreground">
+                    {row.name}
+                  </span>
+                )}
                 {held && canSessions ? (
                   <Button
                     size="xs"
@@ -2446,6 +2491,61 @@ function ToolsetRail({
                 <p className="text-[10.5px] leading-relaxed text-muted-foreground/70">
                   {[...profile.servers, ...profile.skills].join(" · ")}
                 </p>
+              ) : null}
+              {renaming?.name === row.name ? (
+                <div className="flex items-center gap-2">
+                  <Button
+                    size="xs"
+                    variant="default"
+                    disabled={
+                      !TOOLSET_RENAME_INPUT_RE.test(renaming.to) || renaming.to === row.name
+                    }
+                    onClick={() => {
+                      onRename(row.name, renaming.to);
+                      setRenaming(null);
+                    }}
+                    className="font-semibold"
+                  >
+                    Rename
+                  </Button>
+                  <button
+                    type="button"
+                    onClick={() => setRenaming(null)}
+                    className="text-[11px] font-medium text-muted-foreground hover:text-foreground"
+                  >
+                    Cancel
+                  </button>
+                  {renaming.to.length > 0 && !TOOLSET_RENAME_INPUT_RE.test(renaming.to) ? (
+                    <span className="text-[10.5px] text-warning-foreground">
+                      Lowercase letters, digits, dash or underscore.
+                    </span>
+                  ) : null}
+                </div>
+              ) : /* Hidden while composing a new toolset: the rail is the picker
+                    then, and a row-level verb there acts on a different thing
+                    than the one the header says you are editing. */
+              draft === null && (canRename || canDelete) ? (
+                <div className="flex items-center gap-3">
+                  {canRename ? (
+                    <button
+                      type="button"
+                      onClick={() => setRenaming({ name: row.name, to: row.name })}
+                      className="text-[10.5px] font-medium text-muted-foreground hover:text-foreground"
+                    >
+                      Rename
+                    </button>
+                  ) : null}
+                  {canDelete ? (
+                    <button
+                      type="button"
+                      onClick={() => onDelete(row.name)}
+                      title="Removes the toolset — the servers and skills in it stay declared"
+                      className="text-[10.5px] font-medium text-destructive-foreground/70 hover:text-destructive-foreground"
+                    >
+                      Delete
+                    </button>
+                  ) : null}
+                </div>
               ) : null}
             </div>
           );
@@ -3063,6 +3163,12 @@ function describeEdit(edit: AgentstackProfileEdit): string {
         parts.push(`${edit.servers.length} server${edit.servers.length === 1 ? "" : "s"}`);
       return `New toolset "${edit.name}"${parts.length > 0 ? ` with ${parts.join(" and ")}` : ""}`;
     }
+    case "rename-profile":
+      return `Rename toolset "${edit.name}" to "${edit.to}"`;
+    case "delete-profile":
+      // "toolset" not "everything in it" — naming the thing being deleted
+      // matters most where the two are easy to confuse.
+      return `Delete toolset "${edit.name}"`;
     case "remove-from-library":
       // "from your library" — not "from this project". The scope is the whole
       // point of this confirmation.
@@ -3097,6 +3203,15 @@ function matchSecretBlock(message: string): { ref: string | null } | null {
 /** Toolset-name input shape, mirrored from the server's PROFILE-name guard so
  *  the create button disables before a doomed round-trip. */
 const PROFILE_NAME_INPUT_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+/**
+ * A RENAME target is held to a stricter rule than the one above, mirroring the
+ * CLI's `validate_profile_name`: the new name becomes a bare TOML table key, so
+ * a dot would nest one toolset's entry inside another's. Enforced here only so
+ * the button disables before a round-trip the CLI would refuse — the CLI is
+ * still the one that decides.
+ */
+const TOOLSET_RENAME_INPUT_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
 interface LibraryItem {
   name: string;
@@ -3428,6 +3543,18 @@ function EditFlowCard({
         <p className="text-[11px] leading-relaxed text-muted-foreground">
           Creating writes the toolset and pins what&apos;s in it. Nothing is rendered — your CLIs
           stay as they are until you use it. Nothing is written until you confirm.
+        </p>
+      ) : flow.edit.kind === "rename-profile" ? (
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          Its servers and skills come with it. Nothing is rendered, so your CLIs stay as they are.
+          Nothing is written until you confirm.
+        </p>
+      ) : flow.edit.kind === "delete-profile" ? (
+        // The fear this copy exists to answer: "am I deleting my tools?" No —
+        // a toolset is a selection over them.
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          Only the grouping goes. The servers and skills in it stay declared in this project and
+          stay in your library. Nothing is rendered, and nothing is written until you confirm.
         </p>
       ) : (
         <p className="text-[11px] leading-relaxed text-muted-foreground">

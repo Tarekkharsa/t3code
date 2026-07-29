@@ -693,6 +693,30 @@ describe("AgentstackCli", () => {
       "--allow-unresolved",
     ]);
 
+    // rename/delete render nothing, so `--allow-unresolved` is never emitted
+    // even when asked: an extra flag would move the CLI's digest for no reason.
+    expect(
+      AgentstackCli.profileEditArgv(
+        "/proj",
+        { kind: "rename-profile", name: "backend", to: "api" },
+        { digest, allowUnresolved: true },
+      ),
+    ).toEqual([
+      "--manifest-dir",
+      "/proj",
+      "rename-profile",
+      "--name",
+      "backend",
+      "--to",
+      "api",
+      "--yes",
+      "--consented",
+      digest,
+    ]);
+    expect(
+      AgentstackCli.profileEditArgv("/proj", { kind: "delete-profile", name: "backend" }),
+    ).toEqual(["--manifest-dir", "/proj", "delete-profile", "--name", "backend", "--preview"]);
+
     // remove-from-library: machine-wide, so no --profile and no scope. `--kind`
     // is a closed enum on both sides, and `--allow-unresolved` is never emitted
     // even when asked — nothing renders, so the flag would be meaningless and
@@ -759,6 +783,29 @@ describe("AgentstackCli", () => {
         path: "./skills/pdf",
       }),
     ).not.toBeNull();
+    // A rename TARGET becomes a bare TOML table key, so it is held to the CLI's
+    // stricter rule: a dot would nest one toolset's entry inside another's, and
+    // uppercase is not a bare key the CLI accepts.
+    expect(
+      AgentstackCli.validateProfileEdit({ kind: "rename-profile", name: "backend", to: "api" }),
+    ).toBeNull();
+    expect(
+      AgentstackCli.validateProfileEdit({ kind: "rename-profile", name: "backend", to: "a.b" }),
+    ).not.toBeNull();
+    expect(
+      AgentstackCli.validateProfileEdit({ kind: "rename-profile", name: "backend", to: "API" }),
+    ).not.toBeNull();
+    // A no-op rename is refused rather than sent for the CLI to reject.
+    expect(
+      AgentstackCli.validateProfileEdit({ kind: "rename-profile", name: "backend", to: "backend" }),
+    ).not.toBeNull();
+    expect(
+      AgentstackCli.validateProfileEdit({ kind: "delete-profile", name: "backend" }),
+    ).toBeNull();
+    expect(
+      AgentstackCli.validateProfileEdit({ kind: "delete-profile", name: "../etc" }),
+    ).not.toBeNull();
+
     // create-profile needs at least one member; `*` is the legal skill wildcard.
     expect(
       AgentstackCli.validateProfileEdit({

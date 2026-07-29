@@ -815,10 +815,46 @@ export const AgentstackRemoveFromLibraryEdit = Schema.Struct({
 });
 export type AgentstackRemoveFromLibraryEdit = typeof AgentstackRemoveFromLibraryEdit.Type;
 
+/**
+ * Rename a toolset, keeping its members. Renames the manifest entry and nothing
+ * else — nothing is rendered, so no `${REF}` is resolved.
+ *
+ * The CLI refuses rather than cascading: a toolset name is also a workflow's
+ * role name, and a role is that workflow's reviewed authority request (pinned
+ * in the lockfile, hashed into its grant digest), so renaming one out from
+ * under a workflow would rewrite a consented surface and strand any parked run.
+ * A live session refuses too — the gateway resolves that fence by name on every
+ * call, so renaming underneath it removes the fence rather than moving it.
+ * Gate on `toolset-rename-v1`.
+ */
+export const AgentstackRenameProfileEdit = Schema.Struct({
+  kind: Schema.Literal("rename-profile"),
+  name: Schema.String,
+  to: Schema.String,
+});
+export type AgentstackRenameProfileEdit = typeof AgentstackRenameProfileEdit.Type;
+
+/**
+ * Delete a toolset. Its servers and skills stay declared in the manifest and
+ * stay in the library — a toolset is a selection over them, not their owner.
+ *
+ * Refuses on the same cases as a rename, plus the last toolset: with none
+ * declared, the render and the proxied server surface both fall back to every
+ * server in the manifest, so that delete widens rather than tidies. Gate on
+ * `toolset-delete-v1`.
+ */
+export const AgentstackDeleteProfileEdit = Schema.Struct({
+  kind: Schema.Literal("delete-profile"),
+  name: Schema.String,
+});
+export type AgentstackDeleteProfileEdit = typeof AgentstackDeleteProfileEdit.Type;
+
 export const AgentstackProfileEdit = Schema.Union([
   AgentstackAddSkillEdit,
   AgentstackAddServerEdit,
   AgentstackCreateProfileEdit,
+  AgentstackRenameProfileEdit,
+  AgentstackDeleteProfileEdit,
   AgentstackRemoveFromLibraryEdit,
 ]);
 export type AgentstackProfileEdit = typeof AgentstackProfileEdit.Type;

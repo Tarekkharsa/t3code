@@ -193,6 +193,20 @@ function isPlainName(value: string): boolean {
   return PROFILE_EDIT_NAME_RE.test(value);
 }
 
+/**
+ * A name that may become a bare TOML table key — the CLI's own rule for a
+ * rename target (`validate_profile_name`), mirrored here so the panel can say
+ * so before spawning rather than surfacing the CLI's refusal.
+ *
+ * Stricter than [`isPlainName`] on purpose: no dot, since `[profiles.a.b]`
+ * would silently nest one toolset's table inside another's, and no uppercase,
+ * matching the CLI.
+ */
+const PROFILE_BARE_KEY_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+function isBareKey(value: string): boolean {
+  return PROFILE_BARE_KEY_RE.test(value);
+}
+
 function boundedField(value: string | undefined): boolean {
   return value === undefined || value.length <= PROFILE_EDIT_MAX_FIELD_LEN;
 }
@@ -263,6 +277,21 @@ export function validateProfileEdit(edit: AgentstackProfileEdit): string | null 
         return "a skill name looks malformed";
       }
       if (!edit.servers.every((s) => isPlainName(s))) return "a server name looks malformed";
+      return null;
+    }
+    case "rename-profile": {
+      if (!isPlainName(edit.name)) return "toolset name looks malformed";
+      // The new name becomes a TOML table key in the manifest, so it is held to
+      // the CLI's own bare-key rule rather than the looser plain-name shape: a
+      // dot would nest one toolset's table inside another's.
+      if (!isBareKey(edit.to)) {
+        return "use lowercase letters, digits, '_' or '-'; start with a letter or digit";
+      }
+      if (edit.name === edit.to) return "that is already its name";
+      return null;
+    }
+    case "delete-profile": {
+      if (!isPlainName(edit.name)) return "toolset name looks malformed";
       return null;
     }
     case "remove-from-library": {
@@ -497,6 +526,16 @@ export function profileEditArgv(
       for (const s of edit.skills) argv.push("--skill", s);
       for (const s of edit.servers) argv.push("--server", s);
       return [...argv, ...consentFlags];
+    }
+    case "rename-profile": {
+      // Nothing renders, so `--allow-unresolved` would be inert; the consent
+      // flags are the same two-step every other edit uses.
+      const argv = [...base, "rename-profile", "--name", edit.name, "--to", edit.to];
+      return [...argv, ...(consent ? ["--yes", "--consented", consent.digest] : ["--preview"])];
+    }
+    case "delete-profile": {
+      const argv = [...base, "delete-profile", "--name", edit.name];
+      return [...argv, ...(consent ? ["--yes", "--consented", consent.digest] : ["--preview"])];
     }
     case "remove-from-library": {
       // Machine-wide: no toolset, no scope, and nothing renders — so
