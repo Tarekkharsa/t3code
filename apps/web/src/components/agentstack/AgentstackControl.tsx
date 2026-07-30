@@ -19,6 +19,7 @@ import type {
   AgentstackToolset,
   AgentstackToolsetsResult,
   AgentstackTrustPreviewResult,
+  AgentstackTrustServerBlocker,
   AgentstackWorkflowData,
   AgentstackWorkflowRun,
   AgentstackWorkflowRunSummary,
@@ -32,7 +33,9 @@ import { Fragment, useCallback, useEffect, useMemo, useState, type ReactNode } f
 import { useAgentstackPanelStore, type AgentstackPanelTab } from "~/agentstackPanelStore";
 import { useRightPanelStore } from "~/rightPanelStore";
 import { agentstackEnvironment } from "~/state/agentstack";
+import { projectEnvironment } from "~/state/projects";
 import { useAtomCommand } from "~/state/use-atom-command";
+import { useProjectFileQuery } from "~/components/files/projectFilesQueryState";
 import { cn } from "~/lib/utils";
 import { isElectron } from "../../env";
 import { useDesktopUpdateState } from "../../state/desktopUpdate";
@@ -111,6 +114,9 @@ const FEATURE_PROFILES_EDIT = "profiles-edit-v1";
  *  the CLI moves it to the library trash). Advertised separately from the
  *  toolset edits, so the Remove affordance only appears on a CLI that has it. */
 const FEATURE_LIBRARY_REMOVE = "library-remove-v1";
+/** Removing an inline server/skill from this project's manifest, then
+ *  re-locking and re-rendering the unambiguous selection. */
+const FEATURE_MANIFEST_REMOVE = "manifest-remove-v1";
 /** Renaming and deleting a toolset. Advertised separately from each other and
  *  from the edits above, because a CLI can have any subset — and an affordance
  *  the binary cannot honor is worse than no affordance. */
@@ -326,6 +332,10 @@ export function AgentstackControl({
   const [reviewing, setReviewing] = useState(false);
   const [reviewingDrift, setReviewingDrift] = useState(false);
   const [settingUp, setSettingUp] = useState(false);
+  const [editingManifest, setEditingManifest] = useState<{
+    cwd: string;
+    relativePath: string;
+  } | null>(null);
 
   /** Open a reading screen: the popover yields so only one surface is up. */
   const openReader = useCallback((show: (v: true) => void) => {
@@ -642,6 +652,7 @@ export function AgentstackControl({
   // Removal is its own contract: a CLI that can add to toolsets may predate it,
   // and a Remove button it can't honor is worse than no button.
   const canRemoveFromLibrary = hasAgentstackFeature(features, FEATURE_LIBRARY_REMOVE);
+  const canRemoveCapabilities = hasAgentstackFeature(features, FEATURE_MANIFEST_REMOVE);
   const canBatchEdit = hasAgentstackFeature(features, FEATURE_PROFILES_BATCH);
   const canRenameToolset = hasAgentstackFeature(features, FEATURE_TOOLSET_RENAME);
   const canDeleteToolset = hasAgentstackFeature(features, FEATURE_TOOLSET_DELETE);
@@ -713,18 +724,24 @@ export function AgentstackControl({
   // several checkup findings have no remedy except editing the manifest — so
   // the honest affordance is to hand you the source of truth rather than a
   // command to go type somewhere else. Null (and the button hidden) whenever
-  // we cannot name the file exactly: no thread to host the viewer, an older
-  // CLI that doesn't report the path, or a manifest outside this workspace.
+  // we cannot name the file exactly: an older CLI that doesn't report the path,
+  // or a manifest outside this workspace. An existing task uses the normal
+  // right-panel editor; a new-task draft has no server-side thread yet, so it
+  // gets the same project file through the focused editor dialog below.
   const manifestSource = toolsets?.toolsets ?? null;
   const onOpenManifest = useMemo(() => {
     const absolute = manifestSource?.manifest_path ?? null;
     const base = manifestSource?.path ?? null;
-    if (threadId === undefined || absolute === null || base === null) return null;
+    if (absolute === null || base === null) return null;
     const relative = relativeToBase(base, absolute);
     if (relative === null) return null;
     return () => {
       setManageTab(null);
-      useRightPanelStore.getState().openFile({ environmentId, threadId }, relative);
+      if (threadId !== undefined) {
+        useRightPanelStore.getState().openFile({ environmentId, threadId }, relative);
+      } else {
+        setEditingManifest({ cwd: base, relativePath: relative });
+      }
     };
   }, [manifestSource, threadId, environmentId]);
 
@@ -961,6 +978,17 @@ export function AgentstackControl({
             onTrust={onTrust}
             onClose={() => setReviewing(false)}
             trustConsentMissing={trustConsentMissing}
+            canRemoveCapabilities={canRemoveCapabilities}
+            previewProfileEdit={previewProfileEdit}
+            applyProfileEdit={applyProfileEdit}
+            onEditManifest={
+              onOpenManifest
+                ? () => {
+                    setReviewing(false);
+                    onOpenManifest();
+                  }
+                : null
+            }
           />
         </PanelDialog>
       ) : null}
@@ -991,12 +1019,119 @@ export function AgentstackControl({
           />
         </PanelDialog>
       ) : null}
+      {editingManifest ? (
+        <PanelDialog
+          title="Edit AgentStack manifest"
+          description="Review the project's source of truth before deciding whether to trust it."
+          onClose={() => setEditingManifest(null)}
+          width="max-w-3xl"
+          bodyScroll={false}
+        >
+          <ManifestEditorPanel
+            environmentId={environmentId}
+            cwd={editingManifest.cwd}
+            relativePath={editingManifest.relativePath}
+            onClose={() => setEditingManifest(null)}
+            onSaved={() => {
+              setEditingManifest(null);
+              void refresh();
+            }}
+          />
+        </PanelDialog>
+      ) : null}
       <WorkflowMonitorDialog
         target={monitorTarget}
         run={monitorRun}
         onClose={() => setMonitorTarget(null)}
       />
     </>
+  );
+}
+
+/**
+ * A project-scoped fallback editor for new-task drafts.
+ *
+ * The regular right-panel editor is keyed by a server-side thread. Drafts do
+ * not have one yet, but the workspace file RPC is already project-scoped and
+ * safe to use directly. Saving changes only the manifest bytes; AgentStack
+ * still performs lock/trust validation afterwards.
+ */
+function ManifestEditorPanel({
+  environmentId,
+  cwd,
+  relativePath,
+  onClose,
+  onSaved,
+}: {
+  environmentId: EnvironmentId;
+  cwd: string;
+  relativePath: string;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const file = useProjectFileQuery(environmentId, cwd, relativePath);
+  const writeFile = useAtomCommand(projectEnvironment.writeFile, { reportFailure: false });
+  const [contents, setContents] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (contents === null && file.data !== null) setContents(file.data.contents);
+  }, [contents, file.data]);
+
+  const save = useCallback(async () => {
+    if (contents === null) return;
+    setSaving(true);
+    setError(null);
+    const result = await writeFile({
+      environmentId,
+      input: { cwd, relativePath, contents },
+    });
+    setSaving(false);
+    if (result._tag === "Success") {
+      toastManager.add({
+        type: "success",
+        title: "Manifest saved",
+        description: "Reopen the project review after locking the declarations you kept.",
+      });
+      onSaved();
+      return;
+    }
+    setError("T3 Code couldn't save the manifest. Nothing was changed.");
+  }, [contents, cwd, environmentId, onSaved, relativePath, writeFile]);
+
+  if (contents === null) {
+    return (
+      <div className="flex min-h-48 items-center justify-center px-4 py-6 text-xs text-muted-foreground">
+        {file.error ?? (file.isPending ? "Loading manifest…" : "The manifest could not be read.")}
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-3 px-4 py-4">
+      <code className="shrink-0 font-mono text-[11px] text-muted-foreground">{relativePath}</code>
+      <textarea
+        aria-label="AgentStack manifest"
+        value={contents}
+        onChange={(event) => setContents(event.target.value)}
+        spellCheck={false}
+        className="min-h-0 flex-1 resize-none rounded-lg border border-border bg-background p-3 font-mono text-[11px] leading-relaxed text-foreground outline-none focus:border-foreground/30"
+      />
+      <p className="shrink-0 text-[10.5px] leading-relaxed text-muted-foreground">
+        Saving edits the manifest only. AgentStack will still require a valid lock and a fresh trust
+        review before anything declared here can run.
+      </p>
+      {error ? <p className="shrink-0 text-[11px] text-destructive-foreground">{error}</p> : null}
+      <div className="flex shrink-0 justify-end gap-2">
+        <Button size="sm" variant="outline" onClick={onClose} disabled={saving}>
+          Cancel
+        </Button>
+        <Button size="sm" onClick={() => void save()} disabled={saving}>
+          {saving ? "Saving…" : "Save manifest"}
+        </Button>
+      </div>
+    </div>
   );
 }
 
@@ -1281,6 +1416,10 @@ function TrustReviewPanel({
   onTrust,
   onClose,
   trustConsentMissing,
+  canRemoveCapabilities,
+  previewProfileEdit,
+  applyProfileEdit,
+  onEditManifest,
 }: {
   loadPreview: () => Promise<AgentstackTrustPreviewResult | null>;
   onTrust: (
@@ -1290,15 +1429,31 @@ function TrustReviewPanel({
   onClose: () => void;
   /** True when the CLI advertises its features but not consent-bound trust. */
   trustConsentMissing: boolean;
+  /** The CLI advertises digest-bound project manifest removal. */
+  canRemoveCapabilities: boolean;
+  previewProfileEdit: (
+    edit: AgentstackProfileEdit,
+  ) => Promise<AgentstackProfileEditPreviewResult | null>;
+  applyProfileEdit: (
+    edit: AgentstackProfileEdit,
+    consentedDigest: string,
+  ) => Promise<{ ok: boolean; message: string }>;
+  /** Opens the exact manifest file in t3code's editor. */
+  onEditManifest: (() => void) | null;
 }) {
   const [load, setLoad] = useState<TrustLoad>({ phase: "loading" });
   const [act, setAct] = useState<TrustAct>({ phase: "idle" });
+  const [removeFlow, setRemoveFlow] = useState<EditFlow>({ phase: "idle" });
+
+  const reloadPreview = useCallback(async () => {
+    const result = await loadPreview();
+    setLoad(result ? { phase: "loaded", result } : { phase: "error" });
+  }, [loadPreview]);
 
   useEffect(() => {
     let alive = true;
     void loadPreview().then((result) => {
-      if (!alive) return;
-      setLoad(result ? { phase: "loaded", result } : { phase: "error" });
+      if (alive) setLoad(result ? { phase: "loaded", result } : { phase: "error" });
     });
     return () => {
       alive = false;
@@ -1313,9 +1468,45 @@ function TrustReviewPanel({
   // the server refuses digest-less grants, so offering the click would only
   // manufacture a failure.
   const consentDigest = preview?.surface_digest ?? null;
+  const serverBlockers = preview?.server_blockers ?? [];
   // Granting needs the digest (existing gate) AND, when the CLI advertises its
   // features, the consent-bound-trust contract to be among them.
-  const canGrant = consentDigest !== null && !trustConsentMissing;
+  const canGrant = consentDigest !== null && !trustConsentMissing && serverBlockers.length === 0;
+
+  const beginRemoval = useCallback(
+    async (name: string) => {
+      const edit: AgentstackProfileEdit = { kind: "remove-capability", group: "server", name };
+      const title = describeEdit(edit);
+      setRemoveFlow({ phase: "previewing", edit, title });
+      const outcome = classifyAgentstackEditPreview(await previewProfileEdit(edit));
+      setRemoveFlow(
+        outcome.kind === "confirm"
+          ? {
+              phase: "confirm",
+              edit,
+              title,
+              digest: outcome.digest,
+              note: outcome.preview.note ?? null,
+              removal: outcome.preview.removal ?? null,
+            }
+          : outcome.kind === "refused"
+            ? { phase: "refused", title, message: outcome.message }
+            : outcome.kind === "unavailable"
+              ? { phase: "unavailable", title }
+              : { phase: "unsupported", title },
+      );
+    },
+    [previewProfileEdit],
+  );
+
+  const confirmRemoval = useCallback(async () => {
+    if (removeFlow.phase !== "confirm") return;
+    const { edit, title, digest } = removeFlow;
+    setRemoveFlow({ phase: "running", edit, title });
+    const result = await applyProfileEdit(edit, digest);
+    setRemoveFlow({ phase: "done", edit, title, ok: result.ok, message: result.message });
+    if (result.ok) await reloadPreview();
+  }, [removeFlow, applyProfileEdit, reloadPreview]);
 
   const run = async (action: "trust-grant" | "trust-revoke") => {
     setAct({ phase: "running" });
@@ -1341,6 +1532,18 @@ function TrustReviewPanel({
     instructions: preview?.instructions?.length ?? preview?.counts.instructions ?? 0,
     secrets: preview?.secrets.length ?? 0,
   });
+
+  if (removeFlow.phase !== "idle") {
+    return (
+      <EditFlowCard
+        flow={removeFlow}
+        createNeedsActivation={false}
+        onActivate={null}
+        onConfirm={() => void confirmRemoval()}
+        onBack={() => setRemoveFlow({ phase: "idle" })}
+      />
+    );
+  }
 
   return (
     // A column, not a block: the evidence scrolls and the verdict bar does not.
@@ -1387,11 +1590,25 @@ function TrustReviewPanel({
                 </p>
                 <ul className="flex flex-col gap-1">
                   {group.servers.map((srv) => (
-                    <li key={srv.name} className="text-[11px] leading-relaxed">
-                      <span className="font-semibold text-foreground">{srv.name}</span>{" "}
-                      <code className="break-all font-mono text-muted-foreground/90">
-                        {srv.target}
-                      </code>
+                    <li
+                      key={srv.name}
+                      className="flex items-start gap-2 text-[11px] leading-relaxed"
+                    >
+                      <span className="min-w-0 flex-1">
+                        <span className="font-semibold text-foreground">{srv.name}</span>{" "}
+                        <code className="break-all font-mono text-muted-foreground/90">
+                          {srv.target}
+                        </code>
+                      </span>
+                      {canRemoveCapabilities ? (
+                        <button
+                          type="button"
+                          onClick={() => void beginRemoval(srv.name)}
+                          className="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold text-destructive-foreground/70 hover:bg-destructive/10 hover:text-destructive-foreground"
+                        >
+                          Remove
+                        </button>
+                      ) : null}
                     </li>
                   ))}
                 </ul>
@@ -1501,12 +1718,26 @@ function TrustReviewPanel({
             </p>
           ) : null}
 
+          {serverBlockers.length > 0 ? (
+            <TrustServerBlockerNotice blockers={serverBlockers} />
+          ) : null}
+
+          {onEditManifest ? (
+            <button
+              type="button"
+              onClick={onEditManifest}
+              className="self-start text-[11px] font-semibold text-foreground hover:underline"
+            >
+              Edit manifest
+            </button>
+          ) : null}
+
           <p className="text-[10.5px] leading-relaxed text-muted-foreground/60">
             Full line-by-line review:{" "}
             <code className="font-mono">agentstack trust {preview.path}</code> in a terminal.
           </p>
 
-          {!canGrant && state !== "trusted" ? (
+          {(consentDigest === null || trustConsentMissing) && state !== "trusted" ? (
             <p className="text-[11px] leading-relaxed text-warning-foreground">
               {consentDigest === null
                 ? "This agentstack CLI predates consent-bound trust (its preview has no surface digest), so granting from here is disabled. Update agentstack, or trust from a terminal where the review itself is the consent."
@@ -1568,7 +1799,11 @@ function TrustReviewPanel({
                 onClick={() => run("trust-grant")}
                 className="inline-flex h-7 items-center rounded-lg border border-success/40 bg-success/10 px-3 text-xs font-semibold text-success-foreground disabled:opacity-60"
               >
-                {running ? "Trusting…" : "Trust this repo"}
+                {running
+                  ? "Trusting…"
+                  : serverBlockers.length > 0
+                    ? "Resolve blockers first"
+                    : "Trust this repo"}
               </button>
             )}
             <button
@@ -1604,6 +1839,34 @@ function TrustNamedList({ title, items }: { title: string; items: ReadonlyArray<
           </li>
         ))}
       </ul>
+    </div>
+  );
+}
+
+/** The known server preflight failures that disable the trust grant. */
+export function TrustServerBlockerNotice({
+  blockers,
+}: {
+  blockers: ReadonlyArray<AgentstackTrustServerBlocker>;
+}) {
+  return (
+    <div className="rounded-lg border border-destructive/30 bg-destructive/[0.06] px-3 py-2.5">
+      <p className="text-[11px] font-semibold text-destructive-foreground">
+        This project cannot be trusted yet
+      </p>
+      <ul className="mt-1 flex flex-col gap-1">
+        {blockers.map((blocker) => (
+          <li key={`${blocker.name}:${blocker.reason}`} className="text-[10.5px] leading-relaxed">
+            <span className="font-semibold text-foreground">{blocker.name}</span>
+            <span className="text-muted-foreground"> — {blocker.reason}</span>
+          </li>
+        ))}
+      </ul>
+      <p className="mt-1.5 text-[10.5px] leading-relaxed text-muted-foreground">
+        {blockers.every((blocker) => blocker.fix === "agentstack lock")
+          ? "Lock the current bytes, review the lockfile change, then reopen this review."
+          : "Edit or remove the blocked server definition, then lock and review again."}
+      </p>
     </div>
   );
 }
@@ -3064,10 +3327,14 @@ function LibraryPane({
             only has to say whether this capability is in it — and that reads
             the same in both directions, which "Add" never could. */}
         {target !== null && canTick ? (
-          <span className="flex shrink-0 items-center gap-1.5 rounded-md bg-foreground/[0.06] px-2 py-0.5 text-[10.5px] font-semibold tracking-wide text-foreground">
-            WHAT&apos;S IN{" "}
-            {(target.trim().length > 0 ? target.trim() : "NEW TOOLSET").toUpperCase()}
-          </span>
+          <div className="flex min-w-0 flex-col">
+            <span className="text-[10.5px] font-semibold tracking-wide text-foreground">
+              {(target.trim().length > 0 ? target.trim() : "New toolset").toUpperCase()}
+            </span>
+            <span className="text-[9.5px] leading-tight text-muted-foreground">
+              Checked items are included in this toolset
+            </span>
+          </div>
         ) : (
           <span className="shrink-0 text-[10.5px] font-semibold tracking-wide text-muted-foreground">
             LIBRARY
@@ -3529,9 +3796,8 @@ type EditFlow =
       title: string;
       digest: string;
       note: string | null;
-      /** remove-from-library only: what leaves the machine-wide library, where
-       *  it goes, and whether this project depends on it. Read straight from
-       *  the CLI preview so the card warns with the CLI's own facts. */
+      /** Removal actions: what leaves, its scope, and whether this project
+       *  depends on it. Read straight from the CLI preview. */
       removal: NonNullable<AgentstackProfileEditPreview["removal"]> | null;
     }
   | { phase: "unsupported"; title: string }
@@ -3642,6 +3908,8 @@ function describeEdit(edit: AgentstackProfileEdit): string {
       // "from your library" — not "from this project". The scope is the whole
       // point of this confirmation.
       return `Remove ${edit.group} "${edit.name}" from your library`;
+    case "remove-capability":
+      return `Remove ${edit.group} "${edit.name}" from this project`;
   }
 }
 
@@ -3857,7 +4125,9 @@ function LibraryRow({
             type="button"
             role="switch"
             aria-checked={ticked}
-            aria-label={`${ticked ? "Remove" : "Add"} ${item.name}`}
+            aria-label={`${ticked ? "Exclude" : "Include"} ${item.name} ${
+              ticked ? "from" : "in"
+            } this toolset`}
             disabled={busy}
             onClick={() => onToggleMember(group, item.name)}
             className={cn(
@@ -4107,7 +4377,9 @@ export function EditFlowCard({
   }
   // confirm | running
   const running = flow.phase === "running";
-  const removing = flow.edit.kind === "remove-from-library";
+  const removingFromLibrary = flow.edit.kind === "remove-from-library";
+  const removingFromProject = flow.edit.kind === "remove-capability";
+  const removing = removingFromLibrary || removingFromProject;
   const removal = flow.phase === "confirm" ? flow.removal : null;
   // Creating stops after the re-lock on a `toolset-create-v2` CLI, so the
   // render/`${REF}` clauses below would be false for it.
@@ -4115,8 +4387,10 @@ export function EditFlowCard({
   return (
     <div className="flex flex-col gap-3 px-4 py-4">
       <p className="text-[12.5px] font-semibold text-foreground">{flow.title}</p>
-      {removing ? (
+      {removingFromLibrary ? (
         <RemovalConfirmBody removal={removal} />
+      ) : removingFromProject ? (
+        <ProjectRemovalConfirmBody removal={removal} />
       ) : creatingOnly ? (
         // Naming a toolset is not switching to it: the CLI writes the manifest
         // entry and pins the members, then stops — no native config file moves
@@ -4373,6 +4647,34 @@ function RemovalConfirmBody({
         <CommandLine
           text={removal?.restore_command ?? "agentstack lib trash --restore <id> --write"}
         />
+      </p>
+    </div>
+  );
+}
+
+/** Project-scoped counterpart to [`RemovalConfirmBody`]. */
+function ProjectRemovalConfirmBody({
+  removal,
+}: {
+  removal: NonNullable<AgentstackProfileEditPreview["removal"]> | null;
+}) {
+  const profiles = removal?.profiles ?? [];
+  return (
+    <div className="flex flex-col gap-2">
+      <p className="text-[11px] leading-relaxed text-muted-foreground">
+        This deletes the definition from this project&apos;s manifest and removes it from every
+        toolset here. Your machine-wide library is untouched.
+      </p>
+      {profiles.length > 0 ? (
+        <p className="rounded-lg border border-warning/30 bg-warning/[0.06] px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
+          It is currently in toolset{profiles.length === 1 ? "" : "s"}{" "}
+          <span className="font-semibold text-foreground">{profiles.join(", ")}</span>; those
+          memberships leave with it.
+        </p>
+      ) : null}
+      <p className="text-[11px] leading-relaxed text-muted-foreground">
+        AgentStack re-locks and re-renders the remaining configuration after the manifest edit.
+        Nothing is written until you confirm.
       </p>
     </div>
   );

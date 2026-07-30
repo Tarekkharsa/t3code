@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vite-plus/test";
 
-import { StartupTest } from "./AgentstackControl";
+import { StartupTest, TrustServerBlockerNotice } from "./AgentstackControl";
 
 const noop = () => {};
 const confirm = async () => {};
@@ -45,5 +45,26 @@ describe("StartupTest", () => {
     });
     expect(markup).toContain("figma");
     expect(markup).toContain("3 tools");
+  });
+});
+
+describe("TrustServerBlockerNotice", () => {
+  it("routes an unfixable executable declaration to manifest editing instead of lock retry", () => {
+    const markup = renderToStaticMarkup(
+      <TrustServerBlockerNotice
+        blockers={[
+          {
+            name: "server 'computer-use' local executables",
+            reason: "resolving cwd '.': integrity path '.' resolves to the project root itself",
+            fix: "edit-manifest",
+          },
+        ]}
+      />,
+    );
+
+    expect(markup).toContain("cannot be trusted yet");
+    expect(markup).toContain("computer-use");
+    expect(markup).toContain("Edit or remove");
+    expect(markup).not.toContain("Lock the current bytes");
   });
 });

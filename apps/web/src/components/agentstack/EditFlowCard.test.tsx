@@ -193,3 +193,35 @@ describe("EditFlowCard — preview refusals", () => {
     expect(markup).toContain("Update agentstack");
   });
 });
+
+describe("EditFlowCard — project capability removal", () => {
+  it("distinguishes deleting a project server from deleting the library copy", () => {
+    const markup = renderToStaticMarkup(
+      <EditFlowCard
+        flow={{
+          phase: "confirm",
+          edit: { kind: "remove-capability", group: "server", name: "computer-use" },
+          title: 'Remove server "computer-use" from this project',
+          digest: "sha256:abc",
+          note: null,
+          removal: {
+            kind: "server",
+            name: "computer-use",
+            scope: "project",
+            defined_inline_here: true,
+            profiles: [],
+          },
+        }}
+        createNeedsActivation={false}
+        onActivate={null}
+        onConfirm={noop}
+        onBack={noop}
+      />,
+    );
+
+    expect(markup).toContain("project&#x27;s manifest");
+    expect(markup).toContain("machine-wide library is untouched");
+    expect(markup).toContain("re-locks and re-renders");
+    expect(markup).not.toContain("library trash");
+  });
+});

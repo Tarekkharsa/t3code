@@ -328,6 +328,10 @@ export function validateProfileEdit(edit: AgentstackProfileEdit): string | null 
       if (!isPlainName(edit.name)) return "capability name looks malformed";
       return null;
     }
+    case "remove-capability": {
+      if (!isPlainName(edit.name)) return "capability name looks malformed";
+      return null;
+    }
   }
 }
 
@@ -590,6 +594,20 @@ export function profileEditArgv(
       // enum on both sides.
       const argv = [...base, "remove-from-library", "--kind", edit.group, "--name", edit.name];
       return [...argv, ...(consent ? ["--yes", "--consented", consent.digest] : ["--preview"])];
+    }
+    case "remove-capability": {
+      const argv = [...base, "remove-capability", "--kind", edit.group, "--name", edit.name];
+      return [
+        ...argv,
+        ...(consent
+          ? [
+              "--yes",
+              "--consented",
+              consent.digest,
+              ...(consent.allowUnresolved ? ["--allow-unresolved"] : []),
+            ]
+          : ["--preview"]),
+      ];
     }
   }
 }

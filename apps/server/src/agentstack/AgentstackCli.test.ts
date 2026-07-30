@@ -745,6 +745,28 @@ describe("AgentstackCli", () => {
       digest,
     ]);
 
+    // remove-capability is project-scoped and re-renders, so the reviewed
+    // apply may carry --allow-unresolved unlike a library removal.
+    expect(
+      AgentstackCli.profileEditArgv(
+        "/proj",
+        { kind: "remove-capability", group: "server", name: "computer-use" },
+        { digest, allowUnresolved: true },
+      ),
+    ).toEqual([
+      "--manifest-dir",
+      "/proj",
+      "remove-capability",
+      "--kind",
+      "server",
+      "--name",
+      "computer-use",
+      "--yes",
+      "--consented",
+      digest,
+      "--allow-unresolved",
+    ]);
+
     // Enroll an existing server: no --type is emitted (both preview and apply
     // omit it identically, so the CLI's digest lines up).
     expect(
@@ -910,6 +932,7 @@ describe("AgentstackCli", () => {
       { kind: "add-server-to-profile", profile: "web", name: "github" },
       { kind: "create-profile", name: "web", skills: ["pdf"], servers: [] },
       { kind: "remove-from-library", group: "skill", name: "pdf" },
+      { kind: "remove-capability", group: "server", name: "computer-use" },
     ];
     for (const edit of edits) {
       expect(AgentstackCli.profileEditArgv("/proj", edit)).toContain("--preview");

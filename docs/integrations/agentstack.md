@@ -33,9 +33,15 @@ Six things, matching the product's own ladder:
 - **Status** — one state (Ready, Needs you, Needs setup) and one recommended
   next action, with the full doctor report as the detail layer.
 - **Toolsets** — browse the library, create a toolset, edit its membership,
-  rename it, delete it, and use one temporarily.
+  rename it, delete it, and use one temporarily. Checked library items are the
+  capabilities included in the toolset currently named above the list.
 - **Review this project** — the trust gate, naming the exact servers, targets,
   secrets, skills, and workflows the repo declares before you approve them.
+  Known server blockers disable approval and name the declaration that needs
+  attention. You can open the manifest in T3 Code before trusting, or remove a
+  project-owned server through a digest-bound preview; removal also clears its
+  toolset memberships, re-locks, and re-renders without touching your
+  machine-wide library.
 - **Drift review** — what changed on disk versus what AgentStack last wrote,
   per target and per scope.
 - **Undo** — revert this project's most recent AgentStack-managed write.

@@ -382,6 +382,17 @@ export const AgentstackTrustServer = Schema.Struct({
 });
 export type AgentstackTrustServer = typeof AgentstackTrustServer.Type;
 
+/** A server-side condition already known to make a trust grant refuse. */
+export const AgentstackTrustServerBlocker = Schema.Struct({
+  /** Server name, or the executable-surface label derived from it. */
+  name: Schema.String,
+  /** The CLI's bounded, actionable reason. */
+  reason: Schema.String,
+  /** `agentstack lock` when pinning can fix it; `edit-manifest` otherwise. */
+  fix: Schema.Literals(["agentstack lock", "edit-manifest"]),
+});
+export type AgentstackTrustServerBlocker = typeof AgentstackTrustServerBlocker.Type;
+
 /** One named workflow in the trust surface, with the agent roles it may spawn. */
 export const AgentstackTrustWorkflow = Schema.Struct({
   name: Schema.String,
@@ -403,6 +414,11 @@ export const AgentstackTrustPreview = Schema.Struct({
   /** true when this repo was trusted before (a re-trust review). */
   re_trust: Schema.Boolean,
   servers: Schema.Array(AgentstackTrustServer),
+  /**
+   * Server-resolution and local-executable failures that the authoritative
+   * grant is already known to refuse. Optional for older CLIs.
+   */
+  server_blockers: Schema.optionalKey(Schema.Array(AgentstackTrustServerBlocker)),
   secrets: Schema.Array(Schema.String),
   counts: Schema.Struct({
     skills: Schema.Number,
@@ -899,6 +915,18 @@ export const AgentstackRemoveFromLibraryEdit = Schema.Struct({
 export type AgentstackRemoveFromLibraryEdit = typeof AgentstackRemoveFromLibraryEdit.Type;
 
 /**
+ * Remove one project-owned server or skill definition from the manifest and
+ * every toolset membership that names it, then re-lock and re-render. The
+ * machine-wide library is untouched. Gate on `manifest-remove-v1`.
+ */
+export const AgentstackRemoveCapabilityEdit = Schema.Struct({
+  kind: Schema.Literal("remove-capability"),
+  group: Schema.Literals(["skill", "server"]),
+  name: Schema.String,
+});
+export type AgentstackRemoveCapabilityEdit = typeof AgentstackRemoveCapabilityEdit.Type;
+
+/**
  * Change one toolset's membership as a single batch: every add and every
  * removal in one manifest write, under one `consent_digest`, followed by one
  * re-lock and one re-render.
@@ -965,6 +993,7 @@ export const AgentstackProfileEdit = Schema.Union([
   AgentstackRenameProfileEdit,
   AgentstackDeleteProfileEdit,
   AgentstackRemoveFromLibraryEdit,
+  AgentstackRemoveCapabilityEdit,
 ]);
 export type AgentstackProfileEdit = typeof AgentstackProfileEdit.Type;
 
@@ -1013,8 +1042,8 @@ export const AgentstackProfileEditPreview = Schema.Struct({
   skills: Schema.optionalKey(Schema.Array(Schema.String)),
   servers: Schema.optionalKey(Schema.Array(Schema.String)),
   /**
-   * remove-from-library: what leaves the machine-wide library, where it goes,
-   * and this project's stake in it. `used_by_this_project` is what turns a
+   * remove-from-library/remove-capability: what leaves, where it goes, and this
+   * project's stake in it. `used_by_this_project` is what turns a
    * routine tidy-up into a warning — the removal itself never edits the project,
    * so a referenced name only breaks at the next lock/activate.
    */
