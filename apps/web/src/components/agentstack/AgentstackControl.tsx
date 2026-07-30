@@ -267,6 +267,19 @@ const PRIME_MAX_ATTEMPTS = 3;
  */
 const primedProjects = new Set<string>();
 
+/**
+ * The last status each project reported, kept across switches and remounts.
+ *
+ * The header control keeps its state while `projectId` changes under it, so
+ * switching projects wore the PREVIOUS project's posture — a "Needs you" chip
+ * over a project that is fine — until the next poll corrected it. Swapping in
+ * this snapshot at render time makes the chip tell the new project's truth
+ * immediately, at no extra cost: no doctor run happens on a switch (see
+ * `primedProjects` for why we never read eagerly), and a project never seen
+ * this session simply renders unlabeled until its first read, as before.
+ */
+const statusByProject = new Map<string, AgentstackStatus>();
+
 type Tab = AgentstackPanelTab;
 
 /**
@@ -498,7 +511,11 @@ export function AgentstackControl({
     primeAttempts.current = 0;
     setOpen(false);
     setManageTab(null);
-    setStatus(null);
+    // The new project's own last-known status, not null: a project already
+    // read this session gets its chip label back immediately, and one never
+    // read renders unlabeled until its first read — no extra doctor run
+    // either way (see `primedProjects`).
+    setStatus(statusByProject.get(projectId) ?? null);
     setActivity(null);
     setWorkflow(null);
     setToolsets(null);
@@ -557,6 +574,10 @@ export function AgentstackControl({
       fetchWorkflow({ environmentId, input }),
       fetchToolsets({ environmentId, input }),
     ]);
+    // The snapshot is keyed by the project this read was FOR, so it is
+    // correct to keep even when the epoch moved on below — it is exactly
+    // what the reset block replays when this project comes back.
+    if (statusResult._tag === "Success") statusByProject.set(projectId, statusResult.value);
     // A project switch happened while these were in flight: the results
     // describe the old project and the state now belongs to the new one.
     if (epoch !== projectEpoch.current) return;
@@ -569,7 +590,7 @@ export function AgentstackControl({
     setActivity(activityResult._tag === "Success" ? activityResult.value : null);
     setWorkflow(workflowResult._tag === "Success" ? workflowResult.value : null);
     setToolsets(toolsetsResult._tag === "Success" ? toolsetsResult.value : null);
-  }, [environmentId, fetchStatus, fetchActivity, fetchWorkflow, fetchToolsets, input]);
+  }, [environmentId, fetchStatus, fetchActivity, fetchWorkflow, fetchToolsets, input, projectId]);
 
   // Only a run in flight justifies the fast cadence. `watchingRun` is derived
   // from what a previous refresh already reported, so a run that starts while
