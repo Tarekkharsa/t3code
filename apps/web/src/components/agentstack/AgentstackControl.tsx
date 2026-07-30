@@ -412,6 +412,17 @@ export function AgentstackControl({
   const [primeTick, setPrimeTick] = useState(0);
   /** The manifest editor holds unsaved bytes; closing must confirm first. */
   const [manifestDirty, setManifestDirty] = useState(false);
+  /**
+   * Bumped after anything that writes. The library index is read once when the
+   * Toolsets tab mounts and never again, so editing the manifest — removing a
+   * server, say — left the list showing capabilities the file no longer
+   * declares, with no hint that it was looking at a stale read. Deliberately
+   * not tied to `refresh`: that runs on the 30s poll, and re-reading the
+   * library index on a timer spends a subprocess to answer a question nothing
+   * asked.
+   */
+  const [writeNonce, setWriteNonce] = useState(0);
+  const noteWrite = useCallback(() => setWriteNonce((n) => n + 1), []);
   const [discardingManifest, setDiscardingManifest] = useState(false);
 
   /** Open a reading screen: the popover yields so only one surface is up. */
@@ -538,6 +549,7 @@ export function AgentstackControl({
     if (primedProjects.has(projectId)) return;
     primedProjects.add(projectId);
     primeAttempts.current += 1;
+    noteWrite();
     void refresh();
     const timer = setTimeout(() => {
       // Bumping the ref alone would not re-run this effect; the status update
@@ -570,6 +582,8 @@ export function AgentstackControl({
       } else {
         setActionState({ phase: "done", ok: false, message: "The action could not be run." });
       }
+      noteWrite();
+      noteWrite();
       void refresh();
     },
     [environmentId, runAction, input, refresh],
@@ -590,6 +604,7 @@ export function AgentstackControl({
           ...(consentedDigest !== undefined ? { consentedDigest } : {}),
         },
       });
+      noteWrite();
       void refresh();
       return r._tag === "Success"
         ? r.value
@@ -629,6 +644,7 @@ export function AgentstackControl({
         environmentId,
         input: { ...input, action: "setup-apply", planDigest, secretsDestination },
       });
+      noteWrite();
       void refresh();
       return r._tag === "Success" ? r.value : { ok: false, message: "The setup could not be run." };
     },
@@ -643,6 +659,7 @@ export function AgentstackControl({
         environmentId,
         input: { ...input, action: "restore-write", restoreId },
       });
+      noteWrite();
       void refresh();
       return r._tag === "Success"
         ? r.value
@@ -660,6 +677,7 @@ export function AgentstackControl({
         environmentId,
         input: { ...input, action: "session-start", profile },
       });
+      noteWrite();
       void refresh();
       return r._tag === "Success"
         ? r.value
@@ -670,6 +688,7 @@ export function AgentstackControl({
 
   const onSessionEnd = useCallback(async () => {
     const r = await runAction({ environmentId, input: { ...input, action: "session-end" } });
+    noteWrite();
     void refresh();
     return r._tag === "Success"
       ? r.value
@@ -698,6 +717,7 @@ export function AgentstackControl({
   const applyProfileEdit = useCallback(
     async (edit: AgentstackProfileEdit, consentedDigest: string) => {
       const r = await applyEdit({ environmentId, input: { ...input, edit, consentedDigest } });
+      noteWrite();
       void refresh();
       return r._tag === "Success"
         ? r.value
@@ -709,6 +729,7 @@ export function AgentstackControl({
   const runDriftAction = useCallback(
     async (action: ActionKind) => {
       const r = await runAction({ environmentId, input: { ...input, action } });
+      noteWrite();
       void refresh();
       return r._tag === "Success"
         ? r.value
@@ -1156,6 +1177,7 @@ export function AgentstackControl({
           onSessionStart={onSessionStart}
           onSessionEnd={onSessionEnd}
           loadLibraryIndex={loadLibraryIndex}
+          writeNonce={writeNonce}
           previewProfileEdit={previewProfileEdit}
           applyProfileEdit={applyProfileEdit}
           onRecheck={refresh}
@@ -1266,6 +1288,7 @@ export function AgentstackControl({
               // is where the edited bytes have to be looked at again.
               setDiscardingManifest(false);
               closeChild(() => setEditingManifest(null));
+              noteWrite();
               void refresh();
             }}
           />
@@ -1338,7 +1361,8 @@ function ManifestEditorPanel({
       toastManager.add({
         type: "success",
         title: "Manifest saved",
-        description: "Reopen the project review after locking the declarations you kept.",
+        description:
+          "Checking what still needs to catch up — the Setup tab shows it, and anything left to do has a button there.",
       });
       onSaved();
       return;
@@ -2551,6 +2575,8 @@ interface ManageProps {
   onSessionStart: (profile: string) => Promise<{ ok: boolean; message: string }>;
   onSessionEnd: () => Promise<{ ok: boolean; message: string }>;
   loadLibraryIndex: () => Promise<AgentstackLibraryIndexResult | null>;
+  /** Bumped after every write; re-reads the library index. See `writeNonce`. */
+  writeNonce: number;
   previewProfileEdit: (
     edit: AgentstackProfileEdit,
   ) => Promise<AgentstackProfileEditPreviewResult | null>;
@@ -3051,9 +3077,13 @@ function ToolsetsTab(
     const r = await loadIndex();
     setLoad(r?.index ? { phase: "loaded", index: r.index } : { phase: "error" });
   }, [loadIndex]);
+  // Re-read on mount AND after any write. Without the nonce this list was a
+  // snapshot from whenever the tab first opened, so removing a server from the
+  // manifest left it on screen with nothing saying it was gone.
+  const writeNonce = props.writeNonce;
   useEffect(() => {
     void reload();
-  }, [reload]);
+  }, [reload, writeNonce]);
 
   const data = props.toolsets?.toolsets ?? null;
   const profiles = data?.profiles ?? [];
