@@ -164,11 +164,54 @@ describe("CheckupFindings — acting on what it found", () => {
       />,
     );
     expect(deduped).not.toContain("Enable guard");
-    // The finding and its command stay — only the duplicate button goes.
-    // CommandLine wraps each token in its own nowrap span (so a flag never
-    // breaks mid-token), hence the command is asserted token-wise.
+    // The finding and its command stay — only the duplicate button goes. The
+    // command renders as one copyable line, so it is asserted whole.
     expect(deduped).toContain("guard hooks do not cover the detected providers");
-    expect(deduped).toContain(">guard</span>");
-    expect(deduped).toContain(">install</span>");
+    expect(deduped).toContain("agentstack guard install");
+  });
+
+  it("sends a trust finding to the review, on any binary", () => {
+    // `agentstack trust` can never be a governed action — consent is bound to
+    // the exact bytes, which only the review screen shows — so this finding used
+    // to print a terminal command and nothing else. The feature that gates
+    // running a scraped fix has no say here: the review runs nothing.
+    const trustFindings = deriveAgentstackFindings({
+      errors: 1,
+      warnings: 0,
+      sections: [
+        {
+          title: "Trust",
+          lines: [
+            {
+              level: "error",
+              msg: "this project is not trusted at its current bytes ↳ agentstack trust",
+            },
+          ],
+        },
+      ],
+    });
+    const markup = renderToStaticMarkup(
+      <CheckupFindings
+        findings={trustFindings}
+        features={undefined}
+        onRequestAction={noop}
+        onReviewTrust={noop}
+        defaultOpen
+      />,
+    );
+    expect(markup).toContain("not trusted at its current bytes");
+    expect(markup).toContain("Review &amp; trust");
+
+    // No review surface to open → the command alone, as before.
+    const noSurface = renderToStaticMarkup(
+      <CheckupFindings
+        findings={trustFindings}
+        features={["status-v1"]}
+        onRequestAction={noop}
+        defaultOpen
+      />,
+    );
+    expect(noSurface).toContain("not trusted at its current bytes");
+    expect(noSurface).not.toContain("Review");
   });
 });

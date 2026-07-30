@@ -130,6 +130,20 @@ export const AgentstackDoctorReport = Schema.Struct({
    * decodes; absent on older CLIs, where the chip degrades to the row rollup.
    */
   state: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  /**
+   * static | clean-at-rest | zero-files — the project's delivery mode, the
+   * same derived reading `agentstack status` prints (contract
+   * `doctor-mode-v1`). Null when doctor ran with no project (`needs_setup`);
+   * absent on older CLIs, where the panel must not guess a mode from section
+   * prose. Kept a free string so a future mode still decodes.
+   */
+  mode: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  /**
+   * locked | never_activated — whether this project was ever activated (a
+   * lockfile exists), the fact `status` words as "not locked (never
+   * activated)". Same availability rules as `mode` (`doctor-mode-v1`).
+   */
+  activation: Schema.optionalKey(Schema.NullOr(Schema.String)),
   /** One recommended command (e.g. `agentstack secret set SEARCH_TOKEN`), or
    *  null when nothing is pending. Shown verbatim as the next step. */
   next_action: Schema.optionalKey(Schema.NullOr(Schema.String)),
@@ -492,6 +506,16 @@ export const AgentstackDiffTarget = Schema.Struct({
    */
   hand_edited: Schema.optionalKey(Schema.Boolean),
   /**
+   * Whether the config file was on disk when the diff was computed (contract
+   * `diff-existence-v1`). With `changed` it splits the two stories a pending
+   * render tells: `false` — the file is absent, so this is a first render
+   * ("never rendered here"); `true` — the manifest moved ahead of a rendered
+   * file. Replaces the `@@ -0,0` hunk-header inference, which an
+   * empty-but-present file misclassifies. `optionalKey` so payloads from CLIs
+   * that predate the field still decode (absent → we make no claim).
+   */
+  existed_before: Schema.optionalKey(Schema.Boolean),
+  /**
    * Servers on disk that a default render *keeps* (spares) because another
    * setup applied them — `apply` never removes these without `--prune-foreign`,
    * which this integration never runs.
@@ -662,6 +686,13 @@ export const AgentstackRestoreEntry = Schema.Struct({
   time_unix: Schema.Number,
   /** project | global — the scope of the recorded change. */
   scope: Schema.String,
+  /**
+   * The command the ledger recorded for this entry, e.g. "apply", "use 'web'",
+   * "session start 'backend'". Optional because a CLI predating the field emits
+   * none. Sanitized CLI-side and still untrusted display text — it can carry a
+   * manifest-derived profile or workflow name.
+   */
+  operation: Schema.optionalKey(Schema.String),
   /** Human one-liner, e.g. "1 file · claude-code, codex". */
   summary: Schema.String,
   undone: Schema.Boolean,

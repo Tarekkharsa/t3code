@@ -80,4 +80,39 @@ describe("StatusSummary", () => {
     // must not compete with the recommended action.
     expect(markup).toContain("1 note");
   });
+
+  it("offers the review when the recommendation is to trust this project", () => {
+    // The trust recommendation is a screen, not a write: it must never reach the
+    // action RPC, and it must not be the one recommendation you cannot act on.
+    const markup = renderToStaticMarkup(
+      <StatusSummary
+        chip={chipFor("needs_attention")}
+        nextAction="agentstack trust ."
+        advisories={null}
+        onRunNextAction={() => {
+          throw new Error("the trust review must never go through the action RPC");
+        }}
+        onReviewTrust={() => {}}
+      />,
+    );
+    // With the review on offer, the row says what the step IS rather than the
+    // command that performs it: the button is the actionable form, and printing
+    // argv beside it is the same instruction twice.
+    expect(markup).toContain("Review what this project declares");
+    expect(markup).toContain("Review &amp; trust");
+    expect(markup).not.toContain("agentstack trust .");
+
+    // No review surface → the command still reads as a command to run, and
+    // nothing offers to fire it.
+    const noSurface = renderToStaticMarkup(
+      <StatusSummary
+        chip={chipFor("needs_attention")}
+        nextAction="agentstack trust ."
+        advisories={null}
+        onRunNextAction={() => {}}
+      />,
+    );
+    expect(noSurface).toContain("agentstack trust .");
+    expect(noSurface).not.toContain("Review");
+  });
 });

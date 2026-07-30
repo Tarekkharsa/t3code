@@ -38,6 +38,14 @@ export interface AgentstackDoctorReport {
   trust?: string | null;
   /** needs_setup | needs_attention | ready, when the CLI emits it. */
   state?: string | null;
+  /**
+   * static | clean-at-rest | zero-files — the project's delivery mode
+   * (`doctor-mode-v1`). Null with no project; absent on older CLIs, where
+   * nothing here may guess a mode from section prose.
+   */
+  mode?: string | null;
+  /** locked | never_activated, same availability rules as `mode`. */
+  activation?: string | null;
   /** One recommended command, or null/absent when nothing is pending. */
   next_action?: string | null;
   /** The cooperative host-protection posture, when reported. */
@@ -94,6 +102,19 @@ export type AgentstackActionKind =
   | "adopt-global"
   | "guard-install";
 
+/**
+ * The kinds a "what do I press here" surface may offer — the governed actions
+ * plus the trust review.
+ *
+ * `review-trust` is deliberately NOT an `AgentstackActionKind`: granting trust
+ * is content-bound consent, so it can only happen on the review screen that
+ * shows the exact bytes being approved, never as fixed argv fired from a
+ * button. It travels with the runnable kinds because every surface that names
+ * `agentstack trust` as the next step needs somewhere to send you; each one
+ * routes this kind to the review and never to the action RPC.
+ */
+export type AgentstackPanelActionKind = AgentstackActionKind | "review-trust";
+
 function sectionByTitle(
   report: AgentstackDoctorReport,
   title: string,
@@ -140,7 +161,7 @@ export function formatAgentstackCheckupSummary(errors: number, warnings: number)
     errors > 0 ? countOf(errors, "error") : null,
     warnings > 0 ? countOf(warnings, "warning") : null,
   ].filter((p): p is string => p !== null);
-  return `${parts.join(" · ")} — each names its fix`;
+  return `${parts.join(" · ")} — open the list below`;
 }
 
 /**
@@ -189,23 +210,37 @@ export function deriveAgentstackOverviewRows(
     const allInSync = drift.lines.some(
       (l) => l.level === "ok" && l.msg.trim().startsWith("all targets in sync"),
     );
+    // Structured delivery mode (`doctor-mode-v1`): a zero-files project keeps
+    // rendered configs off disk ON PURPOSE — the CLI skips the drift
+    // comparison entirely for it, so neither "in sync" nor "rendered to N
+    // CLIs" would be honest here (nothing was rendered or compared; the
+    // gateway serves the project live). Before the typed field this state
+    // could only be guessed from section prose, which is exactly the
+    // substring-matching this field retires. Absent mode (older CLI) keeps
+    // the prose-derived story below unchanged.
+    const servedLive = report.mode === "zero-files";
     rows.push({
       key: "manifest",
       label: "Manifest",
-      summary: actionable
-        ? "changes pending on disk"
-        : foreignKept
-          ? "in sync here · other setups' servers kept"
-          : `in sync${cliCount ? ` · rendered to ${cliCount} CLIs` : ""}`,
+      summary: servedLive
+        ? "served live via the gateway — nothing rendered on purpose"
+        : actionable
+          ? "changes pending on disk"
+          : foreignKept
+            ? "in sync here · other setups' servers kept"
+            : `in sync${cliCount ? ` · rendered to ${cliCount} CLIs` : ""}`,
       // `info`-only drift is not a fault (this project renders cleanly), so it
       // stays an "ok" dot; only real own-manifest drift warns.
-      level: actionable ? "warn" : "ok",
-      ...(actionable || foreignKept ? { reviewDrift: true as const } : {}),
+      level: !servedLive && actionable ? "warn" : "ok",
+      ...(!servedLive && (actionable || foreignKept) ? { reviewDrift: true as const } : {}),
       // Cross-CLI convergence is what the product promises, so it is what the
       // reassurance line should say — but only over CLIs doctor actually
       // compared. The count is of installed adapters whose config parses, all
       // of which are render targets, and `allInSync` covers every target.
-      ...(allInSync && cliCount ? { healthy: `${countOf(cliCount, "CLI")} in sync` } : {}),
+      // Never claimed for a served-live project: no render was compared.
+      ...(!servedLive && allInSync && cliCount
+        ? { healthy: `${countOf(cliCount, "CLI")} in sync` }
+        : {}),
     });
   }
 
@@ -254,13 +289,64 @@ export function deriveAgentstackOverviewRows(
 
 // ── "More protection" ladder ─────────────────────────────────────────────────
 
+// ── drift review narration ───────────────────────────────────────────────────
+
+/**
+ * The drift dialog's one-line story for a scope's changed targets. The CLI's
+ * `existed_before` (contract `diff-existence-v1`) decides which of three
+ * stories a pending change tells; the stopgap was inferring "first render"
+ * from the `@@ -0,0` diff hunk header, which an empty-but-present file
+ * misclassifies. Priority: an outside edit is the one the user must
+ * adjudicate, so it wins; then "nothing rendered yet" — but only when EVERY
+ * changed target is a first render (`neverRenderedCount === changedCount`),
+ * because a mixed batch still holds files with content at stake; then the
+ * neutral "manifest moved ahead". Older CLIs never report `existed_before`,
+ * so their counts stay 0 and the wording is unchanged.
+ */
+export function describeAgentstackDriftStory(input: {
+  readonly scope: "global" | "project";
+  readonly changedCount: number;
+  /** Changed targets with `hand_edited === true`. */
+  readonly editedCount: number;
+  /** Changed targets with `existed_before === false` (file absent on disk). */
+  readonly neverRenderedCount: number;
+}): string {
+  const where = input.scope === "global" ? "global configs (~)" : "this repo";
+  if (input.editedCount > 0) {
+    return `The on-disk config in ${where} was edited outside agentstack. Pick which one is the truth.`;
+  }
+  if (input.changedCount > 0 && input.neverRenderedCount === input.changedCount) {
+    return input.scope === "global"
+      ? "Nothing is rendered in your global configs yet — “Re-render” writes them for the first time."
+      : "Nothing is rendered in this repo yet — “Re-render” writes these configs for the first time.";
+  }
+  return `${input.scope === "project" ? "This repo" : "Your global configs"} no longer match the manifest. Pick which one is the truth.`;
+}
+
 export interface AgentstackProtectionRow {
   key: string;
   label: string;
+  /**
+   * Whether this layer is currently on, off, or unconfigured — null for the run
+   * tiers, which are capabilities of the binary and have no state to report.
+   *
+   * Split out of `summary`, which used to open with a literal "on — " / "off — "
+   * that the reader had to parse out of a sentence. A state is a chip, not a
+   * prefix; leaving it in prose is why every row on the tab looked identical
+   * whether it was protecting anything or not.
+   */
+  state: "on" | "off" | "unset" | null;
   /** What this layer covers, honestly — no claim beyond the enforcement. */
   summary: string;
   /** What turning it on costs (setup, dependencies, speed), when it isn't free. */
   cost?: string;
+  /**
+   * The command that uses this capability, where using it is terminal work.
+   *
+   * Kept apart from `summary` so the panel can typeset it as a command with a
+   * copy affordance instead of burying argv mid-sentence.
+   */
+  command?: string;
   level: AgentstackRowLevel;
   /** A vetted governed action this row can trigger directly (enable guard). */
   action?: AgentstackActionKind;
@@ -286,9 +372,10 @@ export function deriveAgentstackProtectionRows(
     rows.push({
       key: "guard",
       label: "Guard",
+      state: enabled ? "on" : "off",
       summary: enabled
-        ? "on — blocks destructive agent commands before they run"
-        : "off — agent commands run without a pre-check",
+        ? "Blocks destructive agent commands before they run."
+        : "Agent commands run without a pre-check.",
       cost: enabled
         ? "covers agent tool calls on this machine — not a sandbox"
         : "free — adds a pre-check hook to every detected CLI",
@@ -300,15 +387,16 @@ export function deriveAgentstackProtectionRows(
   // Machine policy ← the always-computed one-word posture. "unconfigured" is
   // a fact, not a fault — muted, with the exact place to add one.
   const machine = sectionByTitle(report, "Machine policy");
-  const machineMsg = machine ? (firstMessage(machine) ?? "") : "";
+  const machineMsg = machine ? (firstMessage(machine, { clip: false }) ?? "") : "";
   if (machine) {
     const unconfigured = machineMsg.startsWith("unconfigured");
     rows.push({
       key: "machine-policy",
       label: "Machine policy",
+      state: unconfigured ? "unset" : "on",
       summary: unconfigured
-        ? "none — each project uses its own limits"
-        : `the ceiling every session runs under — ${machineMsg}`,
+        ? "Each project uses its own limits."
+        : `The ceiling every session runs under — ${machineMsg}`,
       cost: unconfigured
         ? "add [policy] to ~/.agentstack/agentstack.toml — no repo can loosen it"
         : "no repo or UI can loosen it",
@@ -326,10 +414,11 @@ export function deriveAgentstackProtectionRows(
     rows.push({
       key: "gateway",
       label: "Live serving",
+      state: registered > 0 ? "on" : "off",
       summary:
         registered > 0
-          ? `on — ${registered} CLI(s) fetch servers live; unreviewed repos stay inert`
-          : "off — servers render as config files instead",
+          ? `${formatAgentstackCount(registered, "CLI")} fetch servers live; unreviewed repos stay inert.`
+          : "Servers render as config files instead.",
       cost: "review each repo once before its servers run",
       level: registered > 0 ? worstLevel(gateway) : "muted",
     });
@@ -339,16 +428,19 @@ export function deriveAgentstackProtectionRows(
   rows.push({
     key: "locked-run",
     label: "Locked run",
-    summary: "agentstack run <cli> --locked — pins content and records evidence",
+    state: null,
+    summary: "Pins content and records evidence for one run.",
     cost: "host process — not kernel isolation",
+    command: "agentstack run <cli> --locked",
     level: "muted",
   });
   rows.push({
     key: "sandbox",
     label: "Sandbox",
-    summary:
-      "agentstack run --sandbox / --lockdown — container isolation; lockdown enforces the network route",
+    state: null,
+    summary: "Container isolation; lockdown also enforces the network route.",
     cost: "needs Docker · slower start",
+    command: "agentstack run <cli> --sandbox",
     level: "muted",
   });
 
@@ -595,6 +687,37 @@ export function describeAgentstackProbeSkip(reason: string | null | undefined): 
   return { text: "Nothing was started.", reviewTrust: false };
 }
 
+/**
+ * Whether a failed session start was the trust gate refusing.
+ *
+ * The CLI's own sentence is what the panel shows ("refusing to start a session:
+ * … review with `agentstack trust` …"), and it is the right sentence — but it
+ * names a terminal command in a window that owns a review screen. Recognising
+ * the refusal is what lets the same line carry a button.
+ *
+ * Substring matching on purpose, not a parse: the wording travels between CLI
+ * versions and this decides only whether to ADD an affordance, so a miss costs
+ * the button and never the message. Any non-string, empty or unrecognized input
+ * is simply not a refusal.
+ */
+export function matchAgentstackTrustRefusal(message: string | null | undefined): boolean {
+  if (typeof message !== "string" || message.length === 0) return false;
+  const text = message.toLowerCase();
+  return text.includes("refusing to start a session") || text.includes("agentstack trust");
+}
+
+/**
+ * The CLI's line as the panel shows it once it has recognized the refusal.
+ *
+ * Only the `error: ` prefix goes — it is the CLI's stream marker, and inside a
+ * card that is already styled as a failure it reads as part of the sentence.
+ * Everything else, including the wording and the backticked command, stays
+ * verbatim.
+ */
+export function stripAgentstackErrorPrefix(message: string): string {
+  return message.replace(/^\s*error:\s*/i, "");
+}
+
 // ── workflow serial roles ────────────────────────────────────────────────────
 
 /**
@@ -632,6 +755,11 @@ export interface AgentstackRestoreEntryLike {
   undone: boolean;
   /** True when this entry's files live under the current workspace. */
   touches_project: boolean;
+  /**
+   * The command the ledger recorded ("apply", "use 'web'"). Absent on a CLI
+   * that predates the field; untrusted display text either way.
+   */
+  operation?: string | undefined;
 }
 
 /**
@@ -651,6 +779,43 @@ export function selectAgentstackUndoEntry(
     if (best === null || entry.time_unix > best.time_unix) best = entry;
   }
   return best;
+}
+
+/** The undo drawer's whole reading of the ledger. */
+export interface AgentstackUndoView {
+  /** The entry the button acts on — exactly [`selectAgentstackUndoEntry`]. */
+  readonly entry: AgentstackRestoreEntryLike | null;
+  /**
+   * How many newer, not-yet-undone entries the drawer is deliberately not
+   * offering because their files are outside this project.
+   */
+  readonly newerElsewhere: number;
+}
+
+/**
+ * The selected entry, plus how much newer machine-wide history it is NOT the
+ * front of.
+ *
+ * The drawer says "Undo last change" and the ledger is machine-global, so the
+ * common case is honestly confusing: a global `apply` and a `use 'web'` both
+ * land after this project's last change, and the drawer offers neither. It is
+ * right not to (undoing another project's write from here is exactly the blind
+ * `--last` this selection exists to avoid) — so the count is surfaced instead,
+ * and the drawer points at the terminal for the rest.
+ *
+ * Selection semantics are unchanged: this wraps the same pick rather than
+ * re-deriving it, so there is one definition of "the entry this project may
+ * undo". Zero when nothing is selected — with no entry there is no "newer".
+ */
+export function selectAgentstackUndoView(
+  entries: ReadonlyArray<AgentstackRestoreEntryLike>,
+): AgentstackUndoView {
+  const entry = selectAgentstackUndoEntry(entries);
+  if (entry === null) return { entry: null, newerElsewhere: 0 };
+  const newerElsewhere = entries.filter(
+    (e) => !e.undone && !e.touches_project && e.time_unix > entry.time_unix,
+  ).length;
+  return { entry, newerElsewhere };
 }
 
 // ── policy tab ───────────────────────────────────────────────────────────────
@@ -739,12 +904,25 @@ export function deriveAgentstackPolicyRows(report: AgentstackDoctorReport): Agen
 const SUMMARY_MAX = 64;
 
 /** First line's message, trimmed to fit a one-line row. */
-function firstMessage(section: AgentstackDoctorSection): string | undefined {
+/**
+ * The first line's fact, clipped to fit a compact row.
+ *
+ * `clip: false` for surfaces with room to finish the sentence. The Protection
+ * tab is one: it is the screen whose entire job is stating what is enforced,
+ * and it was describing the machine ceiling as `a rename-proof "*" rule (or a
+ * filesystem scope) c…` — a claim the reader cannot finish, cut by a cap that
+ * exists for a 400px popover row.
+ */
+function firstMessage(
+  section: AgentstackDoctorSection,
+  { clip = true }: { clip?: boolean } = {},
+): string | undefined {
   const msg = section.lines[0]?.msg;
   if (!msg) return undefined;
   // Doctor lines carry a "↳ fix command" tail; the row only wants the fact.
   const fact = msg.split("↳")[0]?.trim() ?? msg;
-  return fact.length > SUMMARY_MAX ? `${fact.slice(0, SUMMARY_MAX - 1)}…` : fact;
+  if (!clip || fact.length <= SUMMARY_MAX) return fact;
+  return `${fact.slice(0, SUMMARY_MAX - 1)}…`;
 }
 
 // ── recent-calls activity feed ───────────────────────────────────────────────
@@ -1083,15 +1261,23 @@ export function shortenAgentstackPathsIn(
  * a command to run in a terminal. Matching is exact after whitespace
  * collapsing, so `apply --write --scope global` does NOT silently become the
  * project-scoped apply.
+ *
+ * `agentstack trust` maps to `review-trust`, which is a destination rather than
+ * a write: the caller opens the review screen. Recommending it and rendering it
+ * as unclickable text was the panel's longest-standing dead end — the one state
+ * that makes everything else moot was the one state with nothing to press.
  */
 export function matchAgentstackNextAction(
   nextAction: string | null | undefined,
-): AgentstackActionKind | null {
+): AgentstackPanelActionKind | null {
   if (!nextAction) return null;
   const normalized = nextAction.trim().replace(/\s+/g, " ");
   switch (normalized) {
     case "agentstack guard install":
       return "guard-install";
+    case "agentstack trust":
+    case "agentstack trust .":
+      return "review-trust";
     case "agentstack apply --write":
       return "apply-project";
     case "agentstack apply --write --scope global":
@@ -1255,8 +1441,11 @@ export interface AgentstackFinding {
    * prose as a command invites the user to paste it.
    */
   readonly fixOptions: ReadonlyArray<AgentstackFixOption>;
-  /** Set when that fix is a fixed action this panel can run directly. */
-  readonly action: AgentstackActionKind | null;
+  /**
+   * Set when that fix is something this panel can offer directly: a fixed
+   * action it runs, or — for `agentstack trust` — the review screen it opens.
+   */
+  readonly action: AgentstackPanelActionKind | null;
   /** Which doctor section it came from, for grouping. */
   readonly section: string;
 }
@@ -1312,6 +1501,25 @@ function splitFixOptions(fix: string): AgentstackFixOption[] {
 }
 
 /**
+ * The affordance one finding's remedy earns.
+ *
+ * Two bars, because the two outcomes differ in kind. A runnable action fires
+ * fixed argv, so it keeps the exact-match whitelist and a near-miss degrades to
+ * text. The trust review only OPENS a screen — it shows the bytes and grants
+ * nothing by itself — so it is offered whenever the remedy NAMES `agentstack
+ * trust`, which is how doctor actually writes it: "review + agentstack trust"
+ * for a re-gated project, and `agentstack trust <path>` where it names the root.
+ * Demanding an exact match there is what left the panel's most consequential
+ * finding printing a command and nothing else.
+ */
+function findingFixAffordance(fix: string): AgentstackPanelActionKind | null {
+  const exact = matchAgentstackNextAction(fix);
+  if (exact !== null) return exact;
+  // Word-bounded, so a longer verb (`trust-store`) never reads as `trust`.
+  return /(^|\s)agentstack\s+trust(\s|$)/i.test(fix) ? "review-trust" : null;
+}
+
+/**
  * Every error and warning doctor reported, with its fix.
  *
  * The Checkup row said "N warning(s) — each names its fix" and then showed
@@ -1336,9 +1544,9 @@ export function deriveAgentstackFindings(
         message: clamp((message ?? line.msg).trim().replace(/\s+/g, " "), FINDING_MAX),
         fix: fix.length > 0 ? clamp(fix, FINDING_MAX) : null,
         fixOptions: fix.length > 0 ? splitFixOptions(fix) : [],
-        // Match the action on the UNCLAMPED command: clipping is a display
-        // concern and must not change which fixed action a fix maps to.
-        action: fix.length > 0 ? matchAgentstackNextAction(fix) : null,
+        // Match on the UNCLAMPED command: clipping is a display concern and
+        // must not change which action or review a fix maps to.
+        action: fix.length > 0 ? findingFixAffordance(fix) : null,
         section: clamp(section.title, 64),
       });
     }
@@ -1371,7 +1579,7 @@ export const AGENTSTACK_CHECKUP_ACTION_FEATURE = "status-v1";
 export function agentstackFindingAction(
   finding: AgentstackFinding,
   features: ReadonlyArray<string> | undefined,
-): AgentstackActionKind | null {
+): AgentstackPanelActionKind | null {
   if (finding.action === null) return null;
   // Drift is never one blind click, here or anywhere. The safe verb (adopt)
   // and the re-render verb (apply) differ, the scope has to be chosen, and the
@@ -1380,6 +1588,11 @@ export function agentstackFindingAction(
   // decision made twice, two rows apart, in opposite directions — and the
   // dangerous one wins because it is the one click.
   if (finding.section === "Drift") return null;
+  // The trust review is this panel's own screen, not a scraped command handed
+  // to the action RPC, so the feature that gates RUNNING a fix has nothing to
+  // say about it — and a finding that names `agentstack trust` is exactly the
+  // one that must not be left as text on every binary.
+  if (finding.action === "review-trust") return "review-trust";
   return hasAgentstackFeature(features, AGENTSTACK_CHECKUP_ACTION_FEATURE) ? finding.action : null;
 }
 
@@ -1397,8 +1610,8 @@ export const AGENTSTACK_FINDINGS_PREVIEW = 8;
 /** A finding as the list draws it: the finding, plus the button it may show. */
 export interface AgentstackFindingView {
   readonly finding: AgentstackFinding;
-  /** The fixed action to offer, or null to show the command only. */
-  readonly action: AgentstackActionKind | null;
+  /** The action or review to offer, or null to show the command only. */
+  readonly action: AgentstackPanelActionKind | null;
 }
 
 /**
@@ -1434,7 +1647,7 @@ export function selectAgentstackFindingsView(
   ];
   const limit = Math.max(0, previewCount);
   const shown = expanded ? ranked : ranked.slice(0, limit);
-  const offered = new Set<AgentstackActionKind>();
+  const offered = new Set<AgentstackPanelActionKind>();
   const visible = shown.map((finding) => {
     const action = agentstackFindingAction(finding, features);
     if (action === null || offered.has(action)) return { finding, action: null };
@@ -1442,6 +1655,64 @@ export function selectAgentstackFindingsView(
     return { finding, action };
   });
   return { visible, hidden: ranked.length - visible.length, total: ranked.length };
+}
+
+export interface AgentstackFindingGroup {
+  /** The doctor section these findings came from; unique within the list. */
+  readonly key: string;
+  readonly section: string;
+  /** The worst level in the group — a group is as urgent as its worst member. */
+  readonly level: AgentstackRowLevel;
+  readonly items: ReadonlyArray<AgentstackFindingView>;
+  /** The one action the whole group offers, if any member offered one. */
+  readonly action: AgentstackPanelActionKind | null;
+}
+
+const LEVEL_RANK: Record<AgentstackRowLevel, number> = { error: 3, warn: 2, ok: 1, muted: 0 };
+
+/**
+ * Fold the checkup list into one block per doctor section.
+ *
+ * Four drifted CLIs are four findings, and each one rendered its own identical
+ * "Review" button opening the same dialog — four ways to ask the same question,
+ * which reads as four problems. Grouping keeps every finding visible (nothing
+ * here is hidden; the count is the honest one) and moves the verb to the group,
+ * so a section offers its action once.
+ *
+ * Order is first-appearance, which preserves the errors-first ranking
+ * `selectAgentstackFindingsView` already applied: the section holding the worst
+ * finding leads.
+ */
+export function groupAgentstackFindingViews(
+  views: ReadonlyArray<AgentstackFindingView>,
+): ReadonlyArray<AgentstackFindingGroup> {
+  const order: string[] = [];
+  const bySection = new Map<string, AgentstackFindingView[]>();
+  for (const view of views) {
+    const section = view.finding.section;
+    const bucket = bySection.get(section);
+    if (bucket === undefined) {
+      order.push(section);
+      bySection.set(section, [view]);
+    } else {
+      bucket.push(view);
+    }
+  }
+  return order.map((section) => {
+    const items = bySection.get(section) ?? [];
+    return {
+      key: section,
+      section,
+      level: items.reduce<AgentstackRowLevel>(
+        (worst, v) => (LEVEL_RANK[v.finding.level] > LEVEL_RANK[worst] ? v.finding.level : worst),
+        "muted",
+      ),
+      items,
+      // `selectAgentstackFindingsView` already offers each action at most once
+      // across the whole list, so at most one member carries a non-null action.
+      action: items.find((v) => v.action !== null)?.action ?? null,
+    };
+  });
 }
 
 // ── the one concern the first page shows ─────────────────────────────────────
@@ -1617,6 +1888,21 @@ export function selectAgentstackPrimaryConcern(input: {
   }
 
   const actionFinding = input.findings.find((f) => f.action !== null && f.section !== "Drift");
+  if (actionFinding?.action === "review-trust") {
+    // A checkup line asking for `agentstack trust` while the trust state above
+    // reads neither inert nor drifted — a stale or unreadable trust record. The
+    // destination is the same review either way, so it is offered rather than
+    // demoted to "Open setup".
+    return {
+      key: actionFinding.key,
+      title: actionFinding.message,
+      detail: null,
+      act: { kind: "review-trust" },
+      label: "Review & trust",
+      note: "you approve exact bytes",
+      others: rest(1),
+    };
+  }
   if (actionFinding?.action) {
     const copy = CONCERN_COPY[actionFinding.action];
     const meta = AGENTSTACK_ACTION_META[actionFinding.action];
@@ -1937,4 +2223,100 @@ export function selectAgentstackUpdateOffer(input: {
     kind: "none",
     note: `Automatic updates are unavailable in this build. Install a newer ${AGENTSTACK_HOST_NAME}, or downgrade the CLI to the version it understands.`,
   };
+}
+
+// ── unified diff ─────────────────────────────────────────────────────────────
+
+/**
+ * What a single diff line is, for colouring.
+ *
+ * `meta` covers the file headers (`diff --git`, `index`, `--- a/…`, `+++ b/…`)
+ * that must NOT be counted or coloured as content: `--- a/x` starts with `-`
+ * and would otherwise read as a deleted line, which is how a two-file diff ends
+ * up claiming two extra deletions.
+ */
+export type AgentstackDiffLineKind = "add" | "del" | "hunk" | "meta" | "context";
+
+export interface AgentstackDiffLine {
+  /** Stable across renders: the line's own index, which cannot repeat. */
+  readonly key: string;
+  readonly kind: AgentstackDiffLineKind;
+  /** The line with its leading marker removed; the marker is drawn separately. */
+  readonly text: string;
+}
+
+export interface AgentstackParsedDiff {
+  readonly lines: ReadonlyArray<AgentstackDiffLine>;
+  readonly additions: number;
+  readonly deletions: number;
+  /** True when `lines` stops short of the diff — the tail was dropped. */
+  readonly truncated: boolean;
+}
+
+/**
+ * How many lines we will draw for one target.
+ *
+ * The CLI's diff for a machine-wide config runs to hundreds of lines, and every
+ * one of them is a DOM node inside an already-scrolling dialog. The cap is on
+ * lines rather than characters (the old 6,000-char slice) because a character
+ * cut lands mid-token and renders a line that is not in the file.
+ */
+const DIFF_LINE_CAP = 300;
+
+/**
+ * Split unified-diff text into classified, counted lines.
+ *
+ * The panel gets `diff` as pre-rendered unified text from `agentstack diff
+ * --json`, not as structured hunks, so classification is by leading marker.
+ * Treated as untrusted like everything else here: any shape parses, and an
+ * empty or marker-less string simply yields context lines.
+ */
+export function parseAgentstackDiff(diff: string): AgentstackParsedDiff {
+  if (!diff) return { lines: [], additions: 0, deletions: 0, truncated: false };
+  const raw = diff.split("\n");
+  // A trailing newline yields a final empty element that is not a line of the
+  // file; drawing it adds a blank row to every diff.
+  if (raw.length > 0 && raw[raw.length - 1] === "") raw.pop();
+
+  const lines: AgentstackDiffLine[] = [];
+  let additions = 0;
+  let deletions = 0;
+
+  for (let i = 0; i < raw.length && lines.length < DIFF_LINE_CAP; i += 1) {
+    const line = raw[i] ?? "";
+    let kind: AgentstackDiffLineKind;
+    let text: string;
+    if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("diff --git")) {
+      kind = "meta";
+      text = line;
+    } else if (line.startsWith("@@")) {
+      kind = "hunk";
+      text = line;
+    } else if (line.startsWith("+")) {
+      kind = "add";
+      text = line.slice(1);
+      additions += 1;
+    } else if (line.startsWith("-")) {
+      kind = "del";
+      text = line.slice(1);
+      deletions += 1;
+    } else {
+      kind = "context";
+      // Context lines carry a leading space in unified format. Keeping it would
+      // indent every unchanged line by one column relative to changed ones.
+      text = line.startsWith(" ") ? line.slice(1) : line;
+    }
+    lines.push({ key: String(i), kind, text });
+  }
+
+  // Count the whole diff even when we stop drawing it: the header stat is a
+  // claim about the change, not about how much of it fits on screen.
+  for (let i = lines.length; i < raw.length; i += 1) {
+    const line = raw[i] ?? "";
+    if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("diff --git")) continue;
+    if (line.startsWith("+")) additions += 1;
+    else if (line.startsWith("-")) deletions += 1;
+  }
+
+  return { lines, additions, deletions, truncated: raw.length > lines.length };
 }

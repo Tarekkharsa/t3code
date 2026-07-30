@@ -1239,7 +1239,7 @@ describe("AgentstackCli", () => {
     expect(AgentstackCli.parseSetupPlan("not json")).toBeNull();
   });
 
-  it("parses the restore inventory including touches_project", () => {
+  it("parses the restore inventory including touches_project and the recorded operation", () => {
     const wire = JSON.stringify({
       entries: [
         {
@@ -1247,6 +1247,7 @@ describe("AgentstackCli", () => {
           short_id: "18c4e1d2",
           time_unix: 1_784_799_648,
           scope: "project",
+          operation: "use 'web'",
           summary: "1 file · claude-code, codex",
           undone: false,
           touches_project: true,
@@ -1258,9 +1259,28 @@ describe("AgentstackCli", () => {
     const inventory = AgentstackCli.parseRestoreInventory(wire);
     expect(inventory?.entries).toHaveLength(1);
     expect(inventory?.entries[0]?.touches_project).toBe(true);
+    // The command the entry undoes reaches the panel — "Undo 1 file" cannot say
+    // what it takes back on its own.
+    expect(inventory?.entries[0]?.operation).toBe("use 'web'");
     // Without the optional envelope it still decodes.
     const withoutEnvelope = AgentstackCli.parseRestoreInventory(JSON.stringify({ entries: [] }));
     expect(withoutEnvelope?.entries).toEqual([]);
+    // An older CLI emits no `operation`; the entry still decodes without one.
+    const legacy = AgentstackCli.parseRestoreInventory(
+      JSON.stringify({
+        entries: [
+          {
+            id: "18c4e1d2ef6e44d0",
+            time_unix: 1_784_799_648,
+            scope: "global",
+            summary: "2 files · codex",
+            undone: false,
+            touches_project: false,
+          },
+        ],
+      }),
+    );
+    expect(legacy?.entries[0]?.operation).toBeUndefined();
     expect(AgentstackCli.parseRestoreInventory("nope")).toBeNull();
   });
 

@@ -15,6 +15,7 @@ import {
   deriveAgentstackFindings,
   deriveAgentstackShareFacts,
   deriveAgentstackTrustBadge,
+  describeAgentstackDriftStory,
   describeAgentstackProbeSkip,
   describeAgentstackSerialRoles,
   deriveToolsetRows,
@@ -28,6 +29,7 @@ import {
   hasAgentstackFeature,
   matchAgentstackDenial,
   matchAgentstackNextAction,
+  matchAgentstackTrustRefusal,
   partitionAgentstackOverviewRows,
   selectAgentstackFindingsView,
   selectAgentstackPrimaryConcern,
@@ -35,13 +37,17 @@ import {
   shortenAgentstackPath,
   shortenAgentstackPathsIn,
   selectAgentstackUndoEntry,
+  selectAgentstackUndoView,
   shortDigest,
+  stripAgentstackErrorPrefix,
   summarizeAgentstackHealthyRows,
   type AgentstackDoctorReport,
   type AgentstackFinding,
   type AgentstackOverviewRow,
   type AgentstackRestoreEntryLike,
   type AgentstackWorkflowStepLike,
+  groupAgentstackFindingViews,
+  parseAgentstackDiff,
 } from "./agentstack-logic";
 
 const report: AgentstackDoctorReport = {
@@ -136,6 +142,98 @@ describe("deriveAgentstackOverviewRows", () => {
     expect(rows.map((r) => r.key)).toEqual(["doctor"]);
     expect(rows[0]).toMatchObject({ key: "doctor", level: "ok", summary: "all checks pass" });
   });
+
+  it("tells the served-live story for a zero-files project instead of claiming a sync", () => {
+    // `doctor-mode-v1`: the CLI suppresses the drift comparison for a derived
+    // zero-files mode (nothing is rendered ON PURPOSE — the gateway serves the
+    // project live) and says so with an ok line. Neither "in sync" nor
+    // "rendered to N CLIs" would be honest here, and before the structured
+    // `mode` field this state could only be guessed from that prose.
+    const zeroFiles: AgentstackDoctorReport = {
+      errors: 0,
+      warnings: 0,
+      mode: "zero-files",
+      activation: "never_activated",
+      sections: [
+        {
+          title: "Drift",
+          lines: [
+            {
+              level: "ok",
+              msg: "not rendering configs — zero-files serves this project live through the gateway",
+            },
+          ],
+        },
+      ],
+    };
+    const byKey = Object.fromEntries(
+      deriveAgentstackOverviewRows(zeroFiles).map((r) => [r.key, r]),
+    );
+    expect(byKey["manifest"]).toMatchObject({
+      level: "ok",
+      summary: "served live via the gateway — nothing rendered on purpose",
+    });
+    // No render was compared, so no sync claim and no drift review to offer.
+    expect(byKey["manifest"]).not.toHaveProperty("reviewDrift");
+    expect(byKey["manifest"]).not.toHaveProperty("healthy");
+  });
+});
+
+describe("describeAgentstackDriftStory", () => {
+  it("adjudicates an outside edit above every other story", () => {
+    expect(
+      describeAgentstackDriftStory({
+        scope: "project",
+        changedCount: 2,
+        editedCount: 1,
+        neverRenderedCount: 2,
+      }),
+    ).toContain("edited outside agentstack");
+  });
+
+  it("narrates a first render only when every changed target is one", () => {
+    // All-absent → the honest story is "nothing here yet", not an accusation
+    // that files "no longer match".
+    expect(
+      describeAgentstackDriftStory({
+        scope: "project",
+        changedCount: 2,
+        editedCount: 0,
+        neverRenderedCount: 2,
+      }),
+    ).toContain("Nothing is rendered in this repo yet");
+    expect(
+      describeAgentstackDriftStory({
+        scope: "global",
+        changedCount: 1,
+        editedCount: 0,
+        neverRenderedCount: 1,
+      }),
+    ).toContain("Nothing is rendered in your global configs yet");
+    // A mixed batch still holds files with real content at stake → neutral.
+    expect(
+      describeAgentstackDriftStory({
+        scope: "project",
+        changedCount: 2,
+        editedCount: 0,
+        neverRenderedCount: 1,
+      }),
+    ).toContain("no longer match the manifest");
+  });
+
+  it("keeps the neutral manifest-moved-ahead wording for older CLIs", () => {
+    // A CLI predating `diff-existence-v1` never reports `existed_before`, so
+    // the count stays 0 — including for an EMPTY-but-present file, the case
+    // the old `@@ -0,0` hunk-header inference misclassified as a first render.
+    expect(
+      describeAgentstackDriftStory({
+        scope: "global",
+        changedCount: 1,
+        editedCount: 0,
+        neverRenderedCount: 0,
+      }),
+    ).toBe("Your global configs no longer match the manifest. Pick which one is the truth.");
+  });
 });
 
 describe("deriveAgentstackProtectionRows", () => {
@@ -153,20 +251,31 @@ describe("deriveAgentstackProtectionRows", () => {
     const rows = deriveAgentstackProtectionRows(withGuard);
     const byKey = Object.fromEntries(rows.map((r) => [r.key, r]));
 
-    // Guard off → actionable enable, honestly labelled free.
-    expect(byKey["guard"]).toMatchObject({ level: "warn", action: "guard-install" });
-    expect(byKey["guard"]!.summary).toContain("off");
+    // Guard off → actionable enable, honestly labelled free. The on/off state
+    // is its own field so the panel can render it as a chip; asserting it in
+    // the prose is what let "on — …" and "off — …" read identically on screen.
+    expect(byKey["guard"]).toMatchObject({
+      level: "warn",
+      action: "guard-install",
+      state: "off",
+    });
+    expect(byKey["guard"]!.summary).toContain("without a pre-check");
     // A configured machine policy is the ceiling — its posture word surfaces.
     expect(byKey["machine-policy"]!.summary).toContain("restrictive");
     expect(byKey["machine-policy"]!.cost).toContain("no repo or UI can loosen");
     // Registered gateway → live serving on, with the inert-until-reviewed fact.
-    expect(byKey["gateway"]).toMatchObject({ level: "ok", label: "Live serving" });
+    expect(byKey["gateway"]).toMatchObject({ level: "ok", label: "Live serving", state: "on" });
     expect(byKey["gateway"]!.summary).toContain("stay inert");
     // Standing run tiers never claim to be active and name their real costs.
-    expect(byKey["locked-run"]).toMatchObject({ level: "muted" });
+    // `state: null` is the load-bearing half of "never claim to be active":
+    // these are capabilities of the binary, so there is no state to report and
+    // the panel must not draw an on/off chip for them.
+    expect(byKey["locked-run"]).toMatchObject({ level: "muted", state: null });
     expect(byKey["locked-run"]!.cost).toContain("not kernel isolation");
-    expect(byKey["sandbox"]).toMatchObject({ level: "muted" });
+    expect(byKey["locked-run"]!.command).toContain("--locked");
+    expect(byKey["sandbox"]).toMatchObject({ level: "muted", state: null });
     expect(byKey["sandbox"]!.cost).toContain("needs Docker");
+    expect(byKey["sandbox"]!.command).toContain("--sandbox");
   });
 
   it("shows an unconfigured machine policy as a fact with the exact place to add one", () => {
@@ -187,8 +296,8 @@ describe("deriveAgentstackProtectionRows", () => {
     };
     const rows = deriveAgentstackProtectionRows(unconfigured);
     const machine = rows.find((r) => r.key === "machine-policy");
-    expect(machine).toMatchObject({ level: "muted" });
-    expect(machine!.summary).toContain("none");
+    expect(machine).toMatchObject({ level: "muted", state: "unset" });
+    expect(machine!.summary).toContain("its own limits");
     expect(machine!.cost).toContain("~/.agentstack/agentstack.toml");
   });
 });
@@ -320,6 +429,82 @@ describe("selectAgentstackUndoEntry", () => {
     expect(
       selectAgentstackUndoEntry([entry({ touches_project: false }), entry({ undone: true })]),
     ).toBeNull();
+  });
+});
+
+describe("selectAgentstackUndoView", () => {
+  const entry = (over: Partial<AgentstackRestoreEntryLike>): AgentstackRestoreEntryLike => ({
+    id: "a".repeat(16),
+    time_unix: 1_000,
+    scope: "project",
+    summary: "1 file",
+    undone: false,
+    touches_project: true,
+    ...over,
+  });
+
+  it("counts the newer machine-wide entries it is deliberately not offering", () => {
+    // The real ledger after a machine-wide apply and a `use web` elsewhere: the
+    // drawer still acts on this project's own last change, and now says how
+    // much newer history it is not the front of.
+    const view = selectAgentstackUndoView([
+      entry({ id: "global-apply", time_unix: 900, scope: "global", touches_project: false }),
+      entry({ id: "use-web", time_unix: 800, touches_project: false }),
+      entry({ id: "project-apply", time_unix: 500, operation: "apply" }),
+      // Older than the selection, so not "newer"; already undone, so not counted.
+      entry({ id: "older-elsewhere", time_unix: 200, touches_project: false }),
+      entry({ id: "undone-elsewhere", time_unix: 950, touches_project: false, undone: true }),
+    ]);
+    expect(view.entry?.id).toBe("project-apply");
+    expect(view.entry?.operation).toBe("apply");
+    expect(view.newerElsewhere).toBe(2);
+  });
+
+  it("counts nothing when there is nothing selected", () => {
+    expect(selectAgentstackUndoView([])).toEqual({ entry: null, newerElsewhere: 0 });
+    // Every project entry already undone → no selection, so no "newer" either.
+    expect(
+      selectAgentstackUndoView([
+        entry({ id: "done", undone: true }),
+        entry({ id: "elsewhere", time_unix: 9_000, touches_project: false }),
+      ]),
+    ).toEqual({ entry: null, newerElsewhere: 0 });
+  });
+});
+
+describe("matchAgentstackTrustRefusal", () => {
+  it("recognizes the CLI's session refusal, prefixed or not", () => {
+    expect(
+      matchAgentstackTrustRefusal(
+        "error: refusing to start a session: the manifest or lockfile changed since this project was trusted — review with `agentstack trust` (or the UI trust review), then retry",
+      ),
+    ).toBe(true);
+    expect(matchAgentstackTrustRefusal("Refusing to start a session: not trusted")).toBe(true);
+    // Either half is enough — the wording travels between CLI versions.
+    expect(matchAgentstackTrustRefusal("run `agentstack trust` first")).toBe(true);
+  });
+
+  it("is false for an ordinary failure and for nothing at all", () => {
+    expect(matchAgentstackTrustRefusal("session start failed: profile 'web' not found")).toBe(
+      false,
+    );
+    expect(matchAgentstackTrustRefusal("")).toBe(false);
+    expect(matchAgentstackTrustRefusal(null)).toBe(false);
+    expect(matchAgentstackTrustRefusal(undefined)).toBe(false);
+    // Malformed input from a CLI that answered with something else entirely.
+    expect(matchAgentstackTrustRefusal(42 as unknown as string)).toBe(false);
+  });
+});
+
+describe("stripAgentstackErrorPrefix", () => {
+  it("drops only the stream marker, leaving the CLI's sentence verbatim", () => {
+    expect(stripAgentstackErrorPrefix("error: refusing to start a session: x")).toBe(
+      "refusing to start a session: x",
+    );
+    expect(stripAgentstackErrorPrefix("ERROR:  spaced")).toBe("spaced");
+    expect(stripAgentstackErrorPrefix("no marker here")).toBe("no marker here");
+    // Never a second one — only the leading marker is the stream's.
+    expect(stripAgentstackErrorPrefix("error: error: twice")).toBe("error: twice");
   });
 });
 
@@ -647,8 +832,19 @@ describe("matchAgentstackNextAction", () => {
     ).toBeNull();
   });
 
+  it("routes the trust recommendation to the review, in both spellings", () => {
+    // Not a write: `review-trust` is a destination, and every consumer sends it
+    // to the review screen rather than the action RPC. Recommending it as
+    // unclickable text was the panel's longest-standing dead end.
+    expect(matchAgentstackNextAction("agentstack trust")).toBe("review-trust");
+    expect(matchAgentstackNextAction("agentstack trust .")).toBe("review-trust");
+    expect(matchAgentstackNextAction("  agentstack   trust  . ")).toBe("review-trust");
+    // Still exact — a flag-laden or scoped trust command is not this one.
+    expect(matchAgentstackNextAction("agentstack trust --yes")).toBeNull();
+    expect(matchAgentstackNextAction("agentstack trust ./sub")).toBeNull();
+  });
+
   it("returns null for anything it does not exactly recognize", () => {
-    expect(matchAgentstackNextAction("agentstack trust .")).toBeNull();
     expect(matchAgentstackNextAction("agentstack secret set GH_PAT")).toBeNull();
     expect(matchAgentstackNextAction("agentstack apply")).toBeNull();
     expect(matchAgentstackNextAction(null)).toBeNull();
@@ -777,6 +973,68 @@ describe("deriveAgentstackFindings", () => {
     expect(f?.section).toBe("Drift");
   });
 
+  it("maps a fix naming `agentstack trust` to the review, not to nothing", () => {
+    const [f] = deriveAgentstackFindings(
+      report([
+        {
+          title: "Trust",
+          lines: [
+            {
+              level: "error",
+              msg: "this project is not trusted at its current bytes ↳ agentstack trust",
+            },
+          ],
+        },
+      ]),
+    );
+    expect(f?.fix).toBe("agentstack trust");
+    expect(f?.action).toBe("review-trust");
+  });
+
+  it("offers the review for the wordings doctor actually writes", () => {
+    // The re-gated project's own checkup line reads "review + agentstack
+    // trust", and the untrusted-with-gateway line appends the project root.
+    // Neither is an exact whitelist entry, and both are the finding that makes
+    // every other one moot — so the review is keyed on the command being NAMED.
+    const [drifted] = deriveAgentstackFindings(
+      report([
+        {
+          title: "Zero-files gateway",
+          lines: [
+            {
+              level: "warn",
+              msg: "trusted, but the manifest or lockfile changed since ↳ review + agentstack trust",
+            },
+          ],
+        },
+      ]),
+    );
+    expect(drifted?.action).toBe("review-trust");
+
+    const [untrusted] = deriveAgentstackFindings(
+      report([
+        {
+          title: "Zero-files gateway",
+          lines: [
+            {
+              level: "warn",
+              msg: "not trusted — 2 CLI(s) use the gateway ↳ agentstack trust /Users/ada/proj",
+            },
+          ],
+        },
+      ]),
+    );
+    expect(untrusted?.action).toBe("review-trust");
+
+    // Word-bounded: a longer verb is not `trust`.
+    const [other] = deriveAgentstackFindings(
+      report([
+        { title: "Skills", lines: [{ level: "warn", msg: "x ↳ agentstack trust-store list" }] },
+      ]),
+    );
+    expect(other?.action).toBeNull();
+  });
+
   it("keeps a two-option remedy as two options, not one unrunnable line", () => {
     const [f] = deriveAgentstackFindings(
       report([
@@ -843,14 +1101,14 @@ describe("deriveAgentstackFindings", () => {
           title: "Adapters & CLIs",
           lines: [
             { level: "warn", msg: "VS Code config present but binary not on PATH" },
-            { level: "warn", msg: "needs review ↳ agentstack trust ." },
+            { level: "warn", msg: "needs a secret ↳ agentstack secret set GH_PAT" },
           ],
         },
       ]),
     );
     expect(found[0]?.fix).toBeNull();
     expect(found[0]?.action).toBeNull();
-    expect(found[1]?.fix).toBe("agentstack trust .");
+    expect(found[1]?.fix).toBe("agentstack secret set GH_PAT");
     expect(found[1]?.action).toBeNull();
   });
 
@@ -909,13 +1167,13 @@ describe("deriveAgentstackFindings", () => {
 
 describe("formatAgentstackCheckupSummary", () => {
   it("pluralizes each count and keeps the promise that every finding names a fix", () => {
-    expect(formatAgentstackCheckupSummary(1, 7)).toBe("1 error · 7 warnings — each names its fix");
-    expect(formatAgentstackCheckupSummary(2, 1)).toBe("2 errors · 1 warning — each names its fix");
+    expect(formatAgentstackCheckupSummary(1, 7)).toBe("1 error · 7 warnings — open the list below");
+    expect(formatAgentstackCheckupSummary(2, 1)).toBe("2 errors · 1 warning — open the list below");
   });
 
   it("names only the level that exists, and says nothing is wrong when nothing is", () => {
-    expect(formatAgentstackCheckupSummary(0, 1)).toBe("1 warning — each names its fix");
-    expect(formatAgentstackCheckupSummary(3, 0)).toBe("3 errors — each names its fix");
+    expect(formatAgentstackCheckupSummary(0, 1)).toBe("1 warning — open the list below");
+    expect(formatAgentstackCheckupSummary(3, 0)).toBe("3 errors — open the list below");
     expect(formatAgentstackCheckupSummary(0, 0)).toBe("all checks pass");
   });
 });
@@ -1159,10 +1417,28 @@ describe("agentstackFindingAction", () => {
 
   it("offers nothing for a fix the panel cannot run, however advertised", () => {
     expect(
-      agentstackFindingAction({ ...runnable, fix: "agentstack trust .", action: null }, [
+      agentstackFindingAction({ ...runnable, fix: "agentstack secret set GH_PAT", action: null }, [
         "status-v1",
       ]),
     ).toBeNull();
+  });
+
+  it("offers the trust review on every binary — the gate is about running fixes", () => {
+    // `status-v1` gates offering to RUN a command scraped out of doctor's prose.
+    // The trust review runs nothing; it is this panel's own screen, and the
+    // finding that names `agentstack trust` is the one that must never be left
+    // as text.
+    const trust: AgentstackFinding = {
+      ...runnable,
+      key: "Trust:0",
+      fix: "agentstack trust",
+      fixOptions: [{ label: null, text: "agentstack trust", isCommand: true }],
+      action: "review-trust",
+      section: "Trust",
+    };
+    expect(agentstackFindingAction(trust, ["status-v1"])).toBe("review-trust");
+    expect(agentstackFindingAction(trust, undefined)).toBe("review-trust");
+    expect(agentstackFindingAction(trust, [])).toBe("review-trust");
   });
 
   it("never turns drift into one click, wherever it is rendered", () => {
@@ -1700,5 +1976,101 @@ describe("describeAgentstackProbeSkip", () => {
 
   it("offers no review for an unexplained skip", () => {
     expect(describeAgentstackProbeSkip(null).reviewTrust).toBe(false);
+  });
+});
+
+describe("parseAgentstackDiff", () => {
+  it("classifies and counts add/delete lines without counting the file headers", () => {
+    // `--- a/x` and `+++ b/x` open with the same markers as content lines; a
+    // naive split counts them as one deletion and one addition per file.
+    const parsed = parseAgentstackDiff(
+      [
+        "--- a/.codex/config.toml",
+        "+++ b/.codex/config.toml",
+        "@@ -1,3 +1,3 @@",
+        " keep = 1",
+        "-startup_timeout_sec = 20",
+        "+startup_timeout_sec = 30",
+      ].join("\n"),
+    );
+    expect(parsed).toMatchObject({ additions: 1, deletions: 1, truncated: false });
+    expect(parsed.lines.map((l) => l.kind)).toEqual([
+      "meta",
+      "meta",
+      "hunk",
+      "context",
+      "del",
+      "add",
+    ]);
+  });
+
+  it("strips the marker so every line starts in the same column", () => {
+    const parsed = parseAgentstackDiff(["+added", "-removed", " context"].join("\n"));
+    expect(parsed.lines.map((l) => l.text)).toEqual(["added", "removed", "context"]);
+  });
+
+  it("counts the whole diff even where it stops drawing it", () => {
+    // The header stat is a claim about the change, not about how much fits on
+    // screen — a capped render that also capped the count would understate it.
+    const parsed = parseAgentstackDiff(Array.from({ length: 400 }, () => "+x").join("\n"));
+    expect(parsed.additions).toBe(400);
+    expect(parsed.truncated).toBe(true);
+    expect(parsed.lines.length).toBeLessThan(400);
+  });
+
+  it("degrades to nothing on empty input", () => {
+    expect(parseAgentstackDiff("")).toMatchObject({ additions: 0, deletions: 0, lines: [] });
+  });
+});
+
+describe("groupAgentstackFindingViews", () => {
+  const view = (
+    section: string,
+    key: string,
+    level: "warn" | "error" = "warn",
+    action: "review-trust" | null = null,
+  ) => ({
+    finding: {
+      key,
+      level,
+      message: `${key} message`,
+      fix: null,
+      fixOptions: [],
+      action: null,
+      section,
+    },
+    action,
+  });
+
+  it("folds one section into one block, preserving first-appearance order", () => {
+    const groups = groupAgentstackFindingViews([
+      view("Drift", "d1"),
+      view("Adapters & CLIs", "a1"),
+      view("Drift", "d2"),
+      view("Drift", "d3"),
+    ]);
+    expect(groups.map((g) => g.section)).toEqual(["Drift", "Adapters & CLIs"]);
+    expect(groups[0]!.items).toHaveLength(3);
+  });
+
+  it("takes the worst level in the group, so a note cannot hide a blocker", () => {
+    const groups = groupAgentstackFindingViews([
+      view("Drift", "d1", "warn"),
+      view("Drift", "d2", "error"),
+    ]);
+    expect(groups[0]!.level).toBe("error");
+  });
+
+  it("surfaces the group's one action rather than repeating it per finding", () => {
+    const groups = groupAgentstackFindingViews([
+      view("Trust", "t1", "warn", null),
+      view("Trust", "t2", "warn", "review-trust"),
+    ]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.action).toBe("review-trust");
+  });
+
+  it("reports no action for a group where none was offered", () => {
+    expect(groupAgentstackFindingViews([view("Drift", "d1")])[0]!.action).toBeNull();
   });
 });

@@ -28,7 +28,8 @@ import type {
   ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
-import { Fragment, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { ChevronRight, ScrollText, Workflow } from "lucide-react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { useAgentstackPanelStore, type AgentstackPanelTab } from "~/agentstackPanelStore";
 import { useRightPanelStore } from "~/rightPanelStore";
@@ -57,8 +58,11 @@ import {
   DialogPopup,
   DialogTitle,
 } from "../ui/dialog";
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
+import { DiffStatLabel, hasNonZeroStat } from "../chat/DiffStatLabel";
 import { AgentstackMark } from "./AgentstackMark";
+import { DiffLines } from "./DiffLines";
 import {
   AGENTSTACK_ACTION_META as ACTION_META,
   agentstackFeatureKnownMissing,
@@ -72,6 +76,7 @@ import {
   deriveAgentstackShareFacts,
   deriveAgentstackProtectionRows,
   deriveAgentstackStatusChip,
+  describeAgentstackDriftStory,
   describeAgentstackProbeSkip,
   describeAgentstackSerialRoles,
   deriveAgentstackTrustBadge,
@@ -86,17 +91,23 @@ import {
   formatAgentstackImportSummary,
   hasAgentstackFeature,
   matchAgentstackNextAction,
+  matchAgentstackTrustRefusal,
+  parseAgentstackDiff,
+  groupAgentstackFindingViews,
   partitionAgentstackOverviewRows,
   selectAgentstackFindingsView,
   selectAgentstackPrimaryConcern,
-  selectAgentstackUndoEntry,
+  selectAgentstackUndoView,
   shortDigest,
   shortenAgentstackPath,
   shortenAgentstackPathsIn,
+  stripAgentstackErrorPrefix,
   summarizeAgentstackHealthyRows,
   type AgentstackActionKind as ActionKind,
+  type AgentstackPanelActionKind as PanelActionKind,
   type AgentstackFinding,
   type AgentstackOverviewRow,
+  type AgentstackParsedDiff,
   type AgentstackPrimaryConcern,
   type AgentstackRowLevel,
   type AgentstackToolsetRow,
@@ -221,6 +232,21 @@ const LIVE_REFRESH_MS = 5_000;
  */
 const IDLE_REFRESH_MS = 30_000;
 
+/**
+ * How the header button gets something to say before anyone clicks it.
+ *
+ * The main poll only runs while a surface is open, so the trigger could not
+ * report "needs you" until you had already opened the panel and found out — a
+ * status affordance whose state arrives after the moment it exists for. A
+ * single read on mount is not enough either: the thread mounts before the RPC
+ * layer is connected, and one shot that misses leaves the header silent for the
+ * rest of the session. So: retry at a slow cadence until the first read lands,
+ * then stop. Bounded, because a host that never answers must not turn this into
+ * a permanent background poll.
+ */
+const PRIME_RETRY_MS = 4_000;
+const PRIME_MAX_ATTEMPTS = 5;
+
 type Tab = AgentstackPanelTab;
 
 /**
@@ -237,6 +263,17 @@ const MANAGE_TABS: ReadonlyArray<{ id: Tab; label: string }> = [
   { id: "protection", label: "Protection" },
   { id: "activity", label: "Activity" },
 ];
+
+/**
+ * Where a child screen was opened from, so closing it goes back there instead
+ * of dumping you in the chat thread.
+ *
+ * The child screens are siblings of the Manage dialog, not descendants of it,
+ * so the opener has to close Manage before showing one. Without a recorded
+ * origin, cancelling a review you reached from Manage left nothing on screen —
+ * the panel had effectively lost your place.
+ */
+type ChildOrigin = { kind: "manage"; tab: Tab } | { kind: "trust" };
 
 type ActionState =
   | { phase: "idle" }
@@ -336,17 +373,53 @@ export function AgentstackControl({
     cwd: string;
     relativePath: string;
   } | null>(null);
+  /**
+   * The screens to come back to as child screens close, innermost last.
+   *
+   * A stack because a child can open a child: the trust review hands you the
+   * manifest editor, and closing the editor has to land back on the review —
+   * which itself may still owe a return to Manage. Empty means the child was
+   * opened straight from the popover, whose behaviour is to close to the thread.
+   */
+  const [originStack, setOriginStack] = useState<ReadonlyArray<ChildOrigin>>([]);
+  /** Re-runs the prime effect after a failed attempt; see PRIME_RETRY_MS. */
+  const [primeTick, setPrimeTick] = useState(0);
 
   /** Open a reading screen: the popover yields so only one surface is up. */
   const openReader = useCallback((show: (v: true) => void) => {
     setOpen(false);
+    // Opened from the popover, so there is nowhere to return to. Clearing is
+    // what keeps a stale entry from resurrecting a dialog later.
+    setOriginStack([]);
     show(true);
   }, []);
   /** Same, for the tabbed Manage dialog. */
   const openManage = useCallback((t: Tab) => {
     setOpen(false);
+    setOriginStack([]);
     setManageTab(t);
   }, []);
+  /** Leave Manage for a child screen, remembering the tab to come back to. */
+  const leaveManageFor = useCallback(
+    (show: (v: true) => void) => {
+      if (manageTab !== null) setOriginStack((s) => [...s, { kind: "manage", tab: manageTab }]);
+      setManageTab(null);
+      show(true);
+    },
+    [manageTab],
+  );
+  /** Close a child screen and reopen whatever it was opened from. */
+  const closeChild = useCallback(
+    (hide: () => void) => {
+      hide();
+      const back = originStack.at(-1);
+      if (back === undefined) return;
+      setOriginStack((s) => s.slice(0, -1));
+      if (back.kind === "manage") setManageTab(back.tab);
+      else setReviewing(true);
+    },
+    [originStack],
+  );
   // The 1c expanded monitor: which run it shows, and (for recorded runs) the
   // evidence fetched for it. A live target reads the polled activeRun instead.
   const [monitorTarget, setMonitorTarget] = useState<{
@@ -422,6 +495,25 @@ export function AgentstackControl({
     const timer = setInterval(() => void refresh(), period);
     return () => clearInterval(timer);
   }, [open, monitorTarget, manageTab, watchingRun, refresh]);
+
+  // Prime the trigger — see PRIME_RETRY_MS. Runs only while there is no status
+  // yet and nothing is open; the poll above owns every read after the first.
+  const primeAttempts = useRef(0);
+  useEffect(() => {
+    if (status !== null) return;
+    if (open || manageTab !== null || monitorTarget !== null) return;
+    if (primeAttempts.current >= PRIME_MAX_ATTEMPTS) return;
+    primeAttempts.current += 1;
+    void refresh();
+    const timer = setTimeout(() => {
+      // Bumping the ref alone would not re-run this effect; the status update
+      // that `refresh` performs is what re-evaluates it, and when the read
+      // failed there is none. Forcing a re-render is what makes the retry a
+      // retry rather than a single missed shot.
+      setPrimeTick((t) => t + 1);
+    }, PRIME_RETRY_MS);
+    return () => clearTimeout(timer);
+  }, [status, open, manageTab, monitorTarget, refresh, primeTick]);
 
   // React to "open me on tab X" requests from elsewhere (e.g. a guard-denial
   // card's "View in audit log"). The nonce makes repeat requests re-fire.
@@ -729,21 +821,34 @@ export function AgentstackControl({
   // right-panel editor; a new-task draft has no server-side thread yet, so it
   // gets the same project file through the focused editor dialog below.
   const manifestSource = toolsets?.toolsets ?? null;
-  const onOpenManifest = useMemo(() => {
+  const openManifest = useMemo(() => {
     const absolute = manifestSource?.manifest_path ?? null;
     const base = manifestSource?.path ?? null;
     if (absolute === null || base === null) return null;
     const relative = relativeToBase(base, absolute);
     if (relative === null) return null;
-    return () => {
+    return (from: ChildOrigin | null) => {
       setManageTab(null);
       if (threadId !== undefined) {
+        // The right-panel editor is not a dialog: no close of ours will fire to
+        // hand control back, so this path records no origin and drops any it
+        // was handed — the panel is gone either way.
+        setOriginStack([]);
         useRightPanelStore.getState().openFile({ environmentId, threadId }, relative);
-      } else {
-        setEditingManifest({ cwd: base, relativePath: relative });
+        return;
       }
+      if (from !== null) setOriginStack((s) => [...s, from]);
+      setEditingManifest({ cwd: base, relativePath: relative });
     };
   }, [manifestSource, threadId, environmentId]);
+  /** The zero-argument form the Manage tabs pass straight to a button. */
+  const onOpenManifest = useMemo(
+    () =>
+      openManifest === null
+        ? null
+        : () => openManifest(manageTab === null ? null : { kind: "manage", tab: manageTab }),
+    [openManifest, manageTab],
+  );
 
   // Run the concern's one verb. `manage` and the two review kinds open a
   // surface; only `action` writes, and it still goes through the confirm step.
@@ -779,16 +884,45 @@ export function AgentstackControl({
         }}
         open={open}
       >
-        <PopoverTrigger render={<Button aria-label="AgentStack" size="xs" variant="outline" />}>
+        <PopoverTrigger
+          render={
+            <Button
+              aria-label={
+                activeRun
+                  ? "AgentStack — a workflow is running"
+                  : posture === "attention"
+                    ? "AgentStack — needs you"
+                    : "AgentStack"
+              }
+              size="xs"
+              variant="outline"
+            />
+          }
+        >
           <AgentstackMark className="size-3.5" />
-          {/* The header dot is the same claim the panel makes when opened:
-              the shared posture, or a live run. Deriving it separately is how
-              the icon ends up warning about something the panel then doesn't
-              show. */}
+          {/* Same claim the panel makes when opened: the shared posture, or a
+              live run. Deriving it separately is how the icon ends up warning
+              about something the panel then doesn't show.
+
+              A word, not only a dot. Unlabelled and 6px wide among five other
+              header icons, the dot was a state nobody was going to notice —
+              and noticing is the entire job of a status affordance. The label
+              appears only when there is something to say, so a healthy project
+              keeps the compact icon. */}
           {activeRun ? (
-            <span aria-hidden className="-mr-0.5 size-1.5 rounded-full bg-warning animate-pulse" />
+            <>
+              <span aria-hidden className="size-1.5 rounded-full bg-warning animate-pulse" />
+              <span aria-hidden className="text-warning-foreground">
+                Running
+              </span>
+            </>
           ) : posture === "attention" ? (
-            <span aria-hidden className="-mr-0.5 size-1.5 rounded-full bg-warning" />
+            <>
+              <span aria-hidden className="size-1.5 rounded-full bg-warning" />
+              <span aria-hidden className="text-warning-foreground">
+                Needs you
+              </span>
+            </>
           ) : null}
         </PopoverTrigger>
         <PopoverPopup align="end" className="w-[400px] p-0" side="bottom">
@@ -887,21 +1021,30 @@ export function AgentstackControl({
               ) : null}
 
               {/* Footer — one sentence about everything not shown, and the
-                  door to it. */}
+                  door to it. The count of what is not on screen rides ON that
+                  door: "7 more findings in Manage" set in muted grey at the far
+                  left, with the only way to reach them at the far right, made
+                  the number read as a warning you could not act on. */}
               <div className="flex items-center gap-2 border-t border-border/60 px-4 py-2.5">
                 <span className="min-w-0 flex-1 truncate text-[11.5px] text-muted-foreground">
                   {concern
                     ? concern.others > 0
-                      ? `${formatAgentstackCount(concern.others, "more finding")} in Manage`
+                      ? "More to review"
                       : "Nothing else needs you."
                     : (healthyLine ?? "This project is set up and in sync.")}
                 </span>
                 <button
                   type="button"
                   onClick={() => openManage("setup")}
-                  className="shrink-0 text-[11.5px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+                  className="flex shrink-0 items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-foreground/[0.05] hover:text-foreground"
                 >
-                  Manage ›
+                  Manage
+                  {concern && concern.others > 0 ? (
+                    <span className="rounded bg-warning/15 px-1 py-px text-[10px] font-semibold text-warning-foreground">
+                      {concern.others}
+                    </span>
+                  ) : null}
+                  <span aria-hidden>›</span>
                 </button>
               </div>
             </>
@@ -932,10 +1075,7 @@ export function AgentstackControl({
           onRequestProbe={() => setProbeState({ phase: "confirm" })}
           onConfirmProbe={onProbe}
           onCancelProbe={() => setProbeState({ phase: "idle" })}
-          onReviewTrust={() => {
-            setManageTab(null);
-            setReviewing(true);
-          }}
+          onReviewTrust={() => leaveManageFor(setReviewing)}
           canSessions={canSessions}
           sessionsKnownMissing={sessionsKnownMissing}
           canEditProfiles={canEditProfiles}
@@ -948,10 +1088,7 @@ export function AgentstackControl({
           onRequestAction={(a) => setActionState({ phase: "confirm", action: a })}
           onConfirm={onAction}
           onCancelAction={() => setActionState({ phase: "idle" })}
-          onReviewDrift={() => {
-            setManageTab(null);
-            setReviewingDrift(true);
-          }}
+          onReviewDrift={() => leaveManageFor(setReviewingDrift)}
           onOpenRun={(r) => setMonitorTarget({ runId: r.run, summary: r })}
           loadRestoreInventory={loadRestoreInventory}
           onUndo={onUndo}
@@ -970,24 +1107,24 @@ export function AgentstackControl({
         <PanelDialog
           title="Review this project"
           description="What this project would be allowed to run here, before you approve it."
-          onClose={() => setReviewing(false)}
+          onClose={() => closeChild(() => setReviewing(false))}
           bodyScroll={false}
         >
           <TrustReviewPanel
             loadPreview={loadPreview}
             onTrust={onTrust}
-            onClose={() => setReviewing(false)}
+            onClose={() => closeChild(() => setReviewing(false))}
             trustConsentMissing={trustConsentMissing}
             canRemoveCapabilities={canRemoveCapabilities}
             previewProfileEdit={previewProfileEdit}
             applyProfileEdit={applyProfileEdit}
             onEditManifest={
-              onOpenManifest
-                ? () => {
+              openManifest === null
+                ? null
+                : () => {
                     setReviewing(false);
-                    onOpenManifest();
+                    openManifest({ kind: "trust" });
                   }
-                : null
             }
           />
         </PanelDialog>
@@ -996,10 +1133,14 @@ export function AgentstackControl({
         <PanelDialog
           title="Review drift"
           description="What changed on disk since AgentStack last wrote, and which truth to keep."
-          onClose={() => setReviewingDrift(false)}
+          onClose={() => closeChild(() => setReviewingDrift(false))}
           width="max-w-3xl"
         >
-          <DriftReviewPanel loadDiff={loadDiff} onAction={runDriftAction} />
+          <DriftReviewPanel
+            loadDiff={loadDiff}
+            onAction={runDriftAction}
+            root={manifestSource?.path}
+          />
         </PanelDialog>
       ) : null}
       {settingUp ? (
@@ -1023,7 +1164,7 @@ export function AgentstackControl({
         <PanelDialog
           title="Edit AgentStack manifest"
           description="Review the project's source of truth before deciding whether to trust it."
-          onClose={() => setEditingManifest(null)}
+          onClose={() => closeChild(() => setEditingManifest(null))}
           width="max-w-3xl"
           bodyScroll={false}
         >
@@ -1031,9 +1172,11 @@ export function AgentstackControl({
             environmentId={environmentId}
             cwd={editingManifest.cwd}
             relativePath={editingManifest.relativePath}
-            onClose={() => setEditingManifest(null)}
+            onClose={() => closeChild(() => setEditingManifest(null))}
             onSaved={() => {
-              setEditingManifest(null);
+              // Saving is also a close: it returns to the trust review, which
+              // is where the edited bytes have to be looked at again.
+              closeChild(() => setEditingManifest(null));
               void refresh();
             }}
           />
@@ -1881,8 +2024,6 @@ type DriftAct =
   | { phase: "running" }
   | { phase: "done"; ok: boolean; message: string };
 
-const DIFF_MAX = 6_000;
-
 /** Unique server names a default render would keep (spare) across a scope. */
 function keptServers(report: AgentstackDiffReport): string[] {
   return [...new Set(report.targets.flatMap((t) => t.kept))];
@@ -1907,9 +2048,12 @@ function keptServers(report: AgentstackDiffReport): string[] {
 function DriftReviewPanel({
   loadDiff,
   onAction,
+  root,
 }: {
   loadDiff: (scope: "global" | "project") => Promise<AgentstackDiffResult | null>;
   onAction: (action: ActionKind) => Promise<{ ok: boolean; message: string }>;
+  /** Project root, so target paths read relative to the repo. */
+  root: string | undefined;
 }) {
   const [load, setLoad] = useState<DriftLoad>({ phase: "loading" });
   const [act, setAct] = useState<DriftAct>({ phase: "idle" });
@@ -1957,8 +2101,8 @@ function DriftReviewPanel({
         <p className="px-4 py-4 text-xs text-muted-foreground">Loading drift…</p>
       ) : load.phase === "error" ? (
         <p className="px-4 py-4 text-xs leading-relaxed text-muted-foreground">
-          Couldn't compute the drift preview — <code className="font-mono">agentstack diff</code>{" "}
-          didn't return a report.
+          Couldn&apos;t compare this project against what AgentStack last wrote. Close this and
+          check setup again.
         </p>
       ) : !anyContent ? (
         <p className="px-4 py-4 text-xs leading-relaxed text-muted-foreground">
@@ -1973,6 +2117,7 @@ function DriftReviewPanel({
                 key={scope}
                 scope={scope}
                 report={report}
+                root={root}
                 disabled={running}
                 onPick={(action) => void run(action)}
               />
@@ -2000,58 +2145,98 @@ function DriftReviewPanel({
               <span className="break-words font-mono text-muted-foreground">{act.message}</span>
             </div>
           ) : null}
-
-          <p className="text-[10.5px] leading-relaxed text-muted-foreground/60">
-            Full line-by-line diff:{" "}
-            <code className="font-mono">agentstack diff --scope global</code> in a terminal.
-            Machine-wide global config is best managed from{" "}
-            <code className="font-mono">agentstack</code> directly.
-          </p>
         </div>
       )}
     </div>
   );
 }
 
-/** One scope's drift: pending re-renders (adopt/apply) and foreign-kept servers (adopt only). */
+/**
+ * One scope's drift: pending re-renders (adopt/apply) and foreign-kept servers
+ * (adopt only).
+ *
+ * The question comes before the evidence. The diffs used to sit above the two
+ * buttons, so answering "which truth do I keep?" meant scrolling past every
+ * changed line of every target first — with three drifted CLIs that is roughly
+ * 900 lines between the prompt and the answer. Now the story and the two verbs
+ * are at the top and the per-file diffs are collapsed underneath, to open when
+ * you want to check one.
+ */
 function DriftScopeSection({
   scope,
   report,
+  root,
   disabled,
   onPick,
 }: {
   scope: "global" | "project";
   report: AgentstackDiffReport;
+  /** Project root, so a target path reads `.codex/config.toml`, not `/Users/…`. */
+  root: string | undefined;
   disabled: boolean;
   onPick: (action: ActionKind) => void;
 }) {
-  const changed = report.targets.filter((t) => t.changed);
-  const kept = keptServers(report);
+  // Parsed once here and handed down: the section header needs the totals and
+  // each row needs its own lines, and parsing the same text twice for one
+  // target is wasted work on diffs this size. Keyed on `report` because
+  // `targets` is re-filtered on every render and would never memoize.
+  const { changed, kept, totals } = useMemo(() => {
+    const changed = report.targets
+      .filter((t) => t.changed)
+      .map((target) => ({ target, parsed: parseAgentstackDiff(target.diff) }));
+    return {
+      changed,
+      kept: [...new Set(report.targets.flatMap((t) => t.kept))],
+      totals: changed.reduce(
+        (acc, c) => ({
+          additions: acc.additions + c.parsed.additions,
+          deletions: acc.deletions + c.parsed.deletions,
+        }),
+        { additions: 0, deletions: 0 },
+      ),
+    };
+  }, [report]);
+
   if (changed.length === 0 && kept.length === 0) return null;
   // `changed` alone is not evidence of an edit: it is also true when the
   // manifest moved ahead of a file nobody touched. Only `hand_edited` says
   // somebody wrote to the file outside agentstack, so only that may be
   // narrated as an edit. Absent on older CLIs → we describe the difference
   // without claiming a cause.
-  const edited = changed.filter((t) => t.hand_edited === true).length;
+  const edited = changed.filter((c) => c.target.hand_edited === true).length;
 
-  const where = scope === "global" ? "global configs (~)" : "this repo";
+  const where = scope === "global" ? "Machine-wide configs" : "This project";
   const adopt: ActionKind = scope === "global" ? "adopt-global" : "adopt-project";
   const apply: ActionKind = scope === "global" ? "apply-global" : "apply-project";
 
   return (
-    <div className="flex flex-col gap-2">
-      <p className="text-xs font-semibold text-foreground">{where}</p>
+    <section className="flex flex-col gap-2.5">
+      <div className="flex items-baseline gap-2">
+        <h3 className="text-xs font-semibold text-foreground">{where}</h3>
+        {changed.length > 0 ? (
+          <span className="flex items-baseline gap-2 text-[11px] text-muted-foreground">
+            {formatAgentstackCount(changed.length, "file")}
+            {hasNonZeroStat(totals) ? (
+              <DiffStatLabel
+                additions={totals.additions}
+                deletions={totals.deletions}
+                className="text-[10.5px]"
+                layout="inline"
+              />
+            ) : null}
+          </span>
+        ) : null}
+      </div>
 
       {changed.length > 0 ? (
         <>
-          {changed.map((t) => (
-            <DriftTarget key={`${scope}-${t.id}`} target={t} />
-          ))}
           <p className="text-[11px] leading-relaxed text-muted-foreground">
-            {edited > 0
-              ? `The on-disk config in ${where} was edited outside agentstack. Pick which one is the truth.`
-              : `${where === "this repo" ? "This repo" : "Your global configs"} no longer match the manifest. Pick which one is the truth.`}
+            {describeAgentstackDriftStory({
+              scope,
+              changedCount: changed.length,
+              editedCount: edited,
+              neverRenderedCount: changed.filter((c) => c.target.existed_before === false).length,
+            })}
           </p>
           {/* Ranked, not paired: "Keep edits" only writes agentstack.toml, so
               it is the non-destructive answer and reads as the default.
@@ -2063,9 +2248,9 @@ function DriftScopeSection({
                 type="button"
                 disabled={disabled}
                 onClick={() => onPick(adopt)}
-                className="inline-flex h-7 shrink-0 items-center rounded-lg border border-success/40 bg-success/10 px-3 text-xs font-semibold text-success-foreground disabled:opacity-60"
+                className="inline-flex h-7 w-[6.5rem] shrink-0 items-center justify-center rounded-lg border border-success/40 bg-success/10 px-3 text-xs font-semibold text-success-foreground disabled:opacity-60"
               >
-                {edited > 0 ? "Keep edits" : "Keep what's on disk"}
+                {edited > 0 ? "Keep edits" : "Keep disk"}
               </button>
               <span className="text-[11px] leading-relaxed text-muted-foreground">
                 Pull what&apos;s on disk into this project&apos;s manifest. Only writes
@@ -2077,22 +2262,32 @@ function DriftScopeSection({
                 type="button"
                 disabled={disabled}
                 onClick={() => onPick(apply)}
-                className="inline-flex h-7 shrink-0 items-center rounded-lg border border-border/60 px-3 text-xs font-semibold text-muted-foreground hover:text-foreground disabled:opacity-60"
+                className="inline-flex h-7 w-[6.5rem] shrink-0 items-center justify-center rounded-lg border border-border/60 px-3 text-xs font-semibold text-muted-foreground hover:text-foreground disabled:opacity-60"
               >
                 Re-render
               </button>
               <span className="text-[11px] leading-relaxed text-muted-foreground">
                 Overwrite the file from the manifest. Other setups&apos; servers are kept, never
-                pruned; reversible with <code className="font-mono">agentstack restore</code>.
+                pruned, and the write is reversible from Undo.
               </span>
             </div>
+          </div>
+          <div className="flex flex-col gap-1">
+            {changed.map(({ target, parsed }) => (
+              <DriftTarget
+                key={`${scope}-${target.id}`}
+                target={target}
+                parsed={parsed}
+                root={root}
+              />
+            ))}
           </div>
         </>
       ) : (
         <>
           <p className="text-[11px] leading-relaxed text-muted-foreground">
-            {kept.length} server{kept.length === 1 ? "" : "s"} in {where} came from another setup
-            and {kept.length === 1 ? "is" : "are"} kept — this project doesn't manage{" "}
+            {formatAgentstackCount(kept.length, "server")} here came from another setup and{" "}
+            {kept.length === 1 ? "is" : "are"} kept — this project doesn&apos;t manage{" "}
             {kept.length === 1 ? "it" : "them"} and never removes{" "}
             {kept.length === 1 ? "it" : "them"}.
           </p>
@@ -2118,28 +2313,63 @@ function DriftScopeSection({
           </div>
         </>
       )}
-    </div>
+    </section>
   );
 }
 
-function DriftTarget({ target }: { target: AgentstackDiffTarget }) {
-  const diff = target.diff.length > DIFF_MAX ? `${target.diff.slice(0, DIFF_MAX)}\n…` : target.diff;
+/**
+ * One changed file: a summary row that expands into its diff.
+ *
+ * Collapsed by default — the decision is made per scope, not per file, so a
+ * diff is evidence you open when you want to check one.
+ */
+function DriftTarget({
+  target,
+  parsed,
+  root,
+}: {
+  target: AgentstackDiffTarget;
+  parsed: AgentstackParsedDiff;
+  root: string | undefined;
+}) {
+  const [open, setOpen] = useState(false);
+  const shown = shortenAgentstackPath(target.path, { root });
+  const stat = { additions: parsed.additions, deletions: parsed.deletions };
+  const hasDiff = parsed.lines.length > 0;
   return (
-    <div className="rounded-lg border border-border/50 bg-foreground/[0.02] px-2.5 py-2">
-      <p className="mb-1 truncate text-[11px] font-semibold text-foreground" title={target.path}>
-        {target.display}
-      </p>
-      <p
-        className="mb-1 truncate font-mono text-[10px] text-muted-foreground/70"
-        title={target.path}
+    <div className="overflow-hidden rounded-lg border border-border/50">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        disabled={!hasDiff}
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 px-2.5 py-2 text-left transition-colors hover:bg-foreground/[0.03] disabled:hover:bg-transparent"
       >
-        {target.path}
-      </p>
-      {diff ? (
-        <pre className="max-h-40 overflow-auto rounded bg-foreground/[0.03] p-2 font-mono text-[10px] leading-relaxed text-muted-foreground">
-          {diff}
-        </pre>
-      ) : null}
+        <ChevronRight
+          aria-hidden
+          className={cn(
+            "size-3 shrink-0 text-muted-foreground/70 transition-transform",
+            open && "rotate-90",
+            !hasDiff && "opacity-0",
+          )}
+        />
+        <span className="shrink-0 text-[11px] font-semibold text-foreground">{target.display}</span>
+        <span
+          className="min-w-0 flex-1 truncate font-mono text-[10px] text-muted-foreground/70"
+          title={target.path}
+        >
+          {shown}
+        </span>
+        {hasNonZeroStat(stat) ? (
+          <DiffStatLabel
+            additions={stat.additions}
+            deletions={stat.deletions}
+            className="shrink-0 text-[10px]"
+            layout="inline"
+          />
+        ) : null}
+      </button>
+      {open ? <DiffLines parsed={parsed} /> : null}
     </div>
   );
 }
@@ -2218,11 +2448,34 @@ interface ManageProps {
  */
 function ManageDialog(props: ManageProps) {
   const doctor = props.status?.doctor ?? null;
+  /**
+   * Set by the Toolsets tab while a preview or confirm sheet is up, cleared
+   * when it isn't. A ref, not state: nothing renders from it, it is only read
+   * inside the close handler, and making it state would re-render every tab on
+   * each phase change.
+   */
+  const cancelPendingEdit = useRef<(() => void) | null>(null);
+  const onPendingEdit = useCallback((cancel: (() => void) | null) => {
+    cancelPendingEdit.current = cancel;
+  }, []);
   return (
     <Dialog
       open
-      onOpenChange={(next) => {
-        if (!next) props.onClose();
+      // Backdrop clicks do not close this. It is a working surface holding
+      // half-finished edits, and a mis-aimed click outside the box is not an
+      // instruction to throw them away. The X and Escape still close.
+      disablePointerDismissal
+      onOpenChange={(next, details) => {
+        if (next) return;
+        // Escape while a consent step is pending cancels that step only. One
+        // keystroke used to close the whole dialog and take the collected ticks
+        // with it, with no confirmation and nothing to undo. A second Escape
+        // then closes, as usual.
+        if (details.reason === "escape-key" && cancelPendingEdit.current !== null) {
+          cancelPendingEdit.current();
+          return;
+        }
+        props.onClose();
       }}
     >
       <DialogPopup className="max-w-3xl">
@@ -2277,7 +2530,7 @@ function ManageDialog(props: ManageProps) {
               <SetupTab {...props} />
             </div>
           ) : props.tab === "toolsets" ? (
-            <ToolsetsTab {...props} />
+            <ToolsetsTab {...props} onPendingEdit={onPendingEdit} />
           ) : props.tab === "protection" ? (
             <div className="min-h-0 flex-1 overflow-y-auto">
               <TabSection title="Stronger modes" first />
@@ -2324,6 +2577,7 @@ function SetupTab(props: ManageProps) {
           nextAction={doctor.next_action ?? null}
           advisories={props.advisories}
           onRunNextAction={props.onRequestAction}
+          onReviewTrust={props.onReviewTrust}
         />
       ) : null}
       {problems.map((row) => (
@@ -2347,6 +2601,7 @@ function SetupTab(props: ManageProps) {
         features={props.features}
         onRequestAction={props.onRequestAction}
         onReviewDrift={props.onReviewDrift}
+        onReviewTrust={props.onReviewTrust}
         alreadyOffered={matchAgentstackNextAction(doctor.next_action ?? null)}
         defaultOpen
       />
@@ -2415,8 +2670,7 @@ export function StartupTest({
           Test server startup
         </Button>
         <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground/70">
-          actually starts each server, like{" "}
-          <code className="font-mono">agentstack doctor --probe</code>
+          actually starts each declared server, once
         </span>
       </div>
     );
@@ -2574,7 +2828,7 @@ function RecheckRow({
         </Button>
       ) : null}
       <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground/70">
-        re-runs the same checks as <code className="font-mono">agentstack doctor</code>
+        re-runs every check on this tab
       </span>
     </div>
   );
@@ -2589,7 +2843,16 @@ function RecheckRow({
  * already have. Here they are two views of one tab, so the answer to "do I
  * already have this?" is one click from the catalogue.
  */
-function ToolsetsTab(props: ManageProps) {
+function ToolsetsTab(
+  props: ManageProps & {
+    /**
+     * Hands Manage a way to cancel a pending consent step, so Escape can undo
+     * that step instead of closing the dialog on top of it. Null while there is
+     * nothing pending.
+     */
+    onPendingEdit: (cancel: (() => void) | null) => void;
+  },
+) {
   const [load, setLoad] = useState<LibLoad>({ phase: "loading" });
   const [query, setQuery] = useState("");
   const [flow, setFlow] = useState<EditFlow>({ phase: "idle" });
@@ -2752,6 +3015,27 @@ function ToolsetsTab(props: ManageProps) {
   const resetPending = useCallback(() => setPending({ add: [], remove: [] }), []);
   const pendingCount = pending.add.length + pending.remove.length;
 
+  // Only the two phases with a decision still open are Escape's business.
+  // `running` must not be cancellable — the write is already in flight — and
+  // `done`/`refused` are results, which Escape may close over.
+  const pendingEdit = flow.phase === "previewing" || flow.phase === "confirm";
+  const { onPendingEdit } = props;
+  useEffect(() => {
+    onPendingEdit(pendingEdit ? () => setFlow({ phase: "idle" }) : null);
+    return () => onPendingEdit(null);
+  }, [pendingEdit, onPendingEdit]);
+
+  /**
+   * The strip is the LAST child of a fixed-height tab, so on a tall library a
+   * confirm can render entirely below the fold — the click appears to have done
+   * nothing. Scroll it into view whenever the flow leaves idle.
+   */
+  const flowRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (flow.phase === "idle") return;
+    flowRef.current?.scrollIntoView({ block: "nearest" });
+  }, [flow.phase]);
+
   /** Apply the collected ticks as ONE batch under one digest. */
   const applyPending = useCallback(() => {
     if (selected === null || pendingCount === 0 || index === null) return;
@@ -2809,6 +3093,7 @@ function ToolsetsTab(props: ManageProps) {
           onDelete={(name) => void beginEdit({ kind: "delete-profile", name })}
           onStart={(name) => void runSession(name, () => props.onSessionStart(name))}
           onEnd={() => void runSession("__end__", props.onSessionEnd)}
+          onReviewTrust={props.onReviewTrust}
         />
         {props.canEditProfiles ? (
           <LibraryPane
@@ -2821,10 +3106,16 @@ function ToolsetsTab(props: ManageProps) {
             onToggleDraft={toggleDraft}
             canRemove={props.canRemoveFromLibrary}
             target={target}
-            canTick={props.canBatchEdit || draft !== null}
+            // A tick needs somewhere to go. With no toolset yet and no draft
+            // open, the column rendered a checkbox per row that could not be
+            // checked into anything — a grid of dead controls beside the very
+            // card asking you to create the first toolset. The batch contract
+            // being available is not the same as there being a destination.
+            canTick={(props.canBatchEdit && target !== null) || draft !== null}
             isTicked={isTicked}
             onToggleMember={toggleMember}
             untrusted={data !== null && data.trust !== "trusted"}
+            onReviewTrust={props.onReviewTrust}
             busy={flow.phase !== "idle"}
             onAdd={(group, name, profile) =>
               void beginEdit(
@@ -2882,7 +3173,10 @@ function ToolsetsTab(props: ManageProps) {
         // child resolves against a box whose own height is being negotiated,
         // which is how a confirm ends up either clipped or eating the panes
         // above it depending on how much text the CLI returned.
-        <div className="max-h-[236px] shrink-0 overflow-y-auto border-t border-border/60 bg-foreground/[0.02]">
+        <div
+          ref={flowRef}
+          className="max-h-[236px] shrink-0 overflow-y-auto border-t border-border/60 bg-foreground/[0.02]"
+        >
           <EditFlowCard
             flow={flow}
             createNeedsActivation={props.createNeedsActivation}
@@ -2893,6 +3187,7 @@ function ToolsetsTab(props: ManageProps) {
             onActivate={props.canSessions ? props.onSessionStart : null}
             onConfirm={confirmEdit}
             onBack={() => setFlow({ phase: "idle" })}
+            onReviewTrust={props.onReviewTrust}
           />
         </div>
       ) : null}
@@ -2925,6 +3220,7 @@ function ToolsetRail({
   onDelete,
   onStart,
   onEnd,
+  onReviewTrust,
 }: {
   rows: ReadonlyArray<AgentstackToolsetRow>;
   profiles: ReadonlyArray<AgentstackToolset>;
@@ -2948,6 +3244,12 @@ function ToolsetRail({
   onDelete: (name: string) => void;
   onStart: (name: string) => void;
   onEnd: () => void;
+  /**
+   * Open the trust review — for the rows the trust gate blocks, and for a
+   * session start it refused. Both used to end in a sentence naming a terminal
+   * command while the review sat one dialog away.
+   */
+  onReviewTrust: () => void;
 }) {
   const members = useMemo(() => new Map(profiles.map((p) => [p.name, p] as const)), [profiles]);
   // Which row is being renamed, and the text so far. Renaming in place keeps
@@ -3174,9 +3476,20 @@ function ToolsetRail({
                 {row.active && !held ? " · active" : ""}
               </span>
               {row.blockedBecause ? (
-                <span className="text-[10.5px] leading-snug text-warning-foreground">
-                  {row.blockedBecause}
-                </span>
+                <div className="flex flex-col items-start gap-1">
+                  <span className="text-[10.5px] leading-snug text-warning-foreground">
+                    {row.blockedBecause}
+                  </span>
+                  {/* The pointer text is the same for every row (one project,
+                      one trust state), so the button it needs is the same too.
+                      Keyed off the derived reason rather than the trust state
+                      the rail does not receive. */}
+                  {row.blockedBecause.includes("review this project") ? (
+                    <Button size="xs" variant="outline" onClick={onReviewTrust}>
+                      Review this project
+                    </Button>
+                  ) : null}
+                </div>
               ) : row.ready && sessionElsewhere !== null && canSessions ? (
                 <span className="text-[10.5px] leading-snug text-muted-foreground/70">
                   {`ready — stop ${sessionElsewhere.profile} to use this one instead`}
@@ -3252,14 +3565,29 @@ function ToolsetRail({
           </p>
         ) : null}
         {done ? (
-          <p
-            className={cn(
-              "px-1 pt-1 text-[11px]",
-              done.ok ? "text-muted-foreground" : "text-destructive-foreground",
-            )}
-          >
-            {done.message}
-          </p>
+          // A refused session start is the trust gate speaking, and its sentence
+          // names `agentstack trust` — a terminal command, printed inside the
+          // window that owns the review. The CLI's wording still stands; only
+          // the stream's `error: ` marker goes, and the review it points at
+          // becomes reachable. A success is never re-read this way, and anything
+          // else renders exactly as before.
+          <div className="flex flex-col items-start gap-1.5 px-1 pt-1">
+            <p
+              className={cn(
+                "text-[11px]",
+                done.ok ? "text-muted-foreground" : "text-destructive-foreground",
+              )}
+            >
+              {!done.ok && matchAgentstackTrustRefusal(done.message)
+                ? stripAgentstackErrorPrefix(done.message)
+                : done.message}
+            </p>
+            {!done.ok && matchAgentstackTrustRefusal(done.message) ? (
+              <Button size="xs" variant="outline" onClick={onReviewTrust}>
+                Review this project
+              </Button>
+            ) : null}
+          </div>
         ) : null}
       </div>
     </div>
@@ -3284,6 +3612,7 @@ function LibraryPane({
   isTicked,
   onToggleMember,
   untrusted,
+  onReviewTrust,
   busy,
   onAdd,
   onRemove,
@@ -3310,6 +3639,8 @@ function LibraryPane({
    * discovered as a half-applied edit.
    */
   untrusted: boolean;
+  /** Open the trust review from that banner — the one thing that clears it. */
+  onReviewTrust: () => void;
   /** An edit is mid-flight; the rows stop offering new ones. */
   busy: boolean;
   onAdd: (group: "skill" | "server", name: string, profile: string) => void;
@@ -3357,11 +3688,16 @@ function LibraryPane({
         // spawn or contact these servers or resolve their secrets, and
         // declared extensions don't land. Saying "nothing renders" here would
         // promise a gate the CLI does not implement.
-        <p className="mx-3 mb-2 rounded-lg border border-warning/25 bg-warning/[0.07] px-2.5 py-1.5 text-[10.5px] leading-relaxed text-warning-foreground">
-          This project isn&apos;t reviewed yet. Adding still writes the manifest and renders your
-          CLI configs — but until you review it, auto mode won&apos;t run or contact these servers,
-          and declared extensions stay unapplied.
-        </p>
+        <div className="mx-3 mb-2 flex flex-col items-start gap-1.5 rounded-lg border border-warning/25 bg-warning/[0.07] px-2.5 py-1.5">
+          <p className="text-[10.5px] leading-relaxed text-warning-foreground">
+            This project isn&apos;t reviewed yet. Adding still writes the manifest and renders your
+            CLI configs — but until you review it, auto mode won&apos;t run or contact these
+            servers, and declared extensions stay unapplied.
+          </p>
+          <Button size="xs" variant="outline" onClick={onReviewTrust}>
+            Review this project
+          </Button>
+        </div>
       ) : null}
       <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
         {load.phase === "loading" ? (
@@ -3551,6 +3887,7 @@ export function CheckupFindings({
   features,
   onRequestAction,
   onReviewDrift,
+  onReviewTrust,
   defaultOpen = false,
   alreadyOffered = null,
 }: {
@@ -3574,7 +3911,16 @@ export function CheckupFindings({
    * "Enable guard" again on the finding four rows below. The finding still
    * shows its command; only the duplicate button goes.
    */
-  alreadyOffered?: ActionKind | null;
+  alreadyOffered?: PanelActionKind | null;
+  /**
+   * Open the trust review from a finding whose fix is `agentstack trust`.
+   *
+   * That fix can never be a governed action — consent is bound to the exact
+   * bytes, which only the review screen shows — so without this the finding
+   * printed a terminal command and nothing else, in a window that owns the
+   * review. Omitted where no such surface exists to open.
+   */
+  onReviewTrust?: (() => void) | undefined;
   /**
    * Open the drift review from a Drift finding.
    *
@@ -3594,6 +3940,7 @@ export function CheckupFindings({
     alreadyOffered == null
       ? view.visible
       : view.visible.map((v) => (v.action === alreadyOffered ? { ...v, action: null } : v));
+  const groups = useMemo(() => groupAgentstackFindingViews(visible), [visible]);
   if (total === 0) return null;
   return (
     // Indented to the rows' text column (px-2.5 + 6px dot + gap-2.5) and hung
@@ -3612,51 +3959,89 @@ export function CheckupFindings({
           ›
         </span>
       </summary>
+      {/* One block per doctor section, each offering its verb once. Four
+          drifted CLIs used to draw four identical "Review" buttons for the one
+          dialog, which reads as four separate problems. */}
       <ul className="flex flex-col pt-1.5">
-        {visible.map(({ finding, action }) => (
-          <li
-            key={finding.key}
-            className="flex items-start gap-2 border-border/40 border-t py-2 first:border-t-0 first:pt-0 last:pb-0"
-          >
-            <span
-              className={cn("mt-[6px] size-1.5 shrink-0 rounded-full", LEVEL_DOT[finding.level])}
-            />
-            <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-              <span className="text-[10px] text-muted-foreground/70">{finding.section}</span>
-              <span
-                className={cn("wrap-break-word text-xs leading-snug", LEVEL_TEXT[finding.level])}
-              >
-                {finding.message}
-              </span>
-              {/* One line per remedy doctor offered. Several are a choice of
-                  two ("keep them: … · prune them: …"), and a single copyable
-                  line there is not a command anyone can run. Prose
-                  alternatives stay prose — typesetting them as code invites a
-                  paste that does nothing. */}
-              {finding.fixOptions.map((option) => (
-                <div key={`${option.label ?? ""}:${option.text}`} className="flex flex-col">
-                  {option.label !== null ? (
-                    <span className="text-[10px] text-muted-foreground/70">{option.label}</span>
-                  ) : null}
-                  {option.isCommand ? (
-                    <CommandLine text={option.text} muted />
-                  ) : (
-                    <span className="text-[10.5px] leading-snug text-muted-foreground">
-                      {option.text}
+        {groups.map((group) => {
+          const act =
+            group.action === "review-trust"
+              ? onReviewTrust
+                ? { label: "Review & trust", run: onReviewTrust }
+                : null
+              : group.action !== null
+                ? {
+                    label: ACTION_META[group.action].label,
+                    run: () => onRequestAction(group.action as ActionKind),
+                  }
+                : group.section === "Drift" && onReviewDrift
+                  ? { label: "Review", run: onReviewDrift }
+                  : null;
+          return (
+            <li
+              key={group.key}
+              className="flex flex-col gap-1 border-border/40 border-t py-2 first:border-t-0 first:pt-0 last:pb-0"
+            >
+              <div className="flex items-center gap-2">
+                {/* One dot per section, not per line: the dot marks how urgent
+                    this group is, and repeating it down every message made a
+                    note look exactly like a blocker. */}
+                <span className={cn("size-1.5 shrink-0 rounded-full", LEVEL_DOT[group.level])} />
+                <span className="text-[11px] font-medium text-foreground">{group.section}</span>
+                <span className="text-[10.5px] text-muted-foreground/70">
+                  {formatAgentstackCount(group.items.length, "finding")}
+                </span>
+                {act !== null ? (
+                  <span className="ml-auto">
+                    <RowAction onClick={act.run}>{act.label}</RowAction>
+                  </span>
+                ) : null}
+              </div>
+              <div className="flex flex-col gap-1 pl-[14px]">
+                {group.items.map(({ finding }) => (
+                  <div key={finding.key} className="flex flex-col">
+                    <span
+                      className={cn(
+                        "wrap-break-word text-xs leading-snug",
+                        LEVEL_TEXT[finding.level],
+                      )}
+                    >
+                      {finding.message}
                     </span>
-                  )}
-                </div>
-              ))}
-            </div>
-            {action !== null ? (
-              <RowAction onClick={() => onRequestAction(action)}>
-                {ACTION_META[action].label}
-              </RowAction>
-            ) : finding.section === "Drift" && onReviewDrift ? (
-              <RowAction onClick={onReviewDrift}>Review</RowAction>
-            ) : null}
-          </li>
-        ))}
+                    {/* One line per remedy doctor offered. Several are a choice
+                        of two ("keep them: … · prune them: …"), and a single
+                        copyable line there is not a command anyone can run.
+                        Prose alternatives stay prose — typesetting them as code
+                        invites a paste that does nothing. Suppressed entirely
+                        where the group already has a button: the command was
+                        only ever the fallback for having no way to act. */}
+                    {act === null
+                      ? finding.fixOptions.map((option) => (
+                          <div
+                            key={`${option.label ?? ""}:${option.text}`}
+                            className="flex flex-col"
+                          >
+                            {option.label !== null ? (
+                              <span className="text-[10px] text-muted-foreground/70">
+                                {option.label}
+                              </span>
+                            ) : null}
+                            {option.isCommand ? (
+                              <CopyableCommand text={option.text} />
+                            ) : (
+                              <span className="text-[10.5px] leading-snug text-muted-foreground">
+                                {option.text}
+                              </span>
+                            )}
+                          </div>
+                        ))
+                      : null}
+                  </div>
+                ))}
+              </div>
+            </li>
+          );
+        })}
       </ul>
       {hidden > 0 ? (
         <button
@@ -3686,6 +4071,7 @@ export function StatusSummary({
   nextAction,
   advisories,
   onRunNextAction,
+  onReviewTrust,
 }: {
   chip: NonNullable<ReturnType<typeof deriveAgentstackStatusChip>>;
   nextAction: string | null;
@@ -3693,11 +4079,21 @@ export function StatusSummary({
   advisories: number | null;
   /**
    * Run the recommendation, when it is one of the fixed actions this panel
-   * already exposes. Omitted by callers that only display status. The command
-   * text stays on screen either way — the button is an extra affordance, not a
-   * replacement for saying what will run.
+   * already exposes. Omitted by callers that only display status.
+   *
+   * When a button IS offered, the row states what the step does rather than the
+   * command that does it: `Next agentstack apply --write` sitting beside a
+   * "Re-render" button was one instruction printed twice, once in the form the
+   * reader can act on and once in the form they cannot.
    */
   onRunNextAction?: ((action: ActionKind) => void) | undefined;
+  /**
+   * Open the trust review, for the one recommendation that is a screen rather
+   * than a write: `agentstack trust` grants content-bound consent, so it must
+   * never go through the action RPC — the review is where the exact bytes being
+   * approved are shown. Omitted by callers with no review to open.
+   */
+  onReviewTrust?: (() => void) | undefined;
 }) {
   const runnable = matchAgentstackNextAction(nextAction);
   return (
@@ -3731,10 +4127,34 @@ export function StatusSummary({
       {nextAction ? (
         <div className="flex items-baseline gap-1.5">
           <span className="shrink-0 text-xs font-semibold text-foreground">Next</span>
-          <code className="min-w-0 wrap-break-word font-mono text-[11px] text-muted-foreground">
-            {nextAction}
-          </code>
-          {runnable && onRunNextAction ? (
+          {runnable === "review-trust" && onReviewTrust ? (
+            <span className="min-w-0 text-[11px] text-muted-foreground">
+              Review what this project declares before it can run here.
+            </span>
+          ) : runnable && runnable !== "review-trust" && onRunNextAction ? (
+            <span className="min-w-0 text-[11px] text-muted-foreground">
+              {ACTION_META[runnable].note}
+            </span>
+          ) : (
+            <code className="min-w-0 wrap-break-word font-mono text-[11px] text-muted-foreground">
+              {nextAction}
+            </code>
+          )}
+          {runnable === "review-trust" ? (
+            // The recommendation is a screen, not a write. Same primary weight
+            // as the other one-recommended-step buttons, because this is the
+            // state that makes every other one moot.
+            onReviewTrust ? (
+              <Button
+                size="xs"
+                variant="default"
+                onClick={onReviewTrust}
+                className="ml-auto h-[22px] font-semibold sm:h-[22px] sm:text-[11px]"
+              >
+                Review &amp; trust
+              </Button>
+            ) : null
+          ) : runnable && onRunNextAction ? (
             // `accent` is a FILL token (white at 4% alpha in dark), so
             // `text-accent` rendered the panel's primary call to action at
             // ~1.05:1 against its own background — a ghost. The paired text
@@ -3762,7 +4182,10 @@ type UndoLoad =
   | { phase: "empty" }
   | {
       phase: "ready";
-      entry: { id: string; summary: string; time_unix: number };
+      /** `operation` is null on a CLI that records no command for the entry. */
+      entry: { id: string; summary: string; time_unix: number; operation: string | null };
+      /** Newer entries outside this project that the drawer will not offer. */
+      newerElsewhere: number;
     };
 
 type UndoAct =
@@ -3850,6 +4273,10 @@ function PanelDialog({
   return (
     <Dialog
       open
+      // Same reason as Manage: these are screens you study, sometimes with an
+      // edit or a consent decision half-made in them, and a backdrop click is
+      // too easy to make by accident to be the gesture that discards one.
+      disablePointerDismissal
       onOpenChange={(next) => {
         if (!next) onClose();
       }}
@@ -3990,6 +4417,29 @@ function LibraryGroup({
   onAdd: (group: "skill" | "server", name: string, profile: string) => void;
   onRemove: (group: "skill" | "server", name: string) => void;
 }) {
+  // Split by where the definition lives. Every manifest-origin row used to
+  // carry its own copy of the same sentence — six rows, six identical
+  // explanations down one 500px column. The fact belongs to the set, so it is
+  // stated once on a sub-header and the rows go back to being rows.
+  const fromLibrary = items.filter((it) => it.origin === "library");
+  const fromManifest = items.filter((it) => it.origin === "manifest");
+  const row = (it: LibraryItem) => (
+    <LibraryRow
+      key={`${it.origin}:${it.name}`}
+      item={it}
+      group={group}
+      profiles={profiles}
+      picked={selected === null ? null : selected.includes(it.name)}
+      canTick={canTick}
+      ticked={isTicked(it.name)}
+      onToggleMember={onToggleMember}
+      onToggleDraft={onToggleDraft}
+      canRemove={canRemove}
+      busy={busy}
+      onAdd={onAdd}
+      onRemove={onRemove}
+    />
+  );
   return (
     <div className="flex flex-col gap-1">
       <p className="text-xs font-semibold text-foreground">{title}</p>
@@ -3997,23 +4447,18 @@ function LibraryGroup({
         <span className="text-[11px] text-muted-foreground/70">{emptyLabel}</span>
       ) : (
         <div className="flex flex-col gap-0.5">
-          {items.map((it) => (
-            <LibraryRow
-              key={`${it.origin}:${it.name}`}
-              item={it}
-              group={group}
-              profiles={profiles}
-              picked={selected === null ? null : selected.includes(it.name)}
-              canTick={canTick}
-              ticked={isTicked(it.name)}
-              onToggleMember={onToggleMember}
-              onToggleDraft={onToggleDraft}
-              canRemove={canRemove}
-              busy={busy}
-              onAdd={onAdd}
-              onRemove={onRemove}
-            />
-          ))}
+          {fromLibrary.map(row)}
+          {fromManifest.length > 0 ? (
+            <>
+              <div className="flex items-baseline gap-2 px-1.5 pt-2 pb-0.5">
+                <span className="text-[11px] font-medium text-foreground">In this project</span>
+                <span className="min-w-0 flex-1 truncate text-[10.5px] text-muted-foreground/70">
+                  declared in agentstack.toml, not in your library
+                </span>
+              </div>
+              {fromManifest.map(row)}
+            </>
+          ) : null}
         </div>
       )}
     </div>
@@ -4086,32 +4531,13 @@ function LibraryRow({
           )}
         />
         <div className="flex min-w-0 flex-1 flex-col">
-          <span className="truncate text-[12px] font-semibold text-foreground">
-            {item.name}
-            {item.inManifest ? (
-              <span className="ml-1.5 text-[10px] font-normal text-muted-foreground/60">
-                in project
-              </span>
-            ) : null}
-          </span>
+          <span className="truncate text-[12px] font-semibold text-foreground">{item.name}</span>
           {item.detail ? (
             <span
               className="line-clamp-2 text-[10.5px] leading-snug text-muted-foreground"
               title={item.detail}
             >
               {item.detail}
-            </span>
-          ) : null}
-          {item.origin === "manifest" ? (
-            // A library row that is also "in project" says where it lives
-            // through its own remove button ("Remove from library"). This row
-            // has no such tell: the definition exists nowhere but this
-            // project's agentstack.toml, and nothing on screen said so — the
-            // reader was left to infer it from the absence of a button. One
-            // visible line, not a tooltip, per the same rule as the labels:
-            // what a row IS shouldn't need a hover to discover.
-            <span className="text-[10.5px] leading-snug text-muted-foreground/70">
-              Defined in this project&apos;s agentstack.toml — not in your library.
             </span>
           ) : null}
         </div>
@@ -4185,13 +4611,19 @@ function LibraryRow({
           // to guess at. For the same reason the control is always visible
           // rather than revealed on hover — a destructive action you discover
           // by accident is worse than one you can see and decline.
+          //
+          // It is NOT red at rest, though. Danger colour repeated down every
+          // row made the one irreversible verb on the screen its loudest and
+          // most frequent element, which is the opposite of what the colour is
+          // for. It reads as quiet as the description beside it until you reach
+          // for it, and turns destructive the moment you do.
           <button
             type="button"
             disabled={busy}
             onClick={() => onRemove(group, item.name)}
             title="Removes it for every project — recoverable from the library trash"
             aria-label={`Remove ${item.name} from your library`}
-            className="shrink-0 rounded-md border border-transparent px-1.5 py-0.5 text-[10px] font-semibold text-destructive-foreground/70 transition-all hover:border-destructive/30 hover:bg-destructive/10 hover:text-destructive-foreground disabled:opacity-40"
+            className="shrink-0 rounded-md border border-transparent px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground/70 transition-all hover:border-destructive/30 hover:bg-destructive/10 hover:text-destructive-foreground focus-visible:border-destructive/30 focus-visible:text-destructive-foreground disabled:opacity-40"
           >
             Remove from library
           </button>
@@ -4238,6 +4670,7 @@ export function EditFlowCard({
   onActivate,
   onConfirm,
   onBack,
+  onReviewTrust,
 }: {
   flow: Exclude<EditFlow, { phase: "idle" }>;
   /** See [`LibraryPanel`]: true only when the CLI advertises `toolset-create-v2`. */
@@ -4245,6 +4678,12 @@ export function EditFlowCard({
   onActivate: ((profile: string) => Promise<{ ok: boolean; message: string }>) | null;
   onConfirm: () => void;
   onBack: () => void;
+  /**
+   * Where a refused activation goes: a fresh toolset's new pins can legitimately
+   * make this project's trust stale, so the CLI refuses and names `agentstack
+   * trust`. Omitted where there is no review surface to open.
+   */
+  onReviewTrust?: (() => void) | undefined;
 }) {
   if (flow.phase === "previewing") {
     return (
@@ -4320,6 +4759,7 @@ export function EditFlowCard({
           cliLine={flow.message}
           onActivate={onActivate}
           onBack={onBack}
+          onReviewTrust={onReviewTrust}
         />
       );
     }
@@ -4475,12 +4915,15 @@ function CreatedToolsetCard({
   cliLine,
   onActivate,
   onBack,
+  onReviewTrust,
 }: {
   name: string;
   /** The CLI's own last line — quoted verbatim, as everywhere else in the panel. */
   cliLine: string;
   onActivate: ((profile: string) => Promise<{ ok: boolean; message: string }>) | null;
   onBack: () => void;
+  /** See [`EditFlowCard`]: the destination for a trust-refused activation. */
+  onReviewTrust?: (() => void) | undefined;
 }) {
   const [act, setAct] = useState<
     { phase: "idle" } | { phase: "running" } | { phase: "done"; ok: boolean; message: string }
@@ -4515,14 +4958,27 @@ function CreatedToolsetCard({
       </div>
 
       {act.phase === "done" ? (
-        <p
-          className={cn(
-            "text-[11px] leading-relaxed",
-            act.ok ? "text-muted-foreground" : "text-destructive",
-          )}
-        >
-          {act.message}
-        </p>
+        // Activation is fail-closed: a new toolset's pins can make this
+        // project's trust stale, and the CLI then refuses and says so. Its
+        // sentence stands (minus the stream's `error: ` marker); what it names
+        // as the way forward becomes a button rather than a command to retype.
+        <div className="flex flex-col items-start gap-1.5">
+          <p
+            className={cn(
+              "text-[11px] leading-relaxed",
+              act.ok ? "text-muted-foreground" : "text-destructive",
+            )}
+          >
+            {!act.ok && matchAgentstackTrustRefusal(act.message)
+              ? stripAgentstackErrorPrefix(act.message)
+              : act.message}
+          </p>
+          {!act.ok && matchAgentstackTrustRefusal(act.message) && onReviewTrust ? (
+            <Button size="xs" variant="outline" onClick={onReviewTrust}>
+              Review this project
+            </Button>
+          ) : null}
+        </div>
       ) : null}
 
       {onActivate === null ? (
@@ -4605,6 +5061,48 @@ function CommandLine({
         </Fragment>
       ))}
     </code>
+  );
+}
+
+/**
+ * A command the panel cannot run for you, with a button that at least saves you
+ * retyping it.
+ *
+ * Used where a fix is genuinely terminal work. The bare `CommandLine` states
+ * the command and stops there, which turns a checkup into a copying exercise —
+ * every row asking you to select 40 monospace characters by hand. Where an
+ * action exists, the panel runs it and this does not appear at all.
+ */
+function CopyableCommand({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  // The timer is cleared on unmount so a copy made just before the dialog
+  // closes cannot setState on a gone component.
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), 1_500);
+    return () => clearTimeout(timer);
+  }, [copied]);
+  return (
+    <div className="mt-1 flex items-start gap-1.5">
+      <code className="min-w-0 flex-1 font-mono text-[10.5px] leading-snug text-muted-foreground [overflow-wrap:anywhere]">
+        {text}
+      </code>
+      <button
+        type="button"
+        aria-label={`Copy: ${text}`}
+        onClick={() => {
+          void navigator.clipboard?.writeText(text).then(
+            () => setCopied(true),
+            // A denied clipboard permission is not worth an error state; the
+            // command is on screen and still selectable.
+            () => undefined,
+          );
+        }}
+        className="shrink-0 rounded border border-border/60 px-1.5 py-px text-[10px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+      >
+        {copied ? "Copied" : "Copy"}
+      </button>
+    </div>
   );
 }
 
@@ -4703,12 +5201,21 @@ function UndoAffordance({
     setLoad({ phase: "loading" });
     setAct({ phase: "idle" });
     const result = await loadInventory();
-    const entry = result?.inventory ? selectAgentstackUndoEntry(result.inventory.entries) : null;
+    const view = result?.inventory
+      ? selectAgentstackUndoView(result.inventory.entries)
+      : { entry: null, newerElsewhere: 0 };
+    const entry = view.entry;
     setLoad(
       entry
         ? {
             phase: "ready",
-            entry: { id: entry.id, summary: entry.summary, time_unix: entry.time_unix },
+            entry: {
+              id: entry.id,
+              summary: entry.summary,
+              time_unix: entry.time_unix,
+              operation: entry.operation ?? null,
+            },
+            newerElsewhere: view.newerElsewhere,
           }
         : { phase: "empty" },
     );
@@ -4751,10 +5258,36 @@ function UndoAffordance({
         </span>
       ) : (
         <>
-          <p className="text-[11px] leading-relaxed text-muted-foreground">
-            Undo <span className="font-semibold text-foreground">{load.entry.summary}</span>{" "}
-            <span className="text-muted-foreground/70">· {undoAge(load.entry.time_unix)}</span>
+          {/* What it undoes, and where. "Undo 1 file · 2h ago" named neither
+              the command nor the project, on a ledger that is machine-global —
+              so the one thing the user had to know (is this MY change?) was the
+              one thing the line did not say. */}
+          <p className="text-[11px] font-semibold text-foreground">
+            Latest recorded change in this project
           </p>
+          <p className="text-[11px] leading-relaxed text-muted-foreground">
+            {load.entry.operation !== null ? (
+              <>
+                <span className="font-semibold text-foreground">{load.entry.operation}</span>
+                {" · "}
+              </>
+            ) : null}
+            {load.entry.summary}
+            <span className="text-muted-foreground/70"> · {undoAge(load.entry.time_unix)}</span>
+          </p>
+          {load.newerElsewhere > 0 ? (
+            // The selection deliberately skips entries outside this project —
+            // undoing another project's write from here is exactly the blind
+            // `--last` it exists to avoid. Saying how many were skipped is what
+            // keeps "latest" from reading as a false claim about the ledger.
+            <p className="text-[10.5px] leading-relaxed text-muted-foreground/70">
+              {load.newerElsewhere === 1
+                ? "1 newer machine-wide change isn't shown here"
+                : `${load.newerElsewhere} newer machine-wide changes aren't shown here`}
+              {" — "}
+              <code className="font-mono">agentstack restore</code> in a terminal lists everything.
+            </p>
+          ) : null}
           {act.phase === "confirm" || act.phase === "running" ? (
             <div className="flex items-center gap-2">
               <button
@@ -5524,10 +6057,18 @@ function WorkflowPanel({
     return (
       <div className="flex flex-col">
         {observeNote}
-        <p className="px-4 py-4 text-xs leading-relaxed text-muted-foreground">
-          No workflows declared. A <code className="font-mono">[workflows.*]</code> entry in the
-          manifest defines a governed, pinned workflow — each step a locked run.
-        </p>
+        <Empty className="py-8">
+          <EmptyHeader>
+            <EmptyMedia variant="icon">
+              <Workflow />
+            </EmptyMedia>
+            <EmptyTitle>No workflows declared</EmptyTitle>
+            <EmptyDescription>
+              A workflow entry in this project&apos;s manifest defines a governed, pinned sequence —
+              each step a locked run. Authoring one is terminal work.
+            </EmptyDescription>
+          </EmptyHeader>
+        </Empty>
         <WorkflowRunHistory runs={history} onOpenRun={onOpenRun} />
       </div>
     );
@@ -6027,21 +6568,24 @@ function ActivityPanel({ activity }: { activity: AgentstackActivity | null }) {
 
   if (rows.length === 0) {
     return (
-      <div className="flex flex-col gap-1.5 px-4 py-4">
-        <p className="text-xs leading-relaxed text-muted-foreground">
-          Nothing recorded for this project yet.
-        </p>
-        {/* The load-bearing sentence. In host mode — the default, where the
-            harness talks to its servers directly — nothing is recorded at all,
-            so without this an empty list reads as an all-clear while an agent
-            makes hundreds of unrecorded calls. "Brokers or blocks", not "routed
-            through the gateway": the host guard also writes denials here
-            without the gateway being involved. */}
-        <p className="text-[11px] leading-relaxed text-muted-foreground/80">
-          Only calls AgentStack brokers or blocks are recorded. An agent talking to its servers
-          directly leaves no rows here, so an empty list is not evidence that nothing ran.
-        </p>
-      </div>
+      <Empty className="py-10">
+        <EmptyHeader>
+          <EmptyMedia variant="icon">
+            <ScrollText />
+          </EmptyMedia>
+          <EmptyTitle>Nothing recorded yet</EmptyTitle>
+          {/* The load-bearing sentence. In host mode — the default, where the
+              harness talks to its servers directly — nothing is recorded at
+              all, so without this an empty list reads as an all-clear while an
+              agent makes hundreds of unrecorded calls. "Brokers or blocks", not
+              "routed through the gateway": the host guard also writes denials
+              here without the gateway being involved. */}
+          <EmptyDescription>
+            Only calls AgentStack brokers or blocks are recorded. An agent talking to its servers
+            directly leaves no rows here, so an empty list is not evidence that nothing ran.
+          </EmptyDescription>
+        </EmptyHeader>
+      </Empty>
     );
   }
   return (
@@ -6223,19 +6767,45 @@ function ProtectionPanel({
   const policyRows = deriveAgentstackPolicyRows(doctor);
   return (
     <div className="flex flex-col p-1.5">
-      <p className="px-2.5 pb-1.5 pt-1 text-[11px] leading-relaxed text-muted-foreground">
+      <p className="px-2.5 pb-2 pt-1 text-[11px] leading-relaxed text-muted-foreground">
         Normal setup already fails closed. These layers add stronger checks — each says what it
         covers and what it costs.
       </p>
+      {/* A status list, not five paragraphs. Each row is: what it is · whether
+          it is on · one plain line of consequence. The state used to be a
+          literal "on — " inside the sentence, which made an active layer and a
+          dormant one read exactly alike. */}
       {rows.map((row) => (
-        <div key={row.key} className="flex items-start gap-2.5 rounded-lg px-2.5 py-[7px]">
-          <span className={cn("mt-1 size-1.5 shrink-0 rounded-full", LEVEL_DOT[row.level])} />
-          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-            <span className="text-[12.5px] font-semibold text-foreground">{row.label}</span>
+        <div
+          key={row.key}
+          className="flex items-start gap-2.5 border-border/40 border-t px-2.5 py-2 first:border-t-0"
+        >
+          <div className="flex min-w-0 flex-1 flex-col gap-1">
+            <div className="flex items-center gap-2">
+              <span className="text-[12.5px] font-semibold text-foreground">{row.label}</span>
+              {row.state !== null ? (
+                <span
+                  className={cn(
+                    "rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide",
+                    row.state === "on"
+                      ? "bg-success/15 text-success-foreground"
+                      : row.state === "off"
+                        ? "bg-warning/15 text-warning-foreground"
+                        : "bg-muted-foreground/10 text-muted-foreground",
+                  )}
+                >
+                  {row.state === "unset" ? "not set" : row.state}
+                </span>
+              ) : null}
+            </div>
+            {/* No truncation. A ceiling described as `a rename-proof "*" rule
+                (or a filesystem scope) c…` is a sentence the reader cannot
+                finish, on the one tab whose job is to say what is enforced. */}
             <span className="text-xs leading-relaxed text-muted-foreground">{row.summary}</span>
             {row.cost ? (
-              <span className="text-[11px] text-muted-foreground/60">{row.cost}</span>
+              <span className="text-[11px] leading-snug text-muted-foreground/60">{row.cost}</span>
             ) : null}
+            {row.command ? <CopyableCommand text={row.command} /> : null}
           </div>
           {row.action ? (
             <button
@@ -6252,7 +6822,7 @@ function ProtectionPanel({
         <ActionConfirm state={actionState} onConfirm={onConfirm} onCancel={onCancel} />
       ) : null}
       {policyRows.length > 0 ? (
-        <details className="mx-1 mb-1 mt-1.5 rounded-lg border border-border/50 px-2.5 py-1.5">
+        <details className="mx-1 mb-1 mt-2 rounded-lg border border-border/50 px-2.5 py-1.5">
           <summary className="cursor-pointer text-[11px] font-medium text-muted-foreground">
             Details — the exact policy lines
           </summary>
