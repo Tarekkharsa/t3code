@@ -249,7 +249,21 @@ const IDLE_REFRESH_MS = 30_000;
  * a permanent background poll.
  */
 const PRIME_RETRY_MS = 4_000;
-const PRIME_MAX_ATTEMPTS = 5;
+const PRIME_MAX_ATTEMPTS = 3;
+
+/**
+ * Projects already primed in this app session.
+ *
+ * Every `doctor` run is a fresh process, so its secret cache starts empty and
+ * each `${REF}` backed by the OS keychain costs one consent prompt. The panel
+ * is mounted per thread, so priming on mount meant opening five threads in a
+ * project with three keychain refs asked for the password fifteen times.
+ *
+ * Module scope, not component state: the point is to survive the remount. The
+ * poll still refreshes normally once a surface is open — this only stops the
+ * *unprompted* read repeating for a project already known to this session.
+ */
+const primedProjects = new Set<string>();
 
 type Tab = AgentstackPanelTab;
 
@@ -518,17 +532,24 @@ export function AgentstackControl({
     if (status !== null) return;
     if (open || manageTab !== null || monitorTarget !== null) return;
     if (primeAttempts.current >= PRIME_MAX_ATTEMPTS) return;
+    // Once per project per session — see `primedProjects`. Marked before the
+    // read rather than after it, because a read that fails must not license a
+    // second thread to start its own prompt storm.
+    if (primedProjects.has(projectId)) return;
+    primedProjects.add(projectId);
     primeAttempts.current += 1;
     void refresh();
     const timer = setTimeout(() => {
       // Bumping the ref alone would not re-run this effect; the status update
       // that `refresh` performs is what re-evaluates it, and when the read
       // failed there is none. Forcing a re-render is what makes the retry a
-      // retry rather than a single missed shot.
+      // retry rather than a single missed shot. The mark is released so THIS
+      // component can retry; `primeAttempts` is what bounds it.
+      primedProjects.delete(projectId);
       setPrimeTick((t) => t + 1);
     }, PRIME_RETRY_MS);
     return () => clearTimeout(timer);
-  }, [status, open, manageTab, monitorTarget, refresh, primeTick]);
+  }, [status, open, manageTab, monitorTarget, refresh, primeTick, projectId]);
 
   // React to "open me on tab X" requests from elsewhere (e.g. a guard-denial
   // card's "View in audit log"). The nonce makes repeat requests re-fire.

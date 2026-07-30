@@ -1628,12 +1628,19 @@ export function deriveAgentstackFindings(
   const out: AgentstackFinding[] = [];
   for (const section of report.sections) {
     for (const [i, line] of section.lines.entries()) {
-      if (line.level !== "error" && line.level !== "warn") continue;
+      // Advisories are collected too, as `muted`. They are NOT faults — the
+      // CLI keeps them out of `warnings` and out of `state` on purpose — but
+      // dropping them here left the reader with a bare count beside the chip
+      // ("· 2 notes") and no way to see or answer them. A leftover config for
+      // an uninstalled editor is the case in point: nothing is broken, and the
+      // remedy is still a real edit. Shown quietly, ranked last, and barred
+      // from becoming the one thing the first page asks you to do.
+      if (line.level !== "error" && line.level !== "warn" && line.level !== "advisory") continue;
       const [message, ...rest] = line.msg.split("↳");
       const fix = rest.join("↳").trim();
       out.push({
         key: `${section.title}:${i}`,
-        level: line.level === "error" ? "error" : "warn",
+        level: line.level === "error" ? "error" : line.level === "advisory" ? "muted" : "warn",
         message: clamp((message ?? line.msg).trim().replace(/\s+/g, " "), FINDING_MAX),
         fix: fix.length > 0 ? clamp(fix, FINDING_MAX) : null,
         fixOptions: fix.length > 0 ? splitFixOptions(fix) : [],
@@ -1736,7 +1743,9 @@ export function selectAgentstackFindingsView(
 } {
   const ranked = [
     ...findings.filter((f) => f.level === "error"),
-    ...findings.filter((f) => f.level !== "error"),
+    ...findings.filter((f) => f.level !== "error" && f.level !== "muted"),
+    // Last: an advisory is worth reading, never worth reading first.
+    ...findings.filter((f) => f.level === "muted"),
   ];
   const limit = Math.max(0, previewCount);
   const shown = expanded ? ranked : ranked.slice(0, limit);
@@ -1929,7 +1938,11 @@ export function selectAgentstackPrimaryConcern(input: {
   readonly trust: AgentstackTrustState;
 }): AgentstackPrimaryConcern | null {
   const { problems } = partitionAgentstackOverviewRows(input.rows);
-  const total = problems.length + input.findings.length;
+  // Advisories are excluded outright: this function answers "what is the one
+  // thing to do here", and an advisory answers "nothing". Counting them would
+  // also inflate the "N more in Manage" tally with things that need nobody.
+  const findings = input.findings.filter((f) => f.level !== "muted");
+  const total = problems.length + findings.length;
   /** Everything not shown here. Trust is picked from outside the rows, so it
    *  consumes none of them; every other branch consumes the one it picked. */
   const rest = (picked: number) => Math.max(0, total - picked);
@@ -1980,7 +1993,7 @@ export function selectAgentstackPrimaryConcern(input: {
     };
   }
 
-  const actionFinding = input.findings.find((f) => f.action !== null && f.section !== "Drift");
+  const actionFinding = findings.find((f) => f.action !== null && f.section !== "Drift");
   if (actionFinding?.action === "review-trust") {
     // A checkup line asking for `agentstack trust` while the trust state above
     // reads neither inert nor drifted — a stale or unreadable trust record. The
@@ -2012,9 +2025,9 @@ export function selectAgentstackPrimaryConcern(input: {
 
   const worst =
     problems.find((r) => r.level === "error") ??
-    input.findings.find((f) => f.level === "error") ??
+    findings.find((f) => f.level === "error") ??
     problems[0] ??
-    input.findings[0];
+    findings[0];
   if (!worst) return null;
   return {
     key: worst.key,
