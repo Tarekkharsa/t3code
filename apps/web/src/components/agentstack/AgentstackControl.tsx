@@ -78,6 +78,7 @@ import {
   deriveAgentstackProtectionRows,
   deriveAgentstackStatusChip,
   describeAgentstackDriftStory,
+  describeAgentstackFindingSection,
   describeAgentstackProbeSkip,
   describeAgentstackSerialRoles,
   deriveAgentstackTrustBadge,
@@ -165,6 +166,7 @@ const FEATURE_WORKFLOW_SERIAL_ROLES = "workflow-serial-roles-v1";
  *  nothing — two surfaces telling different amounts of truth about one
  *  project. Gated on the name, never sniffed off the field being present. */
 const FEATURE_DOCTOR_ADVISORIES = "doctor-advisories-v1";
+const FEATURE_DOCTOR_MODE = "doctor-mode-v1";
 /** The startup test (`doctor --probe`) — the ONLY doctor contract with side
  *  effects: the CLI starts each stdio server, speaks the MCP handshake, and
  *  reaps it. Gated positively on the name so the affordance cannot exist
@@ -268,18 +270,18 @@ const primedProjects = new Set<string>();
 type Tab = AgentstackPanelTab;
 
 /**
- * The Manage dialog's four tabs — the panel's entire navigation model.
+ * The Manage dialog's three tabs — the panel's entire navigation model.
  *
- * Everything the popover used to reach through a back-stack (Share, More
- * protection, Activity, Workflows, Library, Checkup) is one of these four
- * groups, side by side in a 768px dialog. No "← Back", no navigation state to
- * remember, and each tab has room for the detail the 400px column had to clip.
+ * Three, because three is how many kinds of visit there are: "is it ready and
+ * how do I fix or undo it" (Status), "what does this task need" (Toolsets),
+ * "what happened" (Activity). Protection and Sharing used to sit here as two
+ * more tabs, but they are reference sheets — read occasionally, acted on
+ * rarely — and giving them equal rank with the daily surfaces made a five-way
+ * choice out of a three-way one. They now live behind the corner link, whole.
  */
 const MANAGE_TABS: ReadonlyArray<{ id: Tab; label: string }> = [
-  { id: "setup", label: "Setup" },
+  { id: "setup", label: "Status" },
   { id: "toolsets", label: "Toolsets" },
-  { id: "protection", label: "Protection" },
-  { id: "sharing", label: "Sharing" },
   { id: "activity", label: "Activity" },
 ];
 
@@ -394,6 +396,9 @@ export function AgentstackControl({
   const [probeState, setProbeState] = useState<ProbeState>({ phase: "idle" });
   const [reviewing, setReviewing] = useState(false);
   const [reviewingDrift, setReviewingDrift] = useState(false);
+  /** The Protection & sharing reference sheet — read-only apart from the
+   *  guard-enable confirm, and a child screen so Manage stays one dialog. */
+  const [showingReference, setShowingReference] = useState(false);
   const [settingUp, setSettingUp] = useState(false);
   const [editingManifest, setEditingManifest] = useState<{
     cwd: string;
@@ -468,6 +473,50 @@ export function AgentstackControl({
   } | null>(null);
   const [monitorFetched, setMonitorFetched] = useState<AgentstackWorkflowRun | null>(null);
 
+  /**
+   * Invalidates work still in flight for a previous project. `refresh` awaits
+   * four subprocess-backed reads that can take seconds; captured before the
+   * await and compared after, so a doctor read started under project A cannot
+   * land A's posture in project B's state after a switch.
+   */
+  const projectEpoch = useRef(0);
+  /** Bounds the prime retries — see the prime effect below. Per project. */
+  const primeAttempts = useRef(0);
+  /** The project every piece of state above describes. */
+  const [stateProjectId, setStateProjectId] = useState(projectId);
+  if (stateProjectId !== projectId) {
+    // The header keeps this one instance across a project switch, so without a
+    // reset all of the state above keeps describing the previous project until
+    // its next read lands — the trigger chip wears the other project's posture,
+    // and any open surface shows the other project's data. Reset during render,
+    // not in an effect: an effect runs after paint, which is exactly one frame
+    // of the wrong posture. Not a `key` on the mount either: a remount re-runs
+    // the panel-store effect below, which would pop Manage open on every switch
+    // once anything in the session had requested it.
+    setStateProjectId(projectId);
+    projectEpoch.current += 1;
+    primeAttempts.current = 0;
+    setOpen(false);
+    setManageTab(null);
+    setStatus(null);
+    setActivity(null);
+    setWorkflow(null);
+    setToolsets(null);
+    setUnreachable(false);
+    setActionState({ phase: "idle" });
+    setProbeState({ phase: "idle" });
+    setReviewing(false);
+    setReviewingDrift(false);
+    setShowingReference(false);
+    setSettingUp(false);
+    setEditingManifest(null);
+    setManifestDirty(false);
+    setDiscardingManifest(false);
+    setOriginStack([]);
+    setMonitorTarget(null);
+    setMonitorFetched(null);
+  }
+
   const fetchStatus = useAtomCommand(agentstackEnvironment.status, { reportFailure: false });
   const fetchActivity = useAtomCommand(agentstackEnvironment.activity, { reportFailure: false });
   const fetchWorkflow = useAtomCommand(agentstackEnvironment.workflow, { reportFailure: false });
@@ -501,12 +550,16 @@ export function AgentstackControl({
   );
 
   const refresh = useCallback(async () => {
+    const epoch = projectEpoch.current;
     const [statusResult, activityResult, workflowResult, toolsetsResult] = await Promise.all([
       fetchStatus({ environmentId, input }),
       fetchActivity({ environmentId, input }),
       fetchWorkflow({ environmentId, input }),
       fetchToolsets({ environmentId, input }),
     ]);
+    // A project switch happened while these were in flight: the results
+    // describe the old project and the state now belongs to the new one.
+    if (epoch !== projectEpoch.current) return;
     if (statusResult._tag === "Success") {
       setStatus(statusResult.value);
       setUnreachable(false);
@@ -538,7 +591,6 @@ export function AgentstackControl({
 
   // Prime the trigger — see PRIME_RETRY_MS. Runs only while there is no status
   // yet and nothing is open; the poll above owns every read after the first.
-  const primeAttempts = useRef(0);
   useEffect(() => {
     if (status !== null) return;
     if (open || manageTab !== null || monitorTarget !== null) return;
@@ -576,11 +628,16 @@ export function AgentstackControl({
   const onAction = useCallback(
     async (action: ActionKind) => {
       setActionState({ phase: "running", action });
+      const epoch = projectEpoch.current;
       const result = await runAction({ environmentId, input: { ...input, action } });
-      if (result._tag === "Success") {
-        setActionState({ phase: "done", ok: result.value.ok, message: result.value.message });
-      } else {
-        setActionState({ phase: "done", ok: false, message: "The action could not be run." });
+      // Same in-flight rule as `refresh`: a result for the previous project
+      // must not surface as a done-card in this project's popover.
+      if (epoch === projectEpoch.current) {
+        if (result._tag === "Success") {
+          setActionState({ phase: "done", ok: result.value.ok, message: result.value.message });
+        } else {
+          setActionState({ phase: "done", ok: false, message: "The action could not be run." });
+        }
       }
       noteWrite();
       noteWrite();
@@ -742,7 +799,9 @@ export function AgentstackControl({
   // confirm step — never from a render, an effect, or the poll.
   const onProbe = useCallback(async () => {
     setProbeState({ phase: "running" });
+    const epoch = projectEpoch.current;
     const r = await runProbe({ environmentId, input });
+    if (epoch !== projectEpoch.current) return;
     setProbeState(
       r._tag === "Success"
         ? { phase: "done", probe: r.value.probe, unavailable: r.value.unavailable === true }
@@ -812,6 +871,9 @@ export function AgentstackControl({
   // activating what is already active.
   const createNeedsActivation = hasAgentstackFeature(features, FEATURE_TOOLSET_CREATE_V2);
   const canReadAdvisories = hasAgentstackFeature(features, FEATURE_DOCTOR_ADVISORIES);
+  // `mode`/`activation`, and with them the one affordance that can move a
+  // project off "never activated".
+  const canReadMode = hasAgentstackFeature(features, FEATURE_DOCTOR_MODE);
   // The workflow monitor negotiates off its OWN enveloped read, not the doctor
   // status: a newer CLI's workflow reads can be schema-incompatible even when
   // the status read is fine, and vice versa. Legacy binaries (no envelope) leave
@@ -1077,7 +1139,7 @@ export function AgentstackControl({
           ) : !status.installed ? (
             <NotInstalled onRecheck={refresh} />
           ) : status.doctor === null ? (
-            <DoctorUnreadable onRecheck={refresh} />
+            <DoctorUnreadable onRecheck={refresh} failure={status?.doctorFailure ?? null} />
           ) : (
             <>
               {concern ? (
@@ -1103,15 +1165,16 @@ export function AgentstackControl({
               ) : null}
 
               {/* Footer — one sentence about everything not shown, and the
-                  door to it. The count of what is not on screen rides ON that
-                  door: "7 more findings in Manage" set in muted grey at the far
-                  left, with the only way to reach them at the far right, made
-                  the number read as a warning you could not act on. */}
+                  door to it. The sentence carries the number ("2 more
+                  findings"), the door stays a plain word: the earlier split —
+                  vague words on the left, a bare amber count riding the
+                  button — said the same thing twice and let the number read
+                  as a warning you could not act on. */}
               <div className="flex items-center gap-2 border-t border-border/60 px-4 py-2.5">
                 <span className="min-w-0 flex-1 truncate text-[11.5px] text-muted-foreground">
                   {concern
                     ? concern.others > 0
-                      ? "More to review"
+                      ? `${formatAgentstackCount(concern.others, "more finding")} to review`
                       : "Nothing else needs you."
                     : (healthyLine ?? "This project is set up and in sync.")}
                 </span>
@@ -1121,11 +1184,6 @@ export function AgentstackControl({
                   className="flex shrink-0 items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-foreground/[0.05] hover:text-foreground"
                 >
                   Manage
-                  {concern && concern.others > 0 ? (
-                    <span className="rounded bg-warning/15 px-1 py-px text-[10px] font-semibold text-warning-foreground">
-                      {concern.others}
-                    </span>
-                  ) : null}
                   <span aria-hidden>›</span>
                 </button>
               </div>
@@ -1151,6 +1209,7 @@ export function AgentstackControl({
           findings={findings}
           features={features}
           advisories={canReadAdvisories ? (status?.doctor?.advisories ?? null) : null}
+          canReadMode={canReadMode}
           canRestore={canRestore}
           canProbe={canProbe}
           probeState={probeState}
@@ -1182,7 +1241,31 @@ export function AgentstackControl({
           applyProfileEdit={applyProfileEdit}
           onRecheck={refresh}
           onOpenManifest={onOpenManifest}
+          onOpenReference={() => leaveManageFor(setShowingReference)}
         />
+      ) : null}
+      {showingReference ? (
+        <PanelDialog
+          title="Protection & sharing"
+          back={backLabel}
+          description="What protects this machine, what a stronger mode adds, and how a setup travels."
+          onClose={() => closeChild(() => setShowingReference(false))}
+          width="max-w-3xl"
+        >
+          <div className="flex flex-col">
+            <ProtectionPanel
+              doctor={status?.doctor ?? null}
+              actionState={actionState}
+              onRequestAction={(a) => setActionState({ phase: "confirm", action: a })}
+              onConfirm={onAction}
+              onCancel={() => setActionState({ phase: "idle" })}
+            />
+            <div className="mx-4 mt-1 border-t border-border/60 pt-3">
+              <p className="px-0.5 pb-1 text-xs font-semibold text-foreground">Share this setup</p>
+            </div>
+            <SharePanel doctor={status?.doctor ?? null} />
+          </div>
+        </PanelDialog>
       ) : null}
       {/* Screens you read, not glance at — see PanelDialog. Rendered beside the
           popover rather than inside it, so opening one never blanks status. */}
@@ -1620,7 +1703,21 @@ function NotInstalled({ onRecheck }: { onRecheck: () => Promise<void> | void }) 
  * what it is and offers the same recheck affordance as the not-installed
  * state, so the user is never stranded by one failed read.
  */
-function DoctorUnreadable({ onRecheck }: { onRecheck: () => Promise<void> | void }) {
+function DoctorUnreadable({
+  onRecheck,
+  failure = null,
+}: {
+  onRecheck: () => Promise<void> | void;
+  /**
+   * Why the read produced nothing, when the server said. "decode" is the one
+   * that must not wear the "usually momentary" copy: the CLI answered, this
+   * build couldn't read the answer, and that stays true on every retry until
+   * panel or CLI is updated. A healthy project once sat behind the transient
+   * message for exactly this reason. Null (older server) keeps the honest
+   * default: cause unknown, retry is reasonable.
+   */
+  failure?: "run" | "decode" | null;
+}) {
   const [rechecking, setRechecking] = useState(false);
   const recheck = async () => {
     setRechecking(true);
@@ -1630,14 +1727,25 @@ function DoctorUnreadable({ onRecheck }: { onRecheck: () => Promise<void> | void
       setRechecking(false);
     }
   };
+  const skew = failure === "decode";
   return (
     <div className="flex flex-col gap-3 px-4 py-4 text-xs leading-relaxed text-muted-foreground">
-      <p className="text-[12.5px] font-semibold text-foreground">Couldn't read the status</p>
-      <p>
-        agentstack is installed, but <code className="font-mono">doctor</code> returned no readable
-        report for this project. That is usually momentary — a status read that landed while
-        agentstack was writing. Any change you just made has still been applied.
+      <p className="text-[12.5px] font-semibold text-foreground">
+        {skew ? "The panel and the CLI don't match" : "Couldn't read the status"}
       </p>
+      {skew ? (
+        <p>
+          agentstack answered, but this panel couldn&apos;t read its report — the two speak
+          different versions. Updating the older side fixes it; nothing about the project itself is
+          wrong.
+        </p>
+      ) : (
+        <p>
+          agentstack is installed, but <code className="font-mono">doctor</code> returned no
+          readable report for this project. That is usually momentary — a status read that landed
+          while agentstack was writing. Any change you just made has still been applied.
+        </p>
+      )}
       <div className="flex items-center gap-2">
         <button
           type="button"
@@ -1647,13 +1755,24 @@ function DoctorUnreadable({ onRecheck }: { onRecheck: () => Promise<void> | void
         >
           {rechecking ? "Checking…" : "Check again"}
         </button>
-        <span className="text-[10.5px] text-muted-foreground/60">
-          Re-checks automatically every few seconds, too.
-        </span>
+        {skew ? null : (
+          <span className="text-[10.5px] text-muted-foreground/60">
+            Re-checks automatically every few seconds, too.
+          </span>
+        )}
       </div>
       <p className="text-[10.5px] text-muted-foreground/60">
-        If it persists, <code className="font-mono">agentstack doctor</code> in a terminal shows the
-        underlying error.
+        {skew ? (
+          <>
+            <code className="font-mono">agentstack doctor</code> in a terminal still shows the full
+            report.
+          </>
+        ) : (
+          <>
+            If it persists, <code className="font-mono">agentstack doctor</code> in a terminal shows
+            the underlying error.
+          </>
+        )}
       </p>
     </div>
   );
@@ -2544,6 +2663,8 @@ interface ManageProps {
   findings: ReadonlyArray<AgentstackFinding>;
   features: ReadonlyArray<string> | undefined;
   advisories: number | null;
+  /** The CLI advertises `doctor-mode-v1`, so mode/activation are readable. */
+  canReadMode: boolean;
   canRestore: boolean;
   /** Whether the CLI advertises `doctor-probe-v1`. False hides the startup
    *  test entirely — the button must not exist where it can't be honored. */
@@ -2590,16 +2711,16 @@ interface ManageProps {
 }
 
 /**
- * Manage — everything that isn't the glance, in one dialog with four tabs.
+ * Manage — everything that isn't the glance, in one dialog with three tabs.
  *
- * It replaces four look-alike navigation rows, a back-stack and two sibling
- * dialogs (Library, Checkup) with a flat, four-way choice at 768px. Nothing
- * here is new capability: Setup, Toolsets, Protection and Activity are the
- * screens the popover already had, given the width they were always being
- * clipped for, and reachable in one click instead of two plus "← Back".
+ * It replaces look-alike navigation rows, a back-stack and two sibling
+ * dialogs (Library, Checkup) with a flat choice at 768px. Nothing here is new
+ * capability: Status, Toolsets and Activity are the screens the popover
+ * already had, given the width they were always being clipped for, and
+ * reachable in one click instead of two plus "← Back". The Protection &
+ * sharing reference opens from the corner link as a child screen.
  */
-function ManageDialog(props: ManageProps) {
-  const doctor = props.status?.doctor ?? null;
+function ManageDialog(props: ManageProps & { onOpenReference: () => void }) {
   /**
    * Set by the Toolsets tab while a preview or confirm sheet is up, cleared
    * when it isn't. A ref, not state: nothing renders from it, it is only read
@@ -2661,8 +2782,18 @@ function ManageDialog(props: ManageProps) {
               ) : null}
             </button>
           ))}
+          {/* The reference sheet's door. A link, not a tab: Protection and
+              Sharing are read, not operated, and a tab's rank should be earned
+              by how often a visit is FOR it. */}
+          <button
+            type="button"
+            onClick={props.onOpenReference}
+            className="ml-auto shrink-0 px-2 py-2 text-[11.5px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+          >
+            Protection &amp; sharing
+          </button>
           {shortAgentstackVersion(props.version) ? (
-            <span className="ml-auto pr-2 font-mono text-[10.5px] text-muted-foreground/70">
+            <span className="pr-2 font-mono text-[10.5px] text-muted-foreground/70">
               {shortAgentstackVersion(props.version)}
             </span>
           ) : null}
@@ -2670,12 +2801,12 @@ function ManageDialog(props: ManageProps) {
 
         {/* A FIXED frame, not a max-height.
             With `max-h`, the dialog took its height from whichever tab was
-            open — Setup is short, Protection is three screens — so every tab
-            click resized the whole window under the pointer, and so did each
-            inner view swap. The box is now constant; only what is inside it
-            scrolls, and each tab owns its own scroll region so switching back
-            returns you to where you were rather than to the top of a
-            different-sized page. */}
+            open — Status can be one line or thirty — so every tab click
+            resized the whole window under the pointer, and so did each inner
+            view swap. The box is now constant; only what is inside it scrolls,
+            and each tab owns its own scroll region so switching back returns
+            you to where you were rather than to the top of a different-sized
+            page. */}
         <div className="flex h-[min(600px,68vh)] flex-col overflow-hidden">
           {props.tab === "setup" ? (
             <div className="min-h-0 flex-1 overflow-y-auto">
@@ -2683,20 +2814,6 @@ function ManageDialog(props: ManageProps) {
             </div>
           ) : props.tab === "toolsets" ? (
             <ToolsetsTab {...props} onPendingEdit={onPendingEdit} />
-          ) : props.tab === "protection" ? (
-            <div className="min-h-0 flex-1 overflow-y-auto">
-              <ProtectionPanel
-                doctor={doctor}
-                actionState={props.actionState}
-                onRequestAction={props.onRequestAction}
-                onConfirm={props.onConfirm}
-                onCancel={props.onCancelAction}
-              />
-            </div>
-          ) : props.tab === "sharing" ? (
-            <div className="min-h-0 flex-1 overflow-y-auto">
-              <SharePanel doctor={doctor} />
-            </div>
           ) : (
             <div className="min-h-0 flex-1 overflow-y-auto">
               <ActivityTab {...props} />
@@ -2709,33 +2826,45 @@ function ManageDialog(props: ManageProps) {
 }
 
 /**
- * Setup — is this project in sync, what did the checkup find, and how to take
- * a change back. The three questions the popover used to answer badly at
- * 400px, with room for the findings list to simply be open.
+ * Status — is this project ready, what the checkup found, and how to take a
+ * change back. One column, one visual grammar: the summary line is the only
+ * place that counts anything, the findings under it are the things counted,
+ * and everything that re-checks or reverts sits in one quiet utility row at
+ * the bottom.
  */
 function SetupTab(props: ManageProps) {
   const doctor = props.status?.doctor ?? null;
-  if (doctor === null) return <DoctorUnreadable onRecheck={props.onRecheck} />;
+  if (doctor === null)
+    return (
+      <DoctorUnreadable onRecheck={props.onRecheck} failure={props.status?.doctorFailure ?? null} />
+    );
   const { problems, healthy } = partitionAgentstackOverviewRows(props.rows);
+  // The Checkup pointer row is not drawn here: its counts moved onto the
+  // summary line, and the findings it pointed at are open directly below — a
+  // row saying "1 warning" above a list showing that warning is the same fact
+  // twice in two vocabularies.
+  const shownProblems = problems.filter((row) => row.key !== "doctor");
   const healthyLine = summarizeAgentstackHealthyRows(healthy);
   const chip = deriveAgentstackStatusChip({
     state: doctor.state,
     protection: doctor.protection,
   });
-  const mode = describeAgentstackMode(doctor.mode);
-  const notActivated = describeAgentstackActivation(doctor.activation);
+  const mode = props.canReadMode ? describeAgentstackMode(doctor.mode) : null;
+  const notActivated = props.canReadMode ? describeAgentstackActivation(doctor.activation) : null;
   return (
     <div className="flex flex-col p-2.5">
       {chip ? (
         <StatusSummary
           chip={chip}
+          errors={doctor.errors}
+          warnings={doctor.warnings}
           nextAction={doctor.next_action ?? null}
           advisories={props.advisories}
           onRunNextAction={props.onRequestAction}
           onReviewTrust={props.onReviewTrust}
         />
       ) : null}
-      {problems.map((row) => (
+      {shownProblems.map((row) => (
         <div key={row.key} className="flex items-start gap-2.5 rounded-lg px-2.5 py-[7px]">
           <span className={cn("mt-[7px] size-1.5 shrink-0 rounded-full", LEVEL_DOT[row.level])} />
           <div className="flex min-w-0 flex-1 flex-col gap-0.5">
@@ -2759,12 +2888,12 @@ function SetupTab(props: ManageProps) {
         onReviewTrust={props.onReviewTrust}
         onOpenManifest={props.onOpenManifest}
         alreadyOffered={matchAgentstackNextAction(doctor.next_action ?? null)}
-        defaultOpen
       />
       {healthyLine !== null ? (
+        // The green dot is the label; a bolded "Fine:" in front of it was a
+        // second one.
         <p className="flex items-center gap-2 px-2.5 py-1 text-[11px] text-muted-foreground">
           <span className="size-1.5 shrink-0 rounded-full bg-success/60" />
-          <span className="font-medium text-foreground">Fine:</span>
           {healthyLine}
         </p>
       ) : null}
@@ -2794,6 +2923,15 @@ function SetupTab(props: ManageProps) {
               </span>
             ) : null}
           </div>
+          {/* The verb the panel never had. `use <toolset>` was the only route
+              it knew, and a project with no toolset — which is every fresh one
+              — could not reach it. `lock` renders nothing, so this cannot
+              surprise a repo with files. */}
+          {notActivated !== null ? (
+            <RowAction onClick={() => props.onRequestAction("lock-write")}>
+              {ACTION_META["lock-write"].label}
+            </RowAction>
+          ) : null}
         </div>
       ) : null}
       {props.actionState.phase !== "idle" ? (
@@ -2803,26 +2941,43 @@ function SetupTab(props: ManageProps) {
           onCancel={props.onCancelAction}
         />
       ) : null}
-      {/* The bottom used to be three unlabelled rows of buttons stacked on each
-          other — undo, then a server probe, then re-check — with nothing saying
-          they were different kinds of thing. Two headings is the whole fix. */}
-      <TabSection title="Take a change back" />
-      <UndoAffordance
-        loadInventory={props.loadRestoreInventory}
-        onUndo={props.onUndo}
-        canRestore={props.canRestore}
-      />
-      <TabSection title="Check this project again" />
-      {props.canProbe ? (
-        <StartupTest
-          state={props.probeState}
-          onRequest={props.onRequestProbe}
-          onConfirm={props.onConfirmProbe}
-          onCancel={props.onCancelProbe}
-          onReviewTrust={props.onReviewTrust}
+      {/* Utilities — one quiet row, not two shouting sections. Re-check, the
+          startup test, the manifest and undo are all "ask this project
+          something" affordances; boxing them under TAKE A CHANGE BACK and
+          CHECK THIS PROJECT AGAIN made two more regions out of four buttons.
+          Every button stays visible (nothing moved behind a disclosure); an
+          engaged flow opens full-width beneath the row. */}
+      <div className="mx-1 mt-2 flex flex-wrap items-center gap-2 border-t border-border/40 px-1.5 pt-2">
+        <RecheckButton onRecheck={props.onRecheck} />
+        {props.canProbe && props.probeState.phase === "idle" ? (
+          <Button
+            size="xs"
+            variant="outline"
+            onClick={props.onRequestProbe}
+            title="Actually starts each declared server, once — asks first."
+          >
+            Test server startup
+          </Button>
+        ) : null}
+        {props.onOpenManifest ? (
+          <Button size="xs" variant="outline" onClick={props.onOpenManifest}>
+            Open manifest
+          </Button>
+        ) : null}
+        <UndoAffordance
+          loadInventory={props.loadRestoreInventory}
+          onUndo={props.onUndo}
+          canRestore={props.canRestore}
         />
-      ) : null}
-      <RecheckRow onRecheck={props.onRecheck} onOpenManifest={props.onOpenManifest} />
+        {props.canProbe && props.probeState.phase !== "idle" ? (
+          <StartupTest
+            state={props.probeState}
+            onConfirm={props.onConfirmProbe}
+            onCancel={props.onCancelProbe}
+            onReviewTrust={props.onReviewTrust}
+          />
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -2842,33 +2997,24 @@ function SetupTab(props: ManageProps) {
  */
 export function StartupTest({
   state,
-  onRequest,
   onConfirm,
   onCancel,
   onReviewTrust,
 }: {
   state: ProbeState;
-  onRequest: () => void;
   onConfirm: () => Promise<void>;
   onCancel: () => void;
   onReviewTrust: () => void;
 }) {
-  if (state.phase === "idle") {
-    return (
-      <div className="mx-1 mt-1.5 flex items-center gap-2 border-t border-border/40 px-1.5 pt-2">
-        <Button size="xs" variant="outline" onClick={onRequest}>
-          Test server startup
-        </Button>
-        <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground/70">
-          actually starts each declared server, once
-        </span>
-      </div>
-    );
-  }
+  // The idle button lives in the Status tab's utility row beside its
+  // siblings; this component owns only the engaged flow, full-width under
+  // that row. The confirm text below restates the side effect completely, so
+  // nothing consent-relevant was lost by moving the button.
+  if (state.phase === "idle") return null;
   if (state.phase === "confirm" || state.phase === "running") {
     const running = state.phase === "running";
     return (
-      <div className="mx-1 mt-1.5 flex flex-col gap-2 border-t border-border/40 px-1.5 pt-2">
+      <div className="flex w-full flex-col gap-2 rounded-lg border border-border/40 bg-foreground/[0.02] px-2.5 py-2">
         <p className="text-[11px] leading-relaxed text-muted-foreground">
           This starts every stdio server this project declares — the same command,{" "}
           <code className="font-mono">env</code> and working directory a rendered config gives a
@@ -2892,7 +3038,7 @@ export function StartupTest({
   }
   if (state.unavailable) {
     return (
-      <div className="mx-1 mt-1.5 flex flex-col gap-2 border-t border-border/40 px-1.5 pt-2">
+      <div className="flex w-full flex-col gap-2 rounded-lg border border-border/40 bg-foreground/[0.02] px-2.5 py-2">
         <p className="text-[11px] leading-relaxed text-muted-foreground">
           Couldn&apos;t run the startup test — the agentstack CLI didn&apos;t answer.
         </p>
@@ -2908,7 +3054,7 @@ export function StartupTest({
   }
   if (state.probe === null) {
     return (
-      <div className="mx-1 mt-1.5 flex flex-col gap-2 border-t border-border/40 px-1.5 pt-2">
+      <div className="flex w-full flex-col gap-2 rounded-lg border border-border/40 bg-foreground/[0.02] px-2.5 py-2">
         <p className="text-[11px] leading-relaxed text-warning-foreground">
           This agentstack CLI reported no startup results. Update agentstack to use the startup
           test.
@@ -2928,7 +3074,7 @@ export function StartupTest({
   if (!state.probe.ran) {
     const skip = describeAgentstackProbeSkip(state.probe.skipped_reason);
     return (
-      <div className="mx-1 mt-1.5 flex flex-col gap-2 border-t border-border/40 px-1.5 pt-2">
+      <div className="flex w-full flex-col gap-2 rounded-lg border border-border/40 bg-foreground/[0.02] px-2.5 py-2">
         <p className="text-[11px] leading-relaxed text-warning-foreground">{skip.text}</p>
         <div className="flex items-center gap-2">
           {skip.reviewTrust ? (
@@ -2949,7 +3095,7 @@ export function StartupTest({
   }
   const rows = deriveAgentstackProbeRows(state.probe.servers);
   return (
-    <div className="mx-1 mt-1.5 flex flex-col gap-1 border-t border-border/40 px-1.5 pt-2">
+    <div className="flex w-full flex-col gap-1 rounded-lg border border-border/40 bg-foreground/[0.02] px-2.5 py-2">
       {rows.length === 0 ? (
         <p className="text-[11px] leading-relaxed text-muted-foreground">
           No stdio servers to start. HTTP servers are checked by{" "}
@@ -2984,43 +3130,26 @@ export function StartupTest({
  * anything a wait wouldn't — but a screen listing seven warnings and offering
  * no way to ask "is that still true?" reads as a report you cannot argue with.
  * After fixing something in a terminal, this is the button you want, and it is
- * the same read `agentstack doctor` performs.
+ * the same read `agentstack doctor` performs. ("Open manifest" sits beside it
+ * in the utility row for the findings whose only remedy is an edit — the
+ * manifest IS what agentstack renders from, so handing it over is the
+ * supported path, not a workaround.)
  */
-function RecheckRow({
-  onRecheck,
-  onOpenManifest,
-}: {
-  onRecheck: () => Promise<void> | void;
-  onOpenManifest: (() => void) | null;
-}) {
+function RecheckButton({ onRecheck }: { onRecheck: () => Promise<void> | void }) {
   const [busy, setBusy] = useState(false);
   return (
-    <div className="mx-1 mt-1.5 flex items-center gap-2 border-t border-border/40 px-1.5 pt-2">
-      <Button
-        size="xs"
-        variant="outline"
-        disabled={busy}
-        onClick={() => {
-          setBusy(true);
-          void Promise.resolve(onRecheck()).finally(() => setBusy(false));
-        }}
-      >
-        {busy ? "Checking…" : "Check again"}
-      </Button>
-      {/* Several findings ("cwd '.' resolves to the project root", a server
-          whose binary moved) have no remedy but editing the manifest, and the
-          panel has no verb for that. Handing over the source of truth is the
-          honest affordance — the manifest IS what agentstack renders from, so
-          editing it here is the supported path, not a workaround. */}
-      {onOpenManifest ? (
-        <Button size="xs" variant="outline" onClick={onOpenManifest}>
-          Open manifest
-        </Button>
-      ) : null}
-      <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground/70">
-        re-runs every check on this tab
-      </span>
-    </div>
+    <Button
+      size="xs"
+      variant="outline"
+      disabled={busy}
+      title="Re-runs every check on this tab."
+      onClick={() => {
+        setBusy(true);
+        void Promise.resolve(onRecheck()).finally(() => setBusy(false));
+      }}
+    >
+      {busy ? "Checking…" : "Check again"}
+    </Button>
   );
 }
 
@@ -3884,23 +4013,31 @@ function LibraryPane({
         />
       </div>
       {untrusted ? (
-        // Precise about which paths the review gates. Adding is an explicit,
-        // user-initiated static apply, and that is NOT one of them — it writes
-        // the manifest and renders your CLI configs today. What stays inert
-        // until review is the automatic surface: the auto-mode gateway won't
-        // spawn or contact these servers or resolve their secrets, and
-        // declared extensions don't land. Saying "nothing renders" here would
-        // promise a gate the CLI does not implement.
-        <div className="mx-3 mb-2 flex flex-col items-start gap-1.5 rounded-lg border border-warning/25 bg-warning/[0.07] px-2.5 py-1.5">
-          <p className="text-[10.5px] leading-relaxed text-warning-foreground">
-            This project isn&apos;t reviewed yet. Adding still writes the manifest and renders your
-            CLI configs — but until you review it, auto mode won&apos;t run or contact these
-            servers, and declared extensions stay unapplied.
-          </p>
-          <Button size="xs" variant="outline" onClick={onReviewTrust}>
-            Review this project
-          </Button>
-        </div>
+        // One line, not a card: the popover and the Status tab already carry
+        // the full not-reviewed treatment, and repeating it at card weight
+        // here made the same fact a third alarm. The precise version — adding
+        // is an explicit static apply that DOES write the manifest and render
+        // configs today; what stays inert until review is the automatic
+        // surface (auto-mode won't spawn or contact these servers or resolve
+        // their secrets, and declared extensions don't land) — lives in the
+        // tooltip. Saying "nothing renders" would promise a gate the CLI does
+        // not implement.
+        <p
+          className="mx-3 mb-2 flex items-center gap-2 text-[10.5px] leading-relaxed text-warning-foreground"
+          title="Adding still writes the manifest and renders your CLI configs — but until you review the project, auto mode won't run or contact these servers, and declared extensions stay unapplied."
+        >
+          <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-warning" />
+          <span className="min-w-0 flex-1 truncate">
+            Not reviewed yet — added servers stay inert in auto mode.
+          </span>
+          <button
+            type="button"
+            onClick={onReviewTrust}
+            className="shrink-0 font-medium text-warning-foreground underline-offset-2 hover:underline"
+          >
+            Review
+          </button>
+        </p>
       ) : null}
       <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
         {load.phase === "loading" ? (
@@ -4091,20 +4228,12 @@ export function CheckupFindings({
   onRequestAction,
   onReviewDrift,
   onReviewTrust,
-  defaultOpen = false,
   alreadyOffered = null,
   onOpenManifest = null,
 }: {
   findings: ReadonlyArray<AgentstackFinding>;
   features: ReadonlyArray<string> | undefined;
   onRequestAction: (a: ActionKind) => void;
-  /**
-   * Start expanded. True in the Manage dialog, where the tab is 600px tall and
-   * the findings are the reason you opened Setup — a disclosure there is a
-   * click charged for hiding nothing. It stays closed anywhere the surface is
-   * short enough that an open list would push other things off it.
-   */
-  defaultOpen?: boolean;
   /**
    * An action a sibling on the SAME screen already offers a button for.
    *
@@ -4158,26 +4287,17 @@ export function CheckupFindings({
   const groups = useMemo(() => groupAgentstackFindingViews(visible), [visible]);
   if (total === 0) return null;
   return (
-    // Indented to the rows' text column (px-2.5 + 6px dot + gap-2.5) and hung
-    // off a rule, so it reads as the detail under the rows rather than as one
-    // more, wider, sibling row.
-    <details
-      open={defaultOpen}
-      className="group mr-1 mb-1 ml-[26px] border-border/50 border-l-2 py-1 pl-2.5 text-left"
-    >
-      <summary className="flex cursor-pointer select-none items-center gap-2 [&::-webkit-details-marker]:hidden">
-        <span className="text-xs font-semibold text-foreground">What the checkup found</span>
-        <span className="text-[11px] text-muted-foreground">
-          {formatAgentstackCount(total, "finding")}
-        </span>
-        <span className="ml-auto text-[10px] text-muted-foreground/60 transition-transform group-open:rotate-90">
-          ›
-        </span>
-      </summary>
+    // A flat, always-open list. It used to sit behind a <details> header
+    // reading "What the checkup found · 3 findings" — a disclosure charged for
+    // hiding nothing (the tab is 600px tall and the findings are the reason
+    // you opened it), and one more place counting what the summary line above
+    // already counts. Indented to the rows' text column and hung off a rule,
+    // so it reads as the detail under the rows rather than as more rows.
+    <div className="mr-1 mb-1 ml-[26px] border-border/50 border-l-2 py-1 pl-2.5 text-left">
       {/* One block per doctor section, each offering its verb once. Four
           drifted CLIs used to draw four identical "Review" buttons for the one
           dialog, which reads as four separate problems. */}
-      <ul className="flex flex-col pt-1.5">
+      <ul className="flex flex-col">
         {groups.map((group) => {
           const act =
             group.action === "review-trust"
@@ -4203,11 +4323,12 @@ export function CheckupFindings({
               <div className="flex items-center gap-2">
                 {/* One dot per section, not per line: the dot marks how urgent
                     this group is, and repeating it down every message made a
-                    note look exactly like a blocker. */}
+                    note look exactly like a blocker. No count chip — the
+                    findings are right here to be seen, and the summary line up
+                    top already owns the numbers. */}
                 <span className={cn("size-1.5 shrink-0 rounded-full", LEVEL_DOT[group.level])} />
-                <span className="text-[11px] font-medium text-foreground">{group.section}</span>
-                <span className="text-[10.5px] text-muted-foreground/70">
-                  {formatAgentstackCount(group.items.length, "finding")}
+                <span className="text-[11px] font-medium text-foreground">
+                  {describeAgentstackFindingSection(group.section)}
                 </span>
                 {act !== null ? (
                   <span className="ml-auto">
@@ -4226,12 +4347,6 @@ export function CheckupFindings({
                     >
                       {finding.message}
                     </span>
-                    {isAgentstackAbsentAdapterFinding(finding) ? (
-                      <span className="text-[10.5px] leading-snug text-muted-foreground">
-                        Not installed here. Leftover config is enough for AgentStack to keep
-                        managing it — drop the name from [targets] to stop.
-                      </span>
-                    ) : null}
                     {/* One line per remedy doctor offered. Several are a choice
                         of two ("keep them: … · prune them: …"), and a single
                         copyable line there is not a command anyone can run.
@@ -4262,6 +4377,16 @@ export function CheckupFindings({
                       : null}
                   </div>
                 ))}
+                {/* Shared knowledge stated once, not under every line: two
+                    leftover configs used to each carry the same two-sentence
+                    explainer, doubling the quietest group's height. */}
+                {group.items.every((v) => isAgentstackAbsentAdapterFinding(v.finding)) ? (
+                  <span className="text-[10.5px] leading-snug text-muted-foreground">
+                    Not installed here. Leftover config is enough for AgentStack to keep managing{" "}
+                    {group.items.length === 1 ? "it" : "them"} — drop the name from{" "}
+                    <code className="font-mono">targets</code> in the manifest to stop.
+                  </span>
+                ) : null}
               </div>
             </li>
           );
@@ -4276,7 +4401,7 @@ export function CheckupFindings({
           See all {total} →
         </button>
       ) : null}
-    </details>
+    </div>
   );
 }
 
@@ -4292,12 +4417,23 @@ export function CheckupFindings({
  */
 export function StatusSummary({
   chip,
+  errors = 0,
+  warnings = 0,
   nextAction,
   advisories,
   onRunNextAction,
   onReviewTrust,
 }: {
   chip: NonNullable<ReturnType<typeof deriveAgentstackStatusChip>>;
+  /**
+   * The checkup's own counts, drawn once here and nowhere else. The tab used
+   * to count in four vocabularies at once — "2 notes" by the chip, "1 warning"
+   * on the Checkup row, "3 findings" on the list header, "1 finding" per
+   * group — describing one report. One line owns every number; the list below
+   * just lists.
+   */
+  errors?: number;
+  warnings?: number;
   nextAction: string | null;
   /** Null when the CLI doesn't advertise `doctor-advisories-v1`, or none exist. */
   advisories: number | null;
@@ -4342,6 +4478,17 @@ export function StatusSummary({
         >
           {chip.label}
         </span>
+        {errors > 0 || warnings > 0 ? (
+          <span className="text-[11px] text-muted-foreground">
+            ·{" "}
+            {[
+              errors > 0 ? formatAgentstackCount(errors, "error") : null,
+              warnings > 0 ? formatAgentstackCount(warnings, "warning") : null,
+            ]
+              .filter(Boolean)
+              .join(" · ")}
+          </span>
+        ) : null}
         {advisories && advisories > 0 ? (
           // Deliberately beside the chip and deliberately muted: an advisory
           // must be visible without competing with readiness. "Ready · 2 notes"
@@ -4350,7 +4497,7 @@ export function StatusSummary({
           // permanent-orange problem the advisory tier removed.
           <span
             className="text-[11px] text-muted-foreground"
-            title="Notes worth knowing that this project does not have to fix. Run `agentstack doctor` for the detail."
+            title="Notes worth knowing that this project does not have to fix — they are listed with the findings below."
           >
             · {advisories} {advisories === 1 ? "note" : "notes"}
           </span>
@@ -5490,27 +5637,29 @@ function UndoAffordance({
     await reveal();
   }, [load, onUndo, reveal]);
 
+  // Renders inline in the Status tab's utility row: the idle state is one
+  // button among its siblings, and everything after the click opens as a
+  // full-width block wrapped to its own line. The stated absence (rather than
+  // a hidden button) is deliberate — see the feature-gate comments up top.
   if (!canRestore) {
     return (
-      <div className="mx-1 mt-1.5 border-t border-border/40 px-1.5 pt-2">
-        <span className="text-[11px] text-muted-foreground/70" title="Update the agentstack CLI">
-          Undo isn't available on this agentstack CLI — update it to revert managed changes.
-        </span>
-      </div>
+      <span className="text-[11px] text-muted-foreground/70" title="Update the agentstack CLI">
+        Undo isn't available on this agentstack CLI — update it to revert managed changes.
+      </span>
+    );
+  }
+
+  if (load.phase === "idle") {
+    return (
+      <Button size="xs" variant="outline" onClick={() => void reveal()}>
+        Undo last change…
+      </Button>
     );
   }
 
   return (
-    <div className="mx-1 mt-1.5 flex flex-col gap-1.5 border-t border-border/40 px-1.5 pt-2">
-      {load.phase === "idle" ? (
-        <button
-          type="button"
-          onClick={() => void reveal()}
-          className="inline-flex h-7 items-center self-start rounded-lg border border-border/60 px-2.5 text-[11px] font-semibold text-foreground/90 transition-colors hover:border-border hover:bg-foreground/[0.04] hover:text-foreground"
-        >
-          Undo last change…
-        </button>
-      ) : load.phase === "loading" ? (
+    <div className="flex w-full flex-col gap-1.5 rounded-lg border border-border/40 bg-foreground/[0.02] px-2.5 py-2">
+      {load.phase === "loading" ? (
         <span className="text-[11px] text-muted-foreground">Checking recent changes…</span>
       ) : load.phase === "empty" ? (
         <span className="text-[11px] text-muted-foreground">
@@ -6967,7 +7116,7 @@ function SharePanel({ doctor }: { doctor: AgentstackStatus["doctor"] }) {
           <code className="font-mono">lock</code> resolves every reference to exact bytes, so a
           teammate gets what you got — and a later change is visible instead of silent.
         </p>
-        <CopyableCommand text="agentstack lock --write" />
+        <CopyableCommand text="agentstack lock" />
       </PanelSection>
 
       <PanelSection title="Across your own machines">

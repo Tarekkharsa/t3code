@@ -81,6 +81,38 @@ describe("StatusSummary", () => {
     expect(markup).toContain("1 note");
   });
 
+  it("owns the checkup counts — the one place on the tab that counts anything", () => {
+    // The tab used to count in four vocabularies (notes by the chip, warnings
+    // on the Checkup row, findings on the list header and per group) for one
+    // report. The summary line now carries error/warning counts itself, so
+    // the list below can just list.
+    const markup = renderToStaticMarkup(
+      <StatusSummary
+        chip={chipFor("needs_attention")}
+        errors={1}
+        warnings={2}
+        nextAction={null}
+        advisories={1}
+      />,
+    );
+    expect(markup).toContain("1 error");
+    expect(markup).toContain("2 warnings");
+    expect(markup).toContain("1 note");
+
+    // A clean report renders no zero-counts.
+    const clean = renderToStaticMarkup(
+      <StatusSummary
+        chip={chipFor("ready")}
+        errors={0}
+        warnings={0}
+        nextAction={null}
+        advisories={null}
+      />,
+    );
+    expect(clean).not.toContain("0 error");
+    expect(clean).not.toContain("warning");
+  });
+
   it("offers the review when the recommendation is to trust this project", () => {
     // The trust recommendation is a screen, not a write: it must never reach the
     // action RPC, and it must not be the one recommendation you cannot act on.

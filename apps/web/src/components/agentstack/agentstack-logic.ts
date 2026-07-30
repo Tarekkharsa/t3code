@@ -100,7 +100,8 @@ export type AgentstackActionKind =
   | "apply-global"
   | "adopt-project"
   | "adopt-global"
-  | "guard-install";
+  | "guard-install"
+  | "lock-write";
 
 /**
  * The kinds a "what do I press here" surface may offer — the governed actions
@@ -154,6 +155,10 @@ const countOf = formatAgentstackCount;
  * It used to read "1 error(s) · 7 warning(s)" — the parenthetical plural is a
  * programmer's shorthand for "I didn't want to branch", and it is the first
  * line of the panel's most important row.
+ *
+ * Counts only — no "open the list below". The row can be quoted where no list
+ * follows (the popover's fallback concern), and where the list does follow it
+ * is adjacent and open, so the pointer was either wrong or redundant.
  */
 export function formatAgentstackCheckupSummary(errors: number, warnings: number): string {
   if (errors <= 0 && warnings <= 0) return "all checks pass";
@@ -161,7 +166,7 @@ export function formatAgentstackCheckupSummary(errors: number, warnings: number)
     errors > 0 ? countOf(errors, "error") : null,
     warnings > 0 ? countOf(warnings, "warning") : null,
   ].filter((p): p is string => p !== null);
-  return `${parts.join(" · ")} — open the list below`;
+  return parts.join(" · ");
 }
 
 /**
@@ -1365,6 +1370,13 @@ export function matchAgentstackNextAction(
 ): AgentstackPanelActionKind | null {
   if (!nextAction) return null;
   const normalized = nextAction.trim().replace(/\s+/g, " ");
+  // Doctor recommends `trust` with the project's own absolute path — which the
+  // exact-match list below can never contain. A path is a destination, not a
+  // flag, so accepting `trust <one-path>` keeps the whitelist's promise: any
+  // flagged form (`--revoke`, `--yes`) still falls through to plain text. The
+  // review screen the caller opens is scope-free either way — it always shows
+  // this project's own surface.
+  if (/^agentstack trust \/[^\s-][^\s]*$/.test(normalized)) return "review-trust";
   switch (normalized) {
     case "agentstack guard install":
       return "guard-install";
@@ -1759,6 +1771,23 @@ export function selectAgentstackFindingsView(
   return { visible, hidden: ranked.length - visible.length, total: ranked.length };
 }
 
+/**
+ * Plain-language names for the doctor sections whose CLI titles are internal
+ * vocabulary. Display only: grouping, dedup and the drift/trust routing all
+ * key on the CLI's own title, so a rename here can never change behavior. A
+ * title not named here renders verbatim — a new doctor section must never be
+ * hidden or mistranslated by an older panel.
+ */
+const AGENTSTACK_SECTION_DISPLAY: Readonly<Record<string, string>> = {
+  // The same fact the Protection sheet calls "Live serving"; one name for one
+  // mechanism, and the internal architecture word stays in the CLI report.
+  "Zero-files gateway": "Live serving",
+};
+
+export function describeAgentstackFindingSection(title: string): string {
+  return AGENTSTACK_SECTION_DISPLAY[title] ?? title;
+}
+
 export interface AgentstackFindingGroup {
   /** The doctor section these findings came from; unique within the list. */
   readonly key: string;
@@ -1831,6 +1860,12 @@ export const AGENTSTACK_ACTION_META: Record<
   AgentstackActionKind,
   { readonly label: string; readonly confirm: string; readonly note: string }
 > = {
+  "lock-write": {
+    label: "Activate",
+    confirm:
+      "Pin this project's servers and skills into agentstack.lock. Nothing is rendered and no skill is materialized — this only records what the manifest currently resolves to, which is what trust is then bound against.",
+    note: "pins content · renders nothing",
+  },
   "adopt-project": {
     label: "Keep edits",
     confirm:
@@ -1937,7 +1972,13 @@ export function selectAgentstackPrimaryConcern(input: {
   readonly findings: ReadonlyArray<AgentstackFinding>;
   readonly trust: AgentstackTrustState;
 }): AgentstackPrimaryConcern | null {
-  const { problems } = partitionAgentstackOverviewRows(input.rows);
+  // The Checkup row is a pointer at the findings list, not a problem of its
+  // own — counting it beside the findings it summarizes counted every warning
+  // twice, and "2 more in Manage" over one warning is a claim the reader can
+  // check and find false.
+  const problems = partitionAgentstackOverviewRows(input.rows).problems.filter(
+    (r) => r.key !== "doctor",
+  );
   // Advisories are excluded outright: this function answers "what is the one
   // thing to do here", and an advisory answers "nothing". Counting them would
   // also inflate the "N more in Manage" tally with things that need nobody.

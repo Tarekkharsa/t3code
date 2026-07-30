@@ -17,6 +17,7 @@ import {
   deriveAgentstackTrustBadge,
   describeAgentstackDriftStory,
   describeAgentstackProbeSkip,
+  describeAgentstackFindingSection,
   describeAgentstackSerialRoles,
   deriveToolsetRows,
   deriveTrustSurface,
@@ -847,6 +848,18 @@ describe("matchAgentstackNextAction", () => {
     expect(matchAgentstackNextAction("agentstack trust ./sub")).toBeNull();
   });
 
+  it("routes trust-with-the-project's-own-path to the review too", () => {
+    // Doctor's real recommendation carries the absolute project path, which
+    // the exact list can never contain — and rendering IT as dead text while
+    // the finding below offered "Review & trust" was one instruction in two
+    // forms, only one of them pressable.
+    expect(matchAgentstackNextAction("agentstack trust /Users/x/proj")).toBe("review-trust");
+    // A flagged form is a different command; a path with spaces stays text
+    // rather than risking a wrong match.
+    expect(matchAgentstackNextAction("agentstack trust /p --yes")).toBeNull();
+    expect(matchAgentstackNextAction("agentstack trust /a b")).toBeNull();
+  });
+
   it("returns null for anything it does not exactly recognize", () => {
     expect(matchAgentstackNextAction("agentstack secret set GH_PAT")).toBeNull();
     expect(matchAgentstackNextAction("agentstack apply")).toBeNull();
@@ -1169,14 +1182,17 @@ describe("deriveAgentstackFindings", () => {
 });
 
 describe("formatAgentstackCheckupSummary", () => {
+  // Counts only, no "open the list below": the string can be quoted where no
+  // list follows (the popover's fallback concern), and where one does follow
+  // it is open and adjacent.
   it("pluralizes each count and keeps the promise that every finding names a fix", () => {
-    expect(formatAgentstackCheckupSummary(1, 7)).toBe("1 error · 7 warnings — open the list below");
-    expect(formatAgentstackCheckupSummary(2, 1)).toBe("2 errors · 1 warning — open the list below");
+    expect(formatAgentstackCheckupSummary(1, 7)).toBe("1 error · 7 warnings");
+    expect(formatAgentstackCheckupSummary(2, 1)).toBe("2 errors · 1 warning");
   });
 
   it("names only the level that exists, and says nothing is wrong when nothing is", () => {
-    expect(formatAgentstackCheckupSummary(0, 1)).toBe("1 warning — open the list below");
-    expect(formatAgentstackCheckupSummary(3, 0)).toBe("3 errors — open the list below");
+    expect(formatAgentstackCheckupSummary(0, 1)).toBe("1 warning");
+    expect(formatAgentstackCheckupSummary(3, 0)).toBe("3 errors");
     expect(formatAgentstackCheckupSummary(0, 0)).toBe("all checks pass");
   });
 });
@@ -1593,6 +1609,46 @@ describe("selectAgentstackPrimaryConcern", () => {
       trust: "trusted",
     });
     expect(concern?.act).toEqual({ kind: "manage" });
+  });
+
+  it("counts a warning once, not once as the Checkup row and again as its finding", () => {
+    // The Checkup row summarizes the findings; both derive from one report.
+    // Counting the pointer beside what it points at made "others" one too
+    // high for every warning on the panel — a claim the reader could check
+    // in Manage and find false.
+    const checkupRow: AgentstackOverviewRow = {
+      key: "doctor",
+      label: "Checkup",
+      summary: "1 warning",
+      level: "warn",
+    };
+    const finding: AgentstackFinding = {
+      key: "Secrets:0",
+      level: "warn",
+      message: "GITHUB_TOKEN not found",
+      fix: null,
+      fixOptions: [],
+      action: null,
+      section: "Secrets",
+    };
+    const concern = selectAgentstackPrimaryConcern({
+      rows: [checkupRow],
+      findings: [finding],
+      trust: "inert",
+    });
+    expect(concern?.act).toEqual({ kind: "review-trust" });
+    expect(concern?.others).toBe(1);
+  });
+});
+
+describe("describeAgentstackFindingSection", () => {
+  it("renders the internal gateway section as the name the Protection sheet uses", () => {
+    expect(describeAgentstackFindingSection("Zero-files gateway")).toBe("Live serving");
+  });
+
+  it("passes every other title through verbatim, including future ones", () => {
+    expect(describeAgentstackFindingSection("Adapters & CLIs")).toBe("Adapters & CLIs");
+    expect(describeAgentstackFindingSection("Brand-new section")).toBe("Brand-new section");
   });
 });
 

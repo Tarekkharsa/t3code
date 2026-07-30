@@ -1413,4 +1413,55 @@ describe("AgentstackCli", () => {
       expect(status.features).toEqual(["apply-setup", "restore-last"]);
     }).pipe(Effect.provide(ProcessRunnerTest));
   });
+
+  it.effect(
+    "status says WHY doctor is unreadable: decode for a complete answer, run for a cut-off one",
+    () => {
+      // The two causes wear different UI copy. "decode" is a version skew that
+      // no retry fixes; "run" is usually momentary. A timed-out read must be
+      // "run" even though its bytes also fail to parse — incomplete bytes say
+      // nothing about versions.
+      const run = vi.fn<ProcessRunner.ProcessRunner["Service"]["run"]>((input) => {
+        if (input.args.includes("--version")) return Effect.succeed(okOutput("agentstack 0.17.0"));
+        const call = run.mock.calls.length;
+        if (call <= 1) return Effect.succeed(okOutput("not json at all"));
+        return Effect.succeed({ ...okOutput('{"partial":'), timedOut: true });
+      });
+      const ProcessRunnerTest = Layer.succeed(
+        ProcessRunner.ProcessRunner,
+        ProcessRunner.ProcessRunner.of({ run }),
+      );
+
+      return Effect.gen(function* () {
+        const agentstack = yield* AgentstackCli.make();
+        const undecodable = yield* agentstack.status({ workspaceRoot: "/proj" });
+        expect(undecodable.doctor).toBeNull();
+        expect(undecodable.doctorFailure).toBe("decode");
+
+        const timedOut = yield* agentstack.status({ workspaceRoot: "/proj" });
+        expect(timedOut.doctor).toBeNull();
+        expect(timedOut.doctorFailure).toBe("run");
+      }).pipe(Effect.provide(ProcessRunnerTest));
+    },
+  );
+
+  it.effect("status carries no failure field at all when doctor decodes", () => {
+    // Absent, not null: old clients must see exactly the payload they saw
+    // before the field existed.
+    const doctor = JSON.stringify({ errors: 0, warnings: 0, state: "ready", sections: [] });
+    const run = vi.fn<ProcessRunner.ProcessRunner["Service"]["run"]>((input) =>
+      Effect.succeed(okOutput(input.args.includes("--version") ? "agentstack 0.17.0" : doctor)),
+    );
+    const ProcessRunnerTest = Layer.succeed(
+      ProcessRunner.ProcessRunner,
+      ProcessRunner.ProcessRunner.of({ run }),
+    );
+
+    return Effect.gen(function* () {
+      const agentstack = yield* AgentstackCli.make();
+      const status = yield* agentstack.status({ workspaceRoot: "/proj" });
+      expect(status.doctor).not.toBeNull();
+      expect("doctorFailure" in status).toBe(false);
+    }).pipe(Effect.provide(ProcessRunnerTest));
+  });
 });

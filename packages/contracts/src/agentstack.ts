@@ -178,6 +178,15 @@ export const AgentstackStatus = Schema.Struct({
   installed: Schema.Boolean,
   version: Schema.NullOr(Schema.String),
   doctor: Schema.NullOr(AgentstackDoctorReport),
+  /**
+   * Why `doctor` is null on an installed CLI. "run" = the process failed,
+   * timed out, or overflowed the output bound — usually momentary. "decode" =
+   * the CLI answered but this build could not understand the payload, which is
+   * a version skew between the panel and the CLI, and stays true until one of
+   * them is updated. Absent when `doctor` is present, and on older servers —
+   * clients must treat absence as "unknown", not as either cause.
+   */
+  doctorFailure: Schema.optionalKey(Schema.Literals(["run", "decode"])),
   checkedAt: Schema.Number,
   ...AgentstackNegotiationFields,
 });
@@ -1203,6 +1212,18 @@ export const AgentstackActionKind = Schema.Literals([
   // interrupted panel left behind.
   "session-start",
   "session-end",
+  // `lock-write` runs bare `agentstack lock` — resolve the manifest's refs and
+  // pin `agentstack.lock`. It renders no config and materializes no skill (the
+  // CLI says so itself), so it is the smallest write that moves a project from
+  // "never activated" to activated, and the one the panel had no path to at
+  // all: `lock` is not in the CLI's visible command list, and the only other
+  // activation route — `session-start` — needs a declared toolset a fresh
+  // project does not have.
+  //
+  // Deliberately argument-free. `lock` also carries `--update` and `--upgrade`,
+  // which re-resolve git skills and vendor packs to whatever is upstream right
+  // now; those change what the pin MEANS and must stay terminal work.
+  "lock-write",
 ]);
 export type AgentstackActionKind = typeof AgentstackActionKind.Type;
 

@@ -9,8 +9,12 @@
  */
 import { create } from "zustand";
 
-/** The tabs of the Manage dialog — the panel's only navigation. */
-export type AgentstackPanelTab = "setup" | "toolsets" | "protection" | "sharing" | "activity";
+/**
+ * The tabs of the Manage dialog — the panel's only navigation. Three, not
+ * five: Protection and Sharing are reference sheets reached from the dialog's
+ * corner link, not destinations something elsewhere would deep-link to.
+ */
+export type AgentstackPanelTab = "setup" | "toolsets" | "activity";
 
 interface AgentstackPanelStore {
   /** Increments on each open request; 0 means "never requested". */

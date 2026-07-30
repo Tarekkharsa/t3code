@@ -650,6 +650,13 @@ export function actionArgv(
     case "guard-install":
       // Machine-global; only adds pre-tool-use protection (cannot loosen).
       return ["guard", "install"];
+    case "lock-write":
+      // Bare `lock`: pin the manifest's refs into agentstack.lock. No flags —
+      // `--write` is only valid with `--upgrade` (clap `requires`), and both
+      // `--update` and `--upgrade` re-resolve to whatever is upstream now,
+      // which is a different act from pinning what is here. Renders nothing
+      // and materializes nothing, so it cannot surprise a project with files.
+      return ["--manifest-dir", workspaceRoot, "lock"];
     case "trust-grant":
       // --yes + --consented-digest: the review dialog showed the surface AND
       // received its digest from `trust --preview`; presenting it back makes
@@ -867,12 +874,23 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
         };
       }
 
-      const doctor =
-        doctorResult._tag === "Success" ? parseDoctorReport(doctorResult.result.stdout) : null;
+      // A timed-out or truncated read never reaches the decoder: its bytes are
+      // incomplete, and a decode failure over incomplete bytes would be
+      // reported as a version skew the user should go fix. Only a complete
+      // answer that still doesn't decode earns the "decode" verdict.
+      const answered =
+        doctorResult._tag === "Success" &&
+        !doctorResult.result.timedOut &&
+        !doctorResult.result.stdoutTruncated;
+      const doctor = answered ? parseDoctorReport(doctorResult.result.stdout) : null;
       return {
         installed: true,
         version: yield* Cache.get(versionCache, "version"),
         doctor,
+        // The read failed before it could answer ("run", usually momentary) or
+        // answered in a shape this build cannot read ("decode", version skew).
+        // Absent when doctor is present, so old clients change nothing.
+        ...(doctor === null ? { doctorFailure: answered ? "decode" : "run" } : {}),
         // The doctor payload carries the versioned envelope; surface its
         // features (for action gating) and any schema incompatibility.
         ...negotiate(doctor),

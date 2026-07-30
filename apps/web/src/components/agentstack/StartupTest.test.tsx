@@ -5,15 +5,11 @@ import { StartupTest, TrustServerBlockerNotice } from "./AgentstackControl";
 
 const noop = () => {};
 const confirm = async () => {};
+// The idle button lives in the Status tab's utility row now; this component
+// renders only the engaged flow, so idle is null and takes no onRequest.
 const render = (state: Parameters<typeof StartupTest>[0]["state"]) =>
   renderToStaticMarkup(
-    <StartupTest
-      state={state}
-      onRequest={noop}
-      onConfirm={confirm}
-      onCancel={noop}
-      onReviewTrust={noop}
-    />,
+    <StartupTest state={state} onConfirm={confirm} onCancel={noop} onReviewTrust={noop} />,
   );
 
 describe("StartupTest", () => {

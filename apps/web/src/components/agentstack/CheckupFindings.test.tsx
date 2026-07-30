@@ -65,11 +65,13 @@ describe("CheckupFindings", () => {
     expect(markup).toContain("install");
   });
 
-  it("opens onto the whole list, not onto three of five and a second gate", () => {
-    // One gate. The disclosure is the gate; the cap is for a pathological
-    // report, and an ordinary one must not need a second click.
+  it("shows the whole list flat — no header, no count, no second gate", () => {
+    // The list IS the content: no disclosure header, and no count of its own
+    // (the summary line above the list owns every number). The cap is for a
+    // pathological report; an ordinary one shows everything at once.
     const markup = draw(["status-v1"]);
-    expect(markup).toContain("5 findings");
+    expect(markup).not.toContain("What the checkup found");
+    expect(markup).not.toContain("findings");
     expect(markup).toContain("code-review not installed");
     expect(markup).not.toContain("See all");
   });
@@ -118,7 +120,6 @@ describe("CheckupFindings — acting on what it found", () => {
         features={["status-v1"]}
         onRequestAction={noop}
         onReviewDrift={noop}
-        defaultOpen
       />,
     );
     expect(markup).toContain("Codex CLI 2 change(s) pending");
@@ -129,12 +130,7 @@ describe("CheckupFindings — acting on what it found", () => {
 
   it("offers no review when the caller has no drift surface to open", () => {
     const markup = renderToStaticMarkup(
-      <CheckupFindings
-        findings={findings}
-        features={["status-v1"]}
-        onRequestAction={noop}
-        defaultOpen
-      />,
+      <CheckupFindings findings={findings} features={["status-v1"]} onRequestAction={noop} />,
     );
     expect(markup).toContain("Codex CLI 2 change(s) pending");
     expect(markup).not.toContain(">Review<");
@@ -145,12 +141,7 @@ describe("CheckupFindings — acting on what it found", () => {
     // list below it. Two "Enable guard" buttons on one screen read as two
     // repairs; there is one machine-wide write.
     const both = renderToStaticMarkup(
-      <CheckupFindings
-        findings={findings}
-        features={["status-v1"]}
-        onRequestAction={noop}
-        defaultOpen
-      />,
+      <CheckupFindings findings={findings} features={["status-v1"]} onRequestAction={noop} />,
     );
     expect(both).toContain("Enable guard");
 
@@ -160,7 +151,6 @@ describe("CheckupFindings — acting on what it found", () => {
         features={["status-v1"]}
         onRequestAction={noop}
         alreadyOffered="guard-install"
-        defaultOpen
       />,
     );
     expect(deduped).not.toContain("Enable guard");
@@ -196,7 +186,6 @@ describe("CheckupFindings — acting on what it found", () => {
         features={undefined}
         onRequestAction={noop}
         onReviewTrust={noop}
-        defaultOpen
       />,
     );
     expect(markup).toContain("not trusted at its current bytes");
@@ -204,12 +193,7 @@ describe("CheckupFindings — acting on what it found", () => {
 
     // No review surface to open → the command alone, as before.
     const noSurface = renderToStaticMarkup(
-      <CheckupFindings
-        findings={trustFindings}
-        features={["status-v1"]}
-        onRequestAction={noop}
-        defaultOpen
-      />,
+      <CheckupFindings findings={trustFindings} features={["status-v1"]} onRequestAction={noop} />,
     );
     expect(noSurface).toContain("not trusted at its current bytes");
     expect(noSurface).not.toContain("Review");
