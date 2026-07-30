@@ -46,6 +46,8 @@ import {
   type AgentstackOverviewRow,
   type AgentstackRestoreEntryLike,
   type AgentstackWorkflowStepLike,
+  describeAgentstackActivation,
+  describeAgentstackMode,
   groupAgentstackFindingViews,
   parseAgentstackDiff,
 } from "./agentstack-logic";
@@ -2072,5 +2074,40 @@ describe("groupAgentstackFindingViews", () => {
 
   it("reports no action for a group where none was offered", () => {
     expect(groupAgentstackFindingViews([view("Drift", "d1")])[0]!.action).toBeNull();
+  });
+});
+
+describe("describeAgentstackMode", () => {
+  it("says whether files persist, which is what other screens key off", () => {
+    expect(describeAgentstackMode("static")?.persistsOnDisk).toBe(true);
+    expect(describeAgentstackMode("clean-at-rest")?.persistsOnDisk).toBe(false);
+    expect(describeAgentstackMode("zero-files")?.persistsOnDisk).toBe(false);
+  });
+
+  it("says nothing when the CLI reported no mode", () => {
+    // Guessing here mislabels whether the user's files should exist at all.
+    expect(describeAgentstackMode(null)).toBeNull();
+    expect(describeAgentstackMode(undefined)).toBeNull();
+    expect(describeAgentstackMode("")).toBeNull();
+  });
+
+  it("treats an unrecognized mode as persisting, the conservative direction", () => {
+    // Keeps paths qualified rather than silently promising permanence.
+    const future = describeAgentstackMode("some-future-mode");
+    expect(future).toMatchObject({ label: "some-future-mode", persistsOnDisk: true });
+  });
+
+  it("never shows the internal token as the label for a known mode", () => {
+    for (const mode of ["static", "clean-at-rest", "zero-files"]) {
+      expect(describeAgentstackMode(mode)?.label).not.toContain(mode);
+    }
+  });
+});
+
+describe("describeAgentstackActivation", () => {
+  it("explains an absent lockfile, and stays quiet otherwise", () => {
+    expect(describeAgentstackActivation("never_activated")).toContain("Not activated yet");
+    expect(describeAgentstackActivation("locked")).toBeNull();
+    expect(describeAgentstackActivation(null)).toBeNull();
   });
 });

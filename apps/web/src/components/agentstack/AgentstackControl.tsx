@@ -63,6 +63,7 @@ import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { DiffStatLabel, hasNonZeroStat } from "../chat/DiffStatLabel";
 import { AgentstackMark } from "./AgentstackMark";
 import { DiffLines } from "./DiffLines";
+import { TomlEditor } from "./TomlEditor";
 import {
   AGENTSTACK_ACTION_META as ACTION_META,
   agentstackFeatureKnownMissing,
@@ -93,6 +94,8 @@ import {
   matchAgentstackNextAction,
   matchAgentstackTrustRefusal,
   parseAgentstackDiff,
+  describeAgentstackActivation,
+  describeAgentstackMode,
   groupAgentstackFindingViews,
   partitionAgentstackOverviewRows,
   selectAgentstackFindingsView,
@@ -261,6 +264,7 @@ const MANAGE_TABS: ReadonlyArray<{ id: Tab; label: string }> = [
   { id: "setup", label: "Setup" },
   { id: "toolsets", label: "Toolsets" },
   { id: "protection", label: "Protection" },
+  { id: "sharing", label: "Sharing" },
   { id: "activity", label: "Activity" },
 ];
 
@@ -391,6 +395,9 @@ export function AgentstackControl({
   const [originStack, setOriginStack] = useState<ReadonlyArray<ChildOrigin>>([]);
   /** Re-runs the prime effect after a failed attempt; see PRIME_RETRY_MS. */
   const [primeTick, setPrimeTick] = useState(0);
+  /** The manifest editor holds unsaved bytes; closing must confirm first. */
+  const [manifestDirty, setManifestDirty] = useState(false);
+  const [discardingManifest, setDiscardingManifest] = useState(false);
 
   /** Open a reading screen: the popover yields so only one surface is up. */
   const openReader = useCallback((show: (v: true) => void) => {
@@ -857,6 +864,23 @@ export function AgentstackControl({
     [openManifest, manageTab],
   );
 
+  /**
+   * The one way out of the manifest editor.
+   *
+   * Escape, the X and the editor's own Cancel all land here. When the buffer
+   * differs from what was read it raises the confirm instead of closing —
+   * previously the dialog guarded its own dismissals and Cancel reached past
+   * that guard, so the same screen both protected and discarded the edit
+   * depending on which control you used.
+   */
+  const closeManifestEditor = useCallback(() => {
+    if (manifestDirty) {
+      setDiscardingManifest(true);
+      return;
+    }
+    closeChild(() => setEditingManifest(null));
+  }, [manifestDirty, closeChild]);
+
   // What a child screen's Back control says. The top of the origin stack is
   // exactly where `closeChild` returns to, so the label can never disagree with
   // where the button actually goes.
@@ -1183,7 +1207,29 @@ export function AgentstackControl({
           title="Edit AgentStack manifest"
           back={backLabel}
           description="Review the project's source of truth before deciding whether to trust it."
-          onClose={() => closeChild(() => setEditingManifest(null))}
+          onClose={closeManifestEditor}
+          footer={
+            discardingManifest ? (
+              <div className="flex items-center gap-2 border-t border-border/60 bg-warning/[0.06] px-4 py-2.5">
+                <span className="min-w-0 flex-1 text-[11.5px] leading-relaxed text-foreground">
+                  You have unsaved changes here. Leaving discards them.
+                </span>
+                <Button size="xs" variant="outline" onClick={() => setDiscardingManifest(false)}>
+                  Keep editing
+                </Button>
+                <Button
+                  size="xs"
+                  variant="destructive"
+                  onClick={() => {
+                    setDiscardingManifest(false);
+                    closeChild(() => setEditingManifest(null));
+                  }}
+                >
+                  Discard
+                </Button>
+              </div>
+            ) : null
+          }
           width="max-w-3xl"
           bodyScroll={false}
         >
@@ -1191,10 +1237,12 @@ export function AgentstackControl({
             environmentId={environmentId}
             cwd={editingManifest.cwd}
             relativePath={editingManifest.relativePath}
-            onClose={() => closeChild(() => setEditingManifest(null))}
+            onDirtyChange={setManifestDirty}
+            onClose={closeManifestEditor}
             onSaved={() => {
               // Saving is also a close: it returns to the trust review, which
               // is where the edited bytes have to be looked at again.
+              setDiscardingManifest(false);
               closeChild(() => setEditingManifest(null));
               void refresh();
             }}
@@ -1224,22 +1272,36 @@ function ManifestEditorPanel({
   relativePath,
   onClose,
   onSaved,
+  onDirtyChange,
 }: {
   environmentId: EnvironmentId;
   cwd: string;
   relativePath: string;
   onClose: () => void;
   onSaved: () => void;
+  /** Reports unsaved edits up, so the dialog can refuse to discard them. */
+  onDirtyChange: (dirty: boolean) => void;
 }) {
   const file = useProjectFileQuery(environmentId, cwd, relativePath);
   const writeFile = useAtomCommand(projectEnvironment.writeFile, { reportFailure: false });
   const [contents, setContents] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const loaded = file.data?.contents ?? null;
 
   useEffect(() => {
     if (contents === null && file.data !== null) setContents(file.data.contents);
   }, [contents, file.data]);
+
+  // Compared against what was READ, not a "touched" flag: typing a character
+  // and deleting it again is not an unsaved edit, and guarding on it would
+  // make the confirm fire for nothing.
+  const dirty = contents !== null && loaded !== null && contents !== loaded;
+  useEffect(() => {
+    onDirtyChange(dirty);
+    // Leaving the editor must never leave the guard armed behind it.
+    return () => onDirtyChange(false);
+  }, [dirty, onDirtyChange]);
 
   const save = useCallback(async () => {
     if (contents === null) return;
@@ -1273,12 +1335,11 @@ function ManifestEditorPanel({
   return (
     <div className="flex h-[min(560px,64vh)] min-h-0 flex-col gap-3 px-4 py-4">
       <code className="shrink-0 font-mono text-[11px] text-muted-foreground">{relativePath}</code>
-      <textarea
-        aria-label="AgentStack manifest"
+      <TomlEditor
+        ariaLabel="AgentStack manifest"
         value={contents}
-        onChange={(event) => setContents(event.target.value)}
-        spellCheck={false}
-        className="min-h-0 flex-1 resize-none rounded-lg border border-border bg-background p-3 font-mono text-[11px] leading-relaxed text-foreground outline-none focus:border-foreground/30"
+        onChange={setContents}
+        className="min-h-0 flex-1"
       />
       <p className="shrink-0 text-[10.5px] leading-relaxed text-muted-foreground">
         Saving edits the manifest only. AgentStack will still require a valid lock and a fresh trust
@@ -2242,7 +2303,12 @@ function DriftScopeSection({
   const apply: ActionKind = scope === "global" ? "apply-global" : "apply-project";
 
   return (
-    <section className="flex flex-col gap-2.5">
+    <section
+      className={cn(
+        "flex flex-col gap-2.5",
+        scope === "global" && "rounded-lg border border-warning/25 bg-warning/[0.04] p-3",
+      )}
+    >
       <div className="flex items-baseline gap-2">
         <h3 className="text-xs font-semibold text-foreground">{where}</h3>
         {changed.length > 0 ? (
@@ -2259,6 +2325,12 @@ function DriftScopeSection({
           </span>
         ) : null}
       </div>
+      {scope === "global" ? (
+        <p className="text-[11px] leading-relaxed text-warning-foreground">
+          These files are shared by every project on this machine — a change here is not scoped to
+          this repo.
+        </p>
+      ) : null}
 
       {changed.length > 0 ? (
         <>
@@ -2565,7 +2637,6 @@ function ManageDialog(props: ManageProps) {
             <ToolsetsTab {...props} onPendingEdit={onPendingEdit} />
           ) : props.tab === "protection" ? (
             <div className="min-h-0 flex-1 overflow-y-auto">
-              <TabSection title="Stronger modes" first />
               <ProtectionPanel
                 doctor={doctor}
                 actionState={props.actionState}
@@ -2573,7 +2644,9 @@ function ManageDialog(props: ManageProps) {
                 onConfirm={props.onConfirm}
                 onCancel={props.onCancelAction}
               />
-              <TabSection title="Sharing this setup" />
+            </div>
+          ) : props.tab === "sharing" ? (
+            <div className="min-h-0 flex-1 overflow-y-auto">
               <SharePanel doctor={doctor} />
             </div>
           ) : (
@@ -2601,6 +2674,8 @@ function SetupTab(props: ManageProps) {
     state: doctor.state,
     protection: doctor.protection,
   });
+  const mode = describeAgentstackMode(doctor.mode);
+  const notActivated = describeAgentstackActivation(doctor.activation);
   return (
     <div className="flex flex-col p-2.5">
       {chip ? (
@@ -2640,8 +2715,37 @@ function SetupTab(props: ManageProps) {
       {healthyLine !== null ? (
         <p className="flex items-center gap-2 px-2.5 py-1 text-[11px] text-muted-foreground">
           <span className="size-1.5 shrink-0 rounded-full bg-success/60" />
+          <span className="font-medium text-foreground">Fine:</span>
           {healthyLine}
         </p>
+      ) : null}
+      {/* How this project reaches the coding tools. Stated, not inferred.
+          Everything below that names a path — the drift targets, the toolset
+          library, the setup plan — is only true of a project whose files
+          persist, and until now the panel never said which kind this was. A
+          user in "only while in use" went looking for a .mcp.json that is
+          removed on purpose; one in "served live" waited for files that never
+          arrive. */}
+      {mode !== null ? (
+        <div className="flex items-start gap-2.5 rounded-lg px-2.5 py-[7px]">
+          <span className="mt-[7px] size-1.5 shrink-0 rounded-full bg-muted-foreground/50" />
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <span className="text-[11px] font-medium text-muted-foreground">
+              How it's delivered
+            </span>
+            <span className="text-xs leading-snug text-foreground">{mode.label}</span>
+            {mode.detail ? (
+              <span className="text-[11px] leading-relaxed text-muted-foreground">
+                {mode.detail}
+              </span>
+            ) : null}
+            {notActivated !== null ? (
+              <span className="text-[11px] leading-relaxed text-muted-foreground">
+                {notActivated}
+              </span>
+            ) : null}
+          </div>
+        </div>
       ) : null}
       {props.actionState.phase !== "idle" ? (
         <ActionConfirm
@@ -2650,11 +2754,16 @@ function SetupTab(props: ManageProps) {
           onCancel={props.onCancelAction}
         />
       ) : null}
+      {/* The bottom used to be three unlabelled rows of buttons stacked on each
+          other — undo, then a server probe, then re-check — with nothing saying
+          they were different kinds of thing. Two headings is the whole fix. */}
+      <TabSection title="Take a change back" />
       <UndoAffordance
         loadInventory={props.loadRestoreInventory}
         onUndo={props.onUndo}
         canRestore={props.canRestore}
       />
+      <TabSection title="Check this project again" />
       {props.canProbe ? (
         <StartupTest
           state={props.probeState}
@@ -3090,7 +3199,7 @@ function ToolsetsTab(
     // Now the toolsets stay on the left, the library stays on the right, and
     // every step of an edit happens where you already are.
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex min-h-0 flex-1">
+      <div className={cn("flex min-h-0 flex-1", rows.length === 0 && draft === null && "flex-col")}>
         <ToolsetRail
           rows={rows}
           profiles={profiles}
@@ -3292,7 +3401,16 @@ function ToolsetRail({
   const picked = draft === null ? 0 : draft.skills.length + draft.servers.length;
 
   return (
-    <div className="flex w-[264px] shrink-0 flex-col border-r border-border/60">
+    // Narrow once there is a list to hold; the full width of the tab while
+    // there is not. A 264px column holding one "create the first one" card,
+    // with the library scrolling in the two thirds beside it, spends a third of
+    // the surface on a rail that has nothing to rail.
+    <div
+      className={cn(
+        "flex shrink-0 flex-col border-border/60",
+        rows.length === 0 && draft === null ? "w-full" : "w-[264px] border-r",
+      )}
+    >
       <div className="flex items-center gap-2 px-3 pb-1.5 pt-3">
         <span className="text-[10.5px] font-semibold tracking-wide text-muted-foreground">
           TOOLSETS
@@ -4129,7 +4247,15 @@ export function StatusSummary({
 }) {
   const runnable = matchAgentstackNextAction(nextAction);
   return (
-    <div className="mx-1 mb-1.5 flex flex-col gap-1.5 rounded-lg border border-border/50 bg-foreground/[0.02] px-2.5 py-2">
+    // No card when the chip is all there is. The box exists to hold the chip
+    // AND the recommended step; with nothing recommended it framed a single
+    // word in a full-width panel, which reads as a region that failed to load.
+    <div
+      className={cn(
+        "mx-1 mb-1.5 flex flex-col gap-1.5 px-2.5 py-2",
+        nextAction !== null && "rounded-lg border border-border/50 bg-foreground/[0.02]",
+      )}
+    >
       <div className="flex items-center gap-2">
         <span className={cn("size-1.5 shrink-0 rounded-full", LEVEL_DOT[chip.level])} aria-hidden />
         <span
@@ -4164,8 +4290,11 @@ export function StatusSummary({
               Review what this project declares before it can run here.
             </span>
           ) : runnable && runnable !== "review-trust" && onRunNextAction ? (
-            <span className="min-w-0 text-[11px] text-muted-foreground">
-              {ACTION_META[runnable].note}
+            <span className="flex min-w-0 flex-col text-[11px]">
+              <span className="text-foreground">
+                {ACTION_META[runnable].confirm.split(".")[0]}.
+              </span>
+              <span className="text-muted-foreground">{ACTION_META[runnable].note}</span>
             </span>
           ) : (
             <code className="min-w-0 wrap-break-word font-mono text-[11px] text-muted-foreground">
@@ -4286,6 +4415,7 @@ function PanelDialog({
   description,
   onClose,
   back = null,
+  footer = null,
   children,
   width = "max-w-2xl",
   bodyScroll = true,
@@ -4300,6 +4430,11 @@ function PanelDialog({
    * behind it.
    */
   back?: string | null;
+  /**
+   * Pinned below the body — where a screen puts something that must be answered
+   * before leaving, e.g. an unsaved-changes confirm.
+   */
+  footer?: ReactNode;
   children: ReactNode;
   width?: string;
   /**
@@ -4318,6 +4453,8 @@ function PanelDialog({
       // too easy to make by accident to be the gesture that discards one.
       disablePointerDismissal
       onOpenChange={(next) => {
+        // Every dismissal — Escape, the X — goes to the caller's one close
+        // handler, which is where the decision about unsaved work belongs.
         if (!next) onClose();
       }}
     >
@@ -4347,6 +4484,7 @@ function PanelDialog({
         >
           {children}
         </div>
+        {footer}
       </DialogPopup>
     </Dialog>
   );
@@ -6757,7 +6895,7 @@ function SharePanel({ doctor }: { doctor: AgentstackStatus["doctor"] }) {
           <code className="font-mono">lock</code> resolves every reference to exact bytes, so a
           teammate gets what you got — and a later change is visible instead of silent.
         </p>
-        <CommandLine text="agentstack lock --write" />
+        <CopyableCommand text="agentstack lock --write" />
       </PanelSection>
 
       <PanelSection title="Across your own machines">
@@ -6766,7 +6904,7 @@ function SharePanel({ doctor }: { doctor: AgentstackStatus["doctor"] }) {
           <code className="font-mono">{"${REF}"}</code> placeholders, so no secret leaves this
           machine.
         </p>
-        <CommandLine text="agentstack lib sync" />
+        <CopyableCommand text="agentstack lib sync" />
       </PanelSection>
 
       <PanelSection title="To a teammate">
@@ -6774,8 +6912,8 @@ function SharePanel({ doctor }: { doctor: AgentstackStatus["doctor"] }) {
           Commit the manifest and lockfile. To let them verify the lockfile is yours, sign it and
           publish the printed public key; they verify before trusting.
         </p>
-        <CommandLine text="agentstack sign" />
-        <CommandLine text="agentstack verify --pubkey <key>" />
+        <CopyableCommand text="agentstack sign" />
+        <CopyableCommand text="agentstack verify --pubkey <key>" />
         <p className="text-[11px] leading-relaxed text-muted-foreground/70">
           Moving a whole machine instead? <code className="font-mono">agentstack export</code>{" "}
           writes an encrypted bundle and <code className="font-mono">agentstack import</code> reads

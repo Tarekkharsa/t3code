@@ -447,6 +447,82 @@ export function deriveAgentstackProtectionRows(
   return rows;
 }
 
+// ── delivery mode ────────────────────────────────────────────────────────────
+
+export interface AgentstackModeFacts {
+  /** Plain-language name for the mode; never the internal token. */
+  readonly label: string;
+  /** What it means for files on this machine, in one sentence. */
+  readonly detail: string;
+  /**
+   * Whether a rendered config file exists on disk between sessions.
+   *
+   * This is the load-bearing bit. Every screen that names an on-disk path is
+   * making a claim that only holds when this is true: in clean-at-rest the
+   * file exists only while a session is open, and in zero-files it never
+   * exists at all. A path shown without that qualification tells a user to go
+   * look for something that is not there — and, worse, makes the absence read
+   * as a bug rather than as the mode working.
+   */
+  readonly persistsOnDisk: boolean;
+}
+
+/**
+ * What delivery mode this project is in, in the user's words.
+ *
+ * `doctor-mode-v1`. Null when the CLI does not report a mode (older binary) or
+ * doctor ran with no project — in both cases the panel must say nothing rather
+ * than guess, because guessing wrong here mislabels whether the user's files
+ * should exist.
+ *
+ * A mode the panel does not recognize still yields facts: the token is shown
+ * as-is and treated as persisting, which is the conservative direction (it
+ * keeps paths qualified rather than silently promising they are permanent).
+ */
+export function describeAgentstackMode(
+  mode: string | null | undefined,
+): AgentstackModeFacts | null {
+  if (mode === null || mode === undefined || mode === "") return null;
+  switch (mode) {
+    case "static":
+      return {
+        label: "Files on disk",
+        detail:
+          "Each coding tool reads a config file AgentStack writes here. The files stay between sessions.",
+        persistsOnDisk: true,
+      };
+    case "clean-at-rest":
+      return {
+        label: "Only while in use",
+        detail:
+          "Config files appear when you start using this toolset and are removed when you stop. Nothing is left on disk in between.",
+        persistsOnDisk: false,
+      };
+    case "zero-files":
+      return {
+        label: "Served live",
+        detail:
+          "Nothing is written to disk. Your coding tools fetch this project's servers from AgentStack while they run.",
+        persistsOnDisk: false,
+      };
+    default:
+      return { label: mode, detail: "", persistsOnDisk: true };
+  }
+}
+
+/**
+ * Whether this project has ever been activated (`doctor-mode-v1`).
+ *
+ * Kept apart from the mode: "never activated" explains an absent lockfile and
+ * absent configs regardless of which mode the manifest asks for, and conflating
+ * the two would report a mode's normal state as a fault.
+ */
+export function describeAgentstackActivation(activation: string | null | undefined): string | null {
+  return activation === "never_activated"
+    ? "Not activated yet — nothing has been written for this project."
+    : null;
+}
+
 // ── trust badge (header) ─────────────────────────────────────────────────────
 
 export type AgentstackTrustState = "trusted" | "inert" | "drifted" | "unknown";
@@ -1814,7 +1890,7 @@ const CONCERN_COPY: Record<string, { readonly title: string; readonly detail: st
     // rendered file looks like, and the glance cannot tell the two apart. The
     // drift review can — it reads the CLI's per-target `hand_edited` — so the
     // cause is named there, and the concern states the choice instead.
-    title: "A CLI config no longer matches the manifest",
+    title: "Your coding tool configs changed outside AgentStack",
     detail: "Keep what's on disk or re-render from the manifest — you choose which truth to keep.",
   },
 };

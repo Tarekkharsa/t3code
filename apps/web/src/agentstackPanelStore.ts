@@ -9,8 +9,8 @@
  */
 import { create } from "zustand";
 
-/** The four tabs of the Manage dialog — the panel's only navigation. */
-export type AgentstackPanelTab = "setup" | "toolsets" | "protection" | "activity";
+/** The tabs of the Manage dialog — the panel's only navigation. */
+export type AgentstackPanelTab = "setup" | "toolsets" | "protection" | "sharing" | "activity";
 
 interface AgentstackPanelStore {
   /** Increments on each open request; 0 means "never requested". */
