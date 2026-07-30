@@ -275,6 +275,13 @@ const MANAGE_TABS: ReadonlyArray<{ id: Tab; label: string }> = [
  */
 type ChildOrigin = { kind: "manage"; tab: Tab } | { kind: "trust" };
 
+/** What a Back control says when this origin is the one it returns to. */
+function originLabel(origin: ChildOrigin): string {
+  return origin.kind === "trust"
+    ? "Review this project"
+    : (MANAGE_TABS.find((t) => t.id === origin.tab)?.label ?? "Manage");
+}
+
 type ActionState =
   | { phase: "idle" }
   | { phase: "confirm"; action: ActionKind }
@@ -850,6 +857,14 @@ export function AgentstackControl({
     [openManifest, manageTab],
   );
 
+  // What a child screen's Back control says. The top of the origin stack is
+  // exactly where `closeChild` returns to, so the label can never disagree with
+  // where the button actually goes.
+  const backLabel = useMemo(() => {
+    const top = originStack.at(-1);
+    return top === undefined ? null : originLabel(top);
+  }, [originStack]);
+
   // Run the concern's one verb. `manage` and the two review kinds open a
   // surface; only `action` writes, and it still goes through the confirm step.
   const onConcern = useCallback(
@@ -1106,6 +1121,7 @@ export function AgentstackControl({
       {reviewing ? (
         <PanelDialog
           title="Review this project"
+          back={backLabel}
           description="What this project would be allowed to run here, before you approve it."
           onClose={() => closeChild(() => setReviewing(false))}
           bodyScroll={false}
@@ -1132,6 +1148,7 @@ export function AgentstackControl({
       {reviewingDrift ? (
         <PanelDialog
           title="Review drift"
+          back={backLabel}
           description="What changed on disk since AgentStack last wrote, and which truth to keep."
           onClose={() => closeChild(() => setReviewingDrift(false))}
           width="max-w-3xl"
@@ -1140,6 +1157,7 @@ export function AgentstackControl({
             loadDiff={loadDiff}
             onAction={runDriftAction}
             root={manifestSource?.path}
+            servedLive={status?.doctor?.mode === "zero-files"}
           />
         </PanelDialog>
       ) : null}
@@ -1163,6 +1181,7 @@ export function AgentstackControl({
       {editingManifest ? (
         <PanelDialog
           title="Edit AgentStack manifest"
+          back={backLabel}
           description="Review the project's source of truth before deciding whether to trust it."
           onClose={() => closeChild(() => setEditingManifest(null))}
           width="max-w-3xl"
@@ -1252,7 +1271,7 @@ function ManifestEditorPanel({
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-3 px-4 py-4">
+    <div className="flex h-[min(560px,64vh)] min-h-0 flex-col gap-3 px-4 py-4">
       <code className="shrink-0 font-mono text-[11px] text-muted-foreground">{relativePath}</code>
       <textarea
         aria-label="AgentStack manifest"
@@ -2049,11 +2068,23 @@ function DriftReviewPanel({
   loadDiff,
   onAction,
   root,
+  servedLive,
 }: {
   loadDiff: (scope: "global" | "project") => Promise<AgentstackDiffResult | null>;
   onAction: (action: ActionKind) => Promise<{ ok: boolean; message: string }>;
   /** Project root, so target paths read relative to the repo. */
   root: string | undefined;
+  /**
+   * `doctor-mode-v1` says this project is zero-files: rendered configs are kept
+   * off disk on purpose and the CLI skips the drift comparison entirely.
+   *
+   * Without this the screen falls through to "everything is in sync — the
+   * manifest matches every rendered config", which is a claim about a
+   * comparison that never ran, for files that do not exist by design. Same
+   * false reassurance `deriveAgentstackOverviewRows` already refuses to make on
+   * the Manifest row; this screen had not been given the same treatment.
+   */
+  servedLive: boolean;
 }) {
   const [load, setLoad] = useState<DriftLoad>({ phase: "loading" });
   const [act, setAct] = useState<DriftAct>({ phase: "idle" });
@@ -2106,8 +2137,9 @@ function DriftReviewPanel({
         </p>
       ) : !anyContent ? (
         <p className="px-4 py-4 text-xs leading-relaxed text-muted-foreground">
-          Everything is in sync — the manifest matches every rendered config, and no other setup's
-          servers need attention.
+          {servedLive
+            ? "Nothing is rendered on disk for this project — it is served live through the gateway, so there are no config files to compare. That is the mode working, not a problem."
+            : "Everything is in sync — the manifest matches every rendered config, and no other setup's servers need attention."}
         </p>
       ) : (
         <div className="flex flex-col gap-3 px-4 py-3">
@@ -4253,6 +4285,7 @@ function PanelDialog({
   title,
   description,
   onClose,
+  back = null,
   children,
   width = "max-w-2xl",
   bodyScroll = true,
@@ -4260,6 +4293,13 @@ function PanelDialog({
   title: string;
   description?: string | undefined;
   onClose: () => void;
+  /**
+   * Where closing this screen lands, when it lands somewhere. Null when it
+   * closes to the thread, which is the case for a screen opened straight from
+   * the popover — offering "Back" there would promise a surface that isn't
+   * behind it.
+   */
+  back?: string | null;
   children: ReactNode;
   width?: string;
   /**
@@ -4283,6 +4323,16 @@ function PanelDialog({
     >
       <DialogPopup className={width}>
         <DialogHeader>
+          {back !== null ? (
+            <button
+              type="button"
+              onClick={onClose}
+              className="-ml-1 mb-1 flex w-fit items-center gap-1 rounded-md px-1 py-0.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-foreground/[0.05] hover:text-foreground"
+            >
+              <ChevronRight aria-hidden className="size-3 rotate-180" />
+              {back}
+            </button>
+          ) : null}
           <DialogTitle className="flex items-center gap-2.5 pr-8">
             <AgentstackMark className="size-[18px] shrink-0" />
             <span className="truncate">{title}</span>
