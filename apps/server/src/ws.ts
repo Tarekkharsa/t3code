@@ -1389,6 +1389,14 @@ const makeWsRpcLayer = (
             ),
             { "rpc.aggregate": "agentstack" },
           ),
+        [WS_METHODS.agentstackDoctorProbe]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.agentstackDoctorProbe,
+            resolveAgentstackWorkspaceRoot(input).pipe(
+              Effect.flatMap((workspaceRoot) => agentstackCli.doctorProbe({ workspaceRoot })),
+            ),
+            { "rpc.aggregate": "agentstack" },
+          ),
         [WS_METHODS.agentstackActivity]: (input) =>
           observeRpcEffect(
             WS_METHODS.agentstackActivity,

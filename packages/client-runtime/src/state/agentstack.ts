@@ -12,6 +12,10 @@ export function createAgentstackEnvironmentAtoms<R, E>(
       tag: WS_METHODS.agentstackStatus,
       label: "agentstack.status",
     }),
+    doctorProbe: createEnvironmentRpcCommand(runtime, {
+      tag: WS_METHODS.agentstackDoctorProbe,
+      label: "agentstack.doctorProbe",
+    }),
     activity: createEnvironmentRpcCommand(runtime, {
       tag: WS_METHODS.agentstackActivity,
       label: "agentstack.activity",

@@ -16,6 +16,7 @@ import {
   type AgentstackActionResult,
   type AgentstackActivity,
   type AgentstackDiffResult,
+  type AgentstackDoctorProbeResult,
   type AgentstackIncompatible,
   type AgentstackLibraryIndexResult,
   type AgentstackProfileEdit,
@@ -695,6 +696,11 @@ export function actionArgv(
   }
 }
 
+// Build the escape prefix at runtime so the regex remains readable to the
+// linter while still matching the CLI's ANSI SGR colour sequences exactly.
+const ANSI_ESCAPE_CHAR = String.fromCharCode(27);
+const ANSI_SGR_REGEX = new RegExp(`${ANSI_ESCAPE_CHAR}\\[[0-9;]*m`, "g");
+
 /**
  * The last non-empty line of CLI output as the human outcome, with ANSI SGR
  * colour sequences stripped so the panel never renders raw escape codes. Shared
@@ -704,7 +710,7 @@ export function actionArgv(
 function lastCliLine(text: string): string {
   return (
     text
-      .replaceAll(/\u001b\[[0-9;]*m/g, "")
+      .replaceAll(ANSI_SGR_REGEX, "")
       .split("\n")
       .findLast((l) => l.trim().length > 0)
       ?.trim() ?? ""
@@ -729,6 +735,17 @@ function outcomeLine(stdout: string, stderr: string, ok: boolean): string {
     : lastCliLine(stderr) || lastCliLine(stdout) || "failed";
 }
 
+/**
+ * The CLI's refusal sentence for a nonzero-exit preview. Refusals arrive on
+ * stderr as one `error: …` line (the CLI's single error chokepoint, already
+ * escape-sanitized on its side); drop that prefix — the card frames it as a
+ * refusal — and bound the length so a runaway stderr cannot flood the panel.
+ */
+export function cliRefusalLine(stderr: string, stdout: string): string {
+  const line = lastCliLine(stderr) || lastCliLine(stdout) || "the CLI refused this change";
+  return line.replace(/^error:\s*/i, "").slice(0, 400);
+}
+
 function isBinaryNotFound(error: ProcessRunner.ProcessRunError): boolean {
   return (
     error._tag === "ProcessSpawnError" &&
@@ -743,6 +760,9 @@ export class AgentstackCli extends Context.Service<
   AgentstackCli,
   {
     readonly status: (input: AgentstackStatusRequest) => Effect.Effect<AgentstackStatus>;
+    readonly doctorProbe: (
+      input: AgentstackWorkspaceRequest,
+    ) => Effect.Effect<AgentstackDoctorProbeResult>;
     readonly activity: (input: AgentstackActivityRequest) => Effect.Effect<AgentstackActivity>;
     readonly workflow: (input: AgentstackWorkspaceRequest) => Effect.Effect<AgentstackWorkflowData>;
     readonly workflowRun: (
@@ -842,6 +862,53 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
       };
     },
   );
+
+  const doctorProbe: AgentstackCli["Service"]["doctorProbe"] = Effect.fn(
+    "AgentstackCli.doctorProbe",
+  )(function* (input) {
+    // The one doctor invocation with side effects: `--probe` starts each
+    // declared stdio server, handshakes, and reaps it. It runs on the action
+    // timeout, not the 15-second read budget — a cold `npx` server can eat
+    // most of that on its own, and the CLI bounds each probe itself.
+    const result = yield* processRunner
+      .run({
+        command: binary,
+        args: ["--manifest-dir", input.workspaceRoot, "doctor", "--probe", "--json"],
+        timeout: ACTION_TIMEOUT,
+        timeoutBehavior: "timedOutResult",
+        maxOutputBytes: MAX_STDOUT_BYTES,
+        outputMode: "truncate",
+      })
+      .pipe(
+        Effect.match({
+          onFailure: (error) =>
+            isBinaryNotFound(error)
+              ? ({ _tag: "NotFound" } as const)
+              : ({ _tag: "Failed" } as const),
+          onSuccess: (r) => ({ _tag: "Success", result: r }) as const,
+        }),
+      );
+    if (result._tag !== "Success" || result.result.timedOut) {
+      return {
+        installed: result._tag !== "NotFound",
+        probe: null,
+        ...(result._tag === "NotFound" ? {} : { unavailable: true }),
+        features: [],
+        incompatible: null,
+        checkedAt: yield* Clock.currentTimeMillis,
+      };
+    }
+    const doctor = parseDoctorReport(result.result.stdout);
+    return {
+      installed: true,
+      // `probe: null` from a decoded report means the CLI predates the
+      // contract (the UI gate should have kept the button hidden) — pass it
+      // through as-is rather than inventing a skipped result.
+      probe: doctor?.probe ?? null,
+      ...negotiate(doctor),
+      checkedAt: yield* Clock.currentTimeMillis,
+    };
+  });
 
   const activity: AgentstackCli["Service"]["activity"] = Effect.fn("AgentstackCli.activity")(
     function* (input) {
@@ -1119,6 +1186,7 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
       return {
         installed: true,
         preview: null,
+        refusal: null,
         features: [],
         incompatible: null,
         checkedAt: yield* Clock.currentTimeMillis,
@@ -1131,11 +1199,50 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
         onSuccess: (r) => ({ _tag: "Success", result: r }) as const,
       }),
     );
-    const preview =
-      result._tag === "Success" ? parseProfileEditPreview(result.result.stdout) : null;
+    if (result._tag !== "Success") {
+      return {
+        installed: result._tag !== "NotFound",
+        preview: null,
+        refusal: null,
+        // "Failed" means the process never gave an answer — say so instead of
+        // letting the panel read silence as an old CLI.
+        ...(result._tag === "Failed" ? { unavailable: true } : {}),
+        features: [],
+        incompatible: null,
+        checkedAt: yield* Clock.currentTimeMillis,
+      };
+    }
+    const r = result.result;
+    if (r.timedOut) {
+      return {
+        installed: true,
+        preview: null,
+        refusal: null,
+        unavailable: true,
+        features: [],
+        incompatible: null,
+        checkedAt: yield* Clock.currentTimeMillis,
+      };
+    }
+    // A nonzero exit is the CLI refusing this edit and saying why on stderr
+    // (e.g. deleting the only toolset would widen access). That sentence IS
+    // the answer — preserve it, bounded, instead of collapsing it into the
+    // same null a digest-less legacy preview produces.
+    if (r.code !== 0) {
+      return {
+        installed: true,
+        preview: null,
+        refusal: cliRefusalLine(r.stderr, r.stdout),
+        features: [],
+        incompatible: null,
+        checkedAt: yield* Clock.currentTimeMillis,
+      };
+    }
+    const preview = parseProfileEditPreview(r.stdout);
     return {
-      installed: result._tag !== "NotFound",
+      installed: true,
       preview,
+      refusal: null,
       ...negotiate(preview),
       checkedAt: yield* Clock.currentTimeMillis,
     };
@@ -1303,6 +1410,7 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
 
   return AgentstackCli.of({
     status,
+    doctorProbe,
     activity,
     workflow,
     workflowRun,

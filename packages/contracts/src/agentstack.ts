@@ -76,6 +76,39 @@ export const AgentstackProtection = Schema.Struct({
 });
 export type AgentstackProtection = typeof AgentstackProtection.Type;
 
+/**
+ * One stdio server's startup result under `doctor --probe`. `status` is
+ * `ok` (spawned, MCP `initialize` answered, reaped) / `failed` (the CLI's
+ * sanitized reason rides in `detail`) / `not_probeable` (an unresolved
+ * `${REF}` blocks the launch — `detail` names the secret to set).
+ */
+export const AgentstackDoctorProbeServer = Schema.Struct({
+  server: Schema.String,
+  status: Schema.String,
+  detail: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  /** The name the server reported about itself in the handshake. */
+  server_name: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  protocol: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  tools: Schema.optionalKey(Schema.NullOr(Schema.Number)),
+  elapsed_ms: Schema.optionalKey(Schema.Number),
+});
+export type AgentstackDoctorProbeServer = typeof AgentstackDoctorProbeServer.Type;
+
+/**
+ * The `doctor --probe` outcome (contract `doctor-probe-v1`) — the ONLY doctor
+ * read with side effects: it actually starts each stdio server, speaks the
+ * MCP handshake, and stops it again. `ran: false` with a `skipped_reason`
+ * (`untrusted` / `drifted`) is a first-class answer, not an error: the CLI
+ * refuses to spawn for a project not trusted at its current bytes, and the
+ * right response is the trust review, never a retry.
+ */
+export const AgentstackDoctorProbe = Schema.Struct({
+  ran: Schema.Boolean,
+  skipped_reason: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  servers: Schema.Array(AgentstackDoctorProbeServer),
+});
+export type AgentstackDoctorProbe = typeof AgentstackDoctorProbe.Type;
+
 export const AgentstackDoctorReport = Schema.Struct({
   errors: Schema.Number,
   warnings: Schema.Number,
@@ -102,6 +135,13 @@ export const AgentstackDoctorReport = Schema.Struct({
   next_action: Schema.optionalKey(Schema.NullOr(Schema.String)),
   /** The cooperative host-protection posture, when the CLI reports it. */
   protection: Schema.optionalKey(Schema.NullOr(AgentstackProtection)),
+  /**
+   * Per-server startup results — non-null only when this report came from
+   * `doctor --probe` on a `doctor-probe-v1` CLI. A plain `doctor --json`
+   * carries `null` (never asked), which is a different fact from
+   * `ran: false` (asked, and the trust gate refused).
+   */
+  probe: Schema.optionalKey(Schema.NullOr(AgentstackDoctorProbe)),
   sections: Schema.Array(AgentstackDoctorSection),
   ...AgentstackEnvelopeFields,
 });
@@ -128,6 +168,31 @@ export const AgentstackStatus = Schema.Struct({
   ...AgentstackNegotiationFields,
 });
 export type AgentstackStatus = typeof AgentstackStatus.Type;
+
+/**
+ * Run `doctor --probe --json` for the project. Same server-resolved workspace
+ * identity as the status read — but this one has side effects (it starts the
+ * manifest's stdio servers), so the RPC is authorized like a write, gated in
+ * the UI on `doctor-probe-v1`, and only ever fired from an explicit,
+ * side-effect-warned user action.
+ */
+export const AgentstackDoctorProbeInput = Schema.Struct({
+  projectId: ProjectId,
+  threadId: Schema.optionalKey(ThreadId),
+});
+export type AgentstackDoctorProbeInput = typeof AgentstackDoctorProbeInput.Type;
+
+export const AgentstackDoctorProbeResult = Schema.Struct({
+  installed: Schema.Boolean,
+  /** Null when the CLI answered without a probe object — a binary that
+   *  predates `doctor-probe-v1` (the UI should not have offered the button). */
+  probe: Schema.NullOr(AgentstackDoctorProbe),
+  /** True when the CLI never answered (spawn failure or timeout). */
+  unavailable: Schema.optionalKey(Schema.Boolean),
+  checkedAt: Schema.Number,
+  ...AgentstackNegotiationFields,
+});
+export type AgentstackDoctorProbeResult = typeof AgentstackDoctorProbeResult.Type;
 
 /**
  * One brokered call from the AgentStack audit feed (`report calls --json
@@ -187,6 +252,13 @@ export const AgentstackWorkflowSummary = Schema.Struct({
   // free string so the CLI can report new lock states without breaking decode.
   lock_status: Schema.String,
   roles: Schema.Array(Schema.String),
+  /**
+   * The subset of `roles` whose harness takes no per-child MCP config, so its
+   * children launch ONE AT A TIME whatever `max_agents` says (contract
+   * `workflow-serial-roles-v1`). Absent on CLIs predating the field — gate the
+   * display on that feature name, not on this key being present.
+   */
+  serial_roles: Schema.optionalKey(Schema.Array(Schema.String)),
   max_agents: Schema.Number,
   max_wall_seconds: Schema.Number,
 });
@@ -974,6 +1046,20 @@ export type AgentstackProfileEditPreview = typeof AgentstackProfileEditPreview.T
 export const AgentstackProfileEditPreviewResult = Schema.Struct({
   installed: Schema.Boolean,
   preview: Schema.NullOr(AgentstackProfileEditPreview),
+  /**
+   * The CLI's own refusal sentence when the preview exited nonzero — e.g.
+   * "won't delete 'x' — it is the only toolset here…". Null when the preview
+   * succeeded, never decoded, or the CLI couldn't run. A refusal is not a
+   * missing capability: mapping both onto "update agentstack" replaced a
+   * correct, actionable CLI answer with wrong guidance.
+   */
+  refusal: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  /**
+   * True when no answer exists at all — the spawn failed or timed out. The
+   * panel says "couldn't check, try again", which is neither a refusal nor
+   * an old-CLI message.
+   */
+  unavailable: Schema.optionalKey(Schema.Boolean),
   checkedAt: Schema.Number,
   ...AgentstackNegotiationFields,
 });

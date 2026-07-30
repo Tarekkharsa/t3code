@@ -137,3 +137,59 @@ describe("EditFlowCard — create-profile outcome", () => {
     expect(adding).toContain("blocks the render");
   });
 });
+
+describe("EditFlowCard — preview refusals", () => {
+  const REFUSAL =
+    "won't delete 'spare' — it is the only toolset here, and with none declared " +
+    "every server in the manifest becomes reachable instead of just this set.";
+
+  it("shows the CLI's refusal verbatim and never tells the user to update", () => {
+    // The E2E-observed defect: the CLI's correct refusal (deleting the only
+    // toolset widens access) was re-captioned "update agentstack" — wrong in
+    // both halves, since updating won't help and a terminal refuses the same.
+    const markup = renderToStaticMarkup(
+      <EditFlowCard
+        flow={{ phase: "refused", title: 'Delete toolset "spare"', message: REFUSAL }}
+        createNeedsActivation
+        onActivate={activate}
+        onConfirm={noop}
+        onBack={noop}
+      />,
+    );
+
+    expect(markup).toContain("only toolset here");
+    expect(markup).toContain("Nothing was changed.");
+    expect(markup).not.toContain("Update agentstack");
+    expect(markup).not.toContain("no digest");
+  });
+
+  it("says couldn't-check for a preview that never answered, not old-CLI", () => {
+    const markup = renderToStaticMarkup(
+      <EditFlowCard
+        flow={{ phase: "unavailable", title: 'Delete toolset "spare"' }}
+        createNeedsActivation
+        onActivate={activate}
+        onConfirm={noop}
+        onBack={noop}
+      />,
+    );
+
+    expect(markup).toContain("didn&#x27;t answer");
+    expect(markup).not.toContain("Update agentstack");
+  });
+
+  it("keeps the update guidance only for the digest-less legacy preview", () => {
+    const markup = renderToStaticMarkup(
+      <EditFlowCard
+        flow={{ phase: "unsupported", title: 'Delete toolset "spare"' }}
+        createNeedsActivation
+        onActivate={activate}
+        onConfirm={noop}
+        onBack={noop}
+      />,
+    );
+
+    expect(markup).toContain("no digest");
+    expect(markup).toContain("Update agentstack");
+  });
+});

@@ -4,6 +4,7 @@ import type {
   AgentstackDiffReport,
   AgentstackDiffResult,
   AgentstackDiffTarget,
+  AgentstackDoctorProbe,
   AgentstackIncompatible,
   AgentstackLibraryIndexResult,
   AgentstackProfileEdit,
@@ -21,6 +22,7 @@ import type {
   AgentstackWorkflowData,
   AgentstackWorkflowRun,
   AgentstackWorkflowRunSummary,
+  AgentstackWorkflowSummary,
   EnvironmentId,
   ProjectId,
   ThreadId,
@@ -57,13 +59,18 @@ import { AgentstackMark } from "./AgentstackMark";
 import {
   AGENTSTACK_ACTION_META as ACTION_META,
   agentstackFeatureKnownMissing,
+  classifyAgentstackEditPreview,
   deriveAgentstackActivityRows,
   deriveAgentstackFindings,
   deriveAgentstackOverviewRows,
+  deriveAgentstackPanelPosture,
   deriveAgentstackPolicyRows,
+  deriveAgentstackProbeRows,
   deriveAgentstackShareFacts,
   deriveAgentstackProtectionRows,
   deriveAgentstackStatusChip,
+  describeAgentstackProbeSkip,
+  describeAgentstackSerialRoles,
   deriveAgentstackTrustBadge,
   AGENTSTACK_HOST_NAME,
   deriveToolsetRows,
@@ -126,6 +133,10 @@ const FEATURE_TOOLSET_CREATE_V2 = "toolset-create-v2";
  *  whatever the reads return); a CLI that positively advertises other contracts
  *  but not this one is surfaced as "observation unavailable" in the section. */
 const FEATURE_WORKFLOW_OBSERVE = "workflow-observe-v1";
+/** Per-row `serial_roles` on the workflow list. Its own name because a binary
+ *  predating the field legitimately advertises `workflow-observe-v1` without
+ *  it — reading the field off the older name would be sniffing it. */
+const FEATURE_WORKFLOW_SERIAL_ROLES = "workflow-serial-roles-v1";
 /** Advisory findings: true and worth stating, but nothing this project must
  *  repair — the CLI keeps them out of `warnings`/`state`/`next_action`.
  *  Without this gate the panel drops them silently (our level match falls
@@ -133,6 +144,12 @@ const FEATURE_WORKFLOW_OBSERVE = "workflow-observe-v1";
  *  nothing — two surfaces telling different amounts of truth about one
  *  project. Gated on the name, never sniffed off the field being present. */
 const FEATURE_DOCTOR_ADVISORIES = "doctor-advisories-v1";
+/** The startup test (`doctor --probe`) — the ONLY doctor contract with side
+ *  effects: the CLI starts each stdio server, speaks the MCP handshake, and
+ *  reaps it. Gated positively on the name so the affordance cannot exist
+ *  against a binary that can't honor it; the action is admin-authorized
+ *  server-side, like the writes. */
+const FEATURE_DOCTOR_PROBE = "doctor-probe-v1";
 
 const LEVEL_DOT: Record<AgentstackRowLevel, string> = {
   ok: "bg-success",
@@ -222,6 +239,16 @@ type ActionState =
   | { phase: "done"; ok: boolean; message: string };
 
 /**
+ * The startup test's lifecycle. `confirm` exists because this is the one panel
+ * read that starts processes — it must never fire from a render or a poll.
+ */
+type ProbeState =
+  | { phase: "idle" }
+  | { phase: "confirm" }
+  | { phase: "running" }
+  | { phase: "done"; probe: AgentstackDoctorProbe | null; unavailable: boolean };
+
+/**
  * Just the version, from the CLI's `agentstack 0.16.0 (sandbox: no)` line.
  *
  * The trailing parenthetical is a BUILD flag — whether this binary was
@@ -295,6 +322,7 @@ export function AgentstackControl({
   const [toolsets, setToolsets] = useState<AgentstackToolsetsResult | null>(null);
   const [unreachable, setUnreachable] = useState(false);
   const [actionState, setActionState] = useState<ActionState>({ phase: "idle" });
+  const [probeState, setProbeState] = useState<ProbeState>({ phase: "idle" });
   const [reviewing, setReviewing] = useState(false);
   const [reviewingDrift, setReviewingDrift] = useState(false);
   const [settingUp, setSettingUp] = useState(false);
@@ -342,6 +370,7 @@ export function AgentstackControl({
     reportFailure: false,
   });
   const runAction = useAtomCommand(agentstackEnvironment.action, { reportFailure: false });
+  const runProbe = useAtomCommand(agentstackEnvironment.doctorProbe, { reportFailure: false });
 
   const input = useMemo(
     () => ({ projectId, ...(threadId !== undefined ? { threadId } : {}) }),
@@ -550,6 +579,18 @@ export function AgentstackControl({
     [environmentId, runAction, input, refresh],
   );
 
+  // Starts this project's declared stdio servers. Only ever called from the
+  // confirm step — never from a render, an effect, or the poll.
+  const onProbe = useCallback(async () => {
+    setProbeState({ phase: "running" });
+    const r = await runProbe({ environmentId, input });
+    setProbeState(
+      r._tag === "Success"
+        ? { phase: "done", probe: r.value.probe, unavailable: r.value.unavailable === true }
+        : { phase: "done", probe: null, unavailable: true },
+    );
+  }, [environmentId, runProbe, input]);
+
   const activeRun =
     workflow?.activeRun && workflow.activeRun.outcome === "running" ? workflow.activeRun : null;
 
@@ -589,6 +630,7 @@ export function AgentstackControl({
   const setupState = status?.doctor?.state ?? null;
   const canApplySetup = hasAgentstackFeature(features, FEATURE_APPLY_SETUP);
   const canRestore = hasAgentstackFeature(features, FEATURE_RESTORE_LAST);
+  const canProbe = hasAgentstackFeature(features, FEATURE_DOCTOR_PROBE);
   // Trust-grant keeps its digest-presence gate regardless; the feature gate is
   // only additive when the CLI actually advertises its features.
   const trustConsentMissing = agentstackFeatureKnownMissing(features, FEATURE_TRUST_CONSENT);
@@ -619,6 +661,8 @@ export function AgentstackControl({
     workflow?.features,
     FEATURE_WORKFLOW_OBSERVE,
   );
+  // Negotiated off the workflow read's OWN envelope, like observation above.
+  const canSeeSerialRoles = hasAgentstackFeature(workflow?.features, FEATURE_WORKFLOW_SERIAL_ROLES);
 
   const overviewRows: AgentstackOverviewRow[] = useMemo(
     () => (status?.doctor ? deriveAgentstackOverviewRows(status.doctor) : []),
@@ -648,6 +692,20 @@ export function AgentstackControl({
     () => summarizeAgentstackHealthyRows(partitionAgentstackOverviewRows(overviewRows).healthy),
     [overviewRows],
   );
+
+  // One posture for the trigger dot AND the header chip, derived in the same
+  // order as the body's region switch below. Reading `concern` alone here is
+  // how a needs-setup project ended up wearing a Ready chip over a body that
+  // said the opposite.
+  const posture = deriveAgentstackPanelPosture({
+    hasStatus: status !== null,
+    installed: status?.installed ?? false,
+    unreachable,
+    doctorReadable: (status?.doctor ?? null) !== null,
+    incompatible: incompatible !== null,
+    setupState,
+    hasConcern: concern !== null,
+  });
 
   // Open the manifest in t3code's own file viewer.
   //
@@ -707,12 +765,12 @@ export function AgentstackControl({
         <PopoverTrigger render={<Button aria-label="AgentStack" size="xs" variant="outline" />}>
           <AgentstackMark className="size-3.5" />
           {/* The header dot is the same claim the panel makes when opened:
-              one concern, or a live run. Deriving it separately is how the
-              icon ends up warning about something the panel then doesn't
+              the shared posture, or a live run. Deriving it separately is how
+              the icon ends up warning about something the panel then doesn't
               show. */}
           {activeRun ? (
             <span aria-hidden className="-mr-0.5 size-1.5 rounded-full bg-warning animate-pulse" />
-          ) : concern ? (
+          ) : posture === "attention" ? (
             <span aria-hidden className="-mr-0.5 size-1.5 rounded-full bg-warning" />
           ) : null}
         </PopoverTrigger>
@@ -724,11 +782,11 @@ export function AgentstackControl({
           <div className="flex items-center gap-2 px-4 pb-2.5 pt-3.5">
             <AgentstackMark className="size-[22px]" />
             <span className="font-semibold text-sm text-foreground">AgentStack</span>
-            {status?.installed && status.doctor ? (
+            {posture !== "hidden" ? (
               <span
                 className={cn(
                   "ml-auto flex shrink-0 items-center gap-1.5 text-[11.5px]",
-                  concern ? "text-warning-foreground" : "text-muted-foreground",
+                  posture === "attention" ? "text-warning-foreground" : "text-muted-foreground",
                 )}
               >
                 {/* No pulse here: the live-run strip below is already the
@@ -736,9 +794,12 @@ export function AgentstackControl({
                     separate events. */}
                 <span
                   aria-hidden
-                  className={cn("size-1.5 rounded-full", concern ? "bg-warning" : "bg-success")}
+                  className={cn(
+                    "size-1.5 rounded-full",
+                    posture === "attention" ? "bg-warning" : "bg-success",
+                  )}
                 />
-                {concern ? "Needs you" : "Ready"}
+                {posture === "attention" ? "Needs you" : "Ready"}
               </span>
             ) : null}
           </div>
@@ -842,12 +903,22 @@ export function AgentstackControl({
           workflow={workflow}
           workflowIncompatible={workflowIncompatible}
           workflowObserveKnownMissing={workflowObserveKnownMissing}
+          canSeeSerialRoles={canSeeSerialRoles}
           toolsets={toolsets}
           rows={overviewRows}
           findings={findings}
           features={features}
           advisories={canReadAdvisories ? (status?.doctor?.advisories ?? null) : null}
           canRestore={canRestore}
+          canProbe={canProbe}
+          probeState={probeState}
+          onRequestProbe={() => setProbeState({ phase: "confirm" })}
+          onConfirmProbe={onProbe}
+          onCancelProbe={() => setProbeState({ phase: "idle" })}
+          onReviewTrust={() => {
+            setManageTab(null);
+            setReviewing(true);
+          }}
           canSessions={canSessions}
           sessionsKnownMissing={sessionsKnownMissing}
           canEditProfiles={canEditProfiles}
@@ -1822,12 +1893,23 @@ interface ManageProps {
   workflow: AgentstackWorkflowData | null;
   workflowIncompatible: AgentstackIncompatible | null;
   workflowObserveKnownMissing: boolean;
+  /** Whether the CLI advertises `workflow-serial-roles-v1`; when false the
+   *  scheduling warning stays hidden rather than guessing from an absent field. */
+  canSeeSerialRoles: boolean;
   toolsets: AgentstackToolsetsResult | null;
   rows: ReadonlyArray<AgentstackOverviewRow>;
   findings: ReadonlyArray<AgentstackFinding>;
   features: ReadonlyArray<string> | undefined;
   advisories: number | null;
   canRestore: boolean;
+  /** Whether the CLI advertises `doctor-probe-v1`. False hides the startup
+   *  test entirely — the button must not exist where it can't be honored. */
+  canProbe: boolean;
+  probeState: ProbeState;
+  onRequestProbe: () => void;
+  onConfirmProbe: () => Promise<void>;
+  onCancelProbe: () => void;
+  onReviewTrust: () => void;
   canSessions: boolean;
   sessionsKnownMissing: boolean;
   canEditProfiles: boolean;
@@ -2023,7 +2105,167 @@ function SetupTab(props: ManageProps) {
         onUndo={props.onUndo}
         canRestore={props.canRestore}
       />
+      {props.canProbe ? (
+        <StartupTest
+          state={props.probeState}
+          onRequest={props.onRequestProbe}
+          onConfirm={props.onConfirmProbe}
+          onCancel={props.onCancelProbe}
+          onReviewTrust={props.onReviewTrust}
+        />
+      ) : null}
       <RecheckRow onRecheck={props.onRecheck} onOpenManifest={props.onOpenManifest} />
+    </div>
+  );
+}
+
+/**
+ * The startup test — the only thing in this panel that runs the project's own
+ * code.
+ *
+ * `doctor` can say a config parses, a secret resolves, and a digest matches; it
+ * cannot say a server STARTS. `--probe` does, by starting each stdio server
+ * exactly as a rendered config would, speaking the MCP handshake, and reaping
+ * it. That makes it the one read with side effects, so it asks first and says
+ * plainly what it is about to do — and a refusal to run is a first-class
+ * answer, not an error: the CLI will not start servers for a project that is
+ * not trusted at its current bytes, and the way forward there is the trust
+ * review, never a retry.
+ */
+export function StartupTest({
+  state,
+  onRequest,
+  onConfirm,
+  onCancel,
+  onReviewTrust,
+}: {
+  state: ProbeState;
+  onRequest: () => void;
+  onConfirm: () => Promise<void>;
+  onCancel: () => void;
+  onReviewTrust: () => void;
+}) {
+  if (state.phase === "idle") {
+    return (
+      <div className="mx-1 mt-1.5 flex items-center gap-2 border-t border-border/40 px-1.5 pt-2">
+        <Button size="xs" variant="outline" onClick={onRequest}>
+          Test server startup
+        </Button>
+        <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground/70">
+          actually starts each server, like{" "}
+          <code className="font-mono">agentstack doctor --probe</code>
+        </span>
+      </div>
+    );
+  }
+  if (state.phase === "confirm" || state.phase === "running") {
+    const running = state.phase === "running";
+    return (
+      <div className="mx-1 mt-1.5 flex flex-col gap-2 border-t border-border/40 px-1.5 pt-2">
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          This starts every stdio server this project declares — the same command,{" "}
+          <code className="font-mono">env</code> and working directory a rendered config gives a
+          harness — speaks the MCP handshake, then stops them again. Nothing is written.
+        </p>
+        <div className="flex items-center gap-2">
+          <Button size="xs" variant="outline" disabled={running} onClick={() => void onConfirm()}>
+            {running ? "Starting servers…" : "Start them"}
+          </Button>
+          <button
+            type="button"
+            disabled={running}
+            onClick={onCancel}
+            className="text-[11px] font-medium text-muted-foreground disabled:opacity-60 hover:text-foreground"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  }
+  if (state.unavailable) {
+    return (
+      <div className="mx-1 mt-1.5 flex flex-col gap-2 border-t border-border/40 px-1.5 pt-2">
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          Couldn&apos;t run the startup test — the agentstack CLI didn&apos;t answer.
+        </p>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="self-start text-[11px] font-medium text-muted-foreground hover:text-foreground"
+        >
+          Close
+        </button>
+      </div>
+    );
+  }
+  if (state.probe === null) {
+    return (
+      <div className="mx-1 mt-1.5 flex flex-col gap-2 border-t border-border/40 px-1.5 pt-2">
+        <p className="text-[11px] leading-relaxed text-warning-foreground">
+          This agentstack CLI reported no startup results. Update agentstack to use the startup
+          test.
+        </p>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="self-start text-[11px] font-medium text-muted-foreground hover:text-foreground"
+        >
+          Close
+        </button>
+      </div>
+    );
+  }
+  // ran: false is the trust gate refusing, which is an answer — route to the
+  // review rather than offering a retry that would refuse identically.
+  if (!state.probe.ran) {
+    const skip = describeAgentstackProbeSkip(state.probe.skipped_reason);
+    return (
+      <div className="mx-1 mt-1.5 flex flex-col gap-2 border-t border-border/40 px-1.5 pt-2">
+        <p className="text-[11px] leading-relaxed text-warning-foreground">{skip.text}</p>
+        <div className="flex items-center gap-2">
+          {skip.reviewTrust ? (
+            <Button size="xs" variant="outline" onClick={onReviewTrust}>
+              Review this project
+            </Button>
+          ) : null}
+          <button
+            type="button"
+            onClick={onCancel}
+            className="text-[11px] font-medium text-muted-foreground hover:text-foreground"
+          >
+            Close
+          </button>
+        </div>
+      </div>
+    );
+  }
+  const rows = deriveAgentstackProbeRows(state.probe.servers);
+  return (
+    <div className="mx-1 mt-1.5 flex flex-col gap-1 border-t border-border/40 px-1.5 pt-2">
+      {rows.length === 0 ? (
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          No stdio servers to start. HTTP servers are checked by{" "}
+          <code className="font-mono">--live</code>.
+        </p>
+      ) : (
+        rows.map((r) => (
+          <div key={r.name} className="flex items-start gap-2 py-[3px]">
+            <span className={cn("mt-[6px] size-1.5 shrink-0 rounded-full", LEVEL_DOT[r.level])} />
+            <span className="shrink-0 font-mono text-[11px] text-foreground">{r.name}</span>
+            <span className={cn("min-w-0 flex-1 text-[11px] leading-snug", LEVEL_TEXT[r.level])}>
+              {r.text}
+            </span>
+          </div>
+        ))
+      )}
+      <button
+        type="button"
+        onClick={onCancel}
+        className="self-start pt-1 text-[11px] font-medium text-muted-foreground hover:text-foreground"
+      >
+        Close
+      </button>
     </div>
   );
 }
@@ -2138,18 +2380,26 @@ function ToolsetsTab(props: ManageProps) {
       const title = describeEdit(edit);
       setFlow({ phase: "previewing", edit, title });
       const result = await previewProfileEdit(edit);
-      const digest = result?.preview?.consent_digest ?? null;
+      // Four different answers hide in this result — the CLI's yes (a
+      // digest), its no (a refusal to show verbatim), no answer at all, and
+      // a genuinely digest-less legacy preview. Only the last one may say
+      // "update agentstack".
+      const outcome = classifyAgentstackEditPreview(result);
       setFlow(
-        digest
+        outcome.kind === "confirm"
           ? {
               phase: "confirm",
               edit,
               title,
-              digest,
-              note: result?.preview?.note ?? null,
-              removal: result?.preview?.removal ?? null,
+              digest: outcome.digest,
+              note: outcome.preview.note ?? null,
+              removal: outcome.preview.removal ?? null,
             }
-          : { phase: "unsupported", title },
+          : outcome.kind === "refused"
+            ? { phase: "refused", title, message: outcome.message }
+            : outcome.kind === "unavailable"
+              ? { phase: "unavailable", title }
+              : { phase: "unsupported", title },
       );
     },
     [previewProfileEdit],
@@ -2944,6 +3194,7 @@ function ActivityTab(props: ManageProps) {
         data={props.workflow}
         incompatible={props.workflowIncompatible}
         observeKnownMissing={props.workflowObserveKnownMissing}
+        canSeeSerialRoles={props.canSeeSerialRoles}
         cliVersion={props.version ?? null}
         onOpenRun={props.onOpenRun}
       />
@@ -3284,6 +3535,10 @@ type EditFlow =
       removal: NonNullable<AgentstackProfileEditPreview["removal"]> | null;
     }
   | { phase: "unsupported"; title: string }
+  /** The CLI refused the edit and said why — its sentence, verbatim. */
+  | { phase: "refused"; title: string; message: string }
+  /** No answer at all (RPC failure, spawn failure, timeout) — retryable. */
+  | { phase: "unavailable"; title: string }
   | { phase: "running"; edit: AgentstackProfileEdit; title: string }
   // The applied `edit` rides along into `done` because the outcome card is
   // per-verb: a finished `create-profile` has an activation step to offer, and
@@ -3735,6 +3990,43 @@ export function EditFlowCard({
         <p className="text-[11px] leading-relaxed text-warning-foreground">
           This agentstack CLI's preview has no digest to confirm against, so this change can't be
           applied from here. Update agentstack, or make the change in a terminal.
+        </p>
+        <button
+          type="button"
+          onClick={onBack}
+          className="self-start text-[11px] font-medium text-muted-foreground hover:text-foreground"
+        >
+          ← Back to library
+        </button>
+      </div>
+    );
+  }
+  if (flow.phase === "refused") {
+    // The CLI already said what and why — in a sentence that names the safe
+    // next step. Repeating it verbatim is the whole card; a paraphrase here
+    // is how a correct refusal once became "update agentstack".
+    return (
+      <div className="flex flex-col gap-3 px-4 py-4">
+        <p className="text-[12.5px] font-semibold text-foreground">{flow.title}</p>
+        <p className="text-[11px] leading-relaxed text-warning-foreground">{flow.message}</p>
+        <p className="text-[11px] leading-relaxed text-muted-foreground">Nothing was changed.</p>
+        <button
+          type="button"
+          onClick={onBack}
+          className="self-start text-[11px] font-medium text-muted-foreground hover:text-foreground"
+        >
+          ← Back to library
+        </button>
+      </div>
+    );
+  }
+  if (flow.phase === "unavailable") {
+    return (
+      <div className="flex flex-col gap-3 px-4 py-4">
+        <p className="text-[12.5px] font-semibold text-foreground">{flow.title}</p>
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          Couldn't prepare this change — the agentstack CLI didn't answer. Nothing was changed; try
+          again.
         </p>
         <button
           type="button"
@@ -4874,6 +5166,7 @@ function WorkflowPanel({
   data,
   incompatible,
   observeKnownMissing,
+  canSeeSerialRoles,
   cliVersion,
   onOpenRun,
 }: {
@@ -4885,6 +5178,8 @@ function WorkflowPanel({
    *  workflow observation. False for legacy binaries (empty features), so the
    *  monitor renders exactly as before. */
   observeKnownMissing: boolean;
+  /** See [`FEATURE_WORKFLOW_SERIAL_ROLES`]: false keeps the warning hidden. */
+  canSeeSerialRoles: boolean;
   cliVersion: string | null;
   onOpenRun: (run: AgentstackWorkflowRunSummary) => void;
 }) {
@@ -4899,6 +5194,12 @@ function WorkflowPanel({
   // The live run renders as the full monitor; the history below excludes it
   // so a run never appears twice.
   const history = (data.runs ?? []).filter((r) => r.outcome !== "running");
+  const serialNote = (w: AgentstackWorkflowSummary) =>
+    describeAgentstackSerialRoles({
+      serialRoles: w.serial_roles,
+      maxAgents: w.max_agents,
+      known: canSeeSerialRoles,
+    });
   // The CLI advertises its contracts but not workflow observation: what the
   // monitor shows below may be partial. Legacy binaries (empty features) never
   // hit this, so the section is byte-for-byte unchanged for them.
@@ -4946,6 +5247,15 @@ function WorkflowPanel({
               <span className="truncate text-[11px] text-muted-foreground">
                 {w.roles.join(" · ") || "no roles"} · ≤{w.max_agents} agents
               </span>
+              {/* The ceiling above is true and, for a serial role, irrelevant:
+                  its harness takes no per-child MCP config, so those children
+                  go one at a time. Saying only "≤4 agents" over a serial role
+                  is the panel implying a fan-out the CLI will not perform. */}
+              {serialNote(w) ? (
+                <span className="text-[11px] leading-snug text-warning-foreground">
+                  {serialNote(w)}
+                </span>
+              ) : null}
             </div>
             <span
               className={cn(

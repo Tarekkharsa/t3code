@@ -12,7 +12,9 @@
   - [Keeping T3 Code in sync](./user/server-updates.md)
   - [Keybindings](./user/keybindings.md)
 - [T3 Connect](./cloud/t3-connect-clerk.md)
-- [Integrations](./integrations/source-control-providers.md)
+- Integrations
+  - [AgentStack](./integrations/agentstack.md)
+  - [Source control providers](./integrations/source-control-providers.md)
 - [Mobile](./mobile/app.md)
 - [Operations](./operations/ci.md)
 - [Providers](./providers/codex.md)

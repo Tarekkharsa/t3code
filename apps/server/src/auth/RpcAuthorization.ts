@@ -52,6 +52,12 @@ export const RPC_REQUIRED_SCOPES = {
   // native configs, so it takes the same admin scope.
   [WS_METHODS.agentstackProfileEditApply]: AuthAgentstackAdminScope,
   [WS_METHODS.agentstackAction]: AuthAgentstackAdminScope,
+  // The doctor probe LOOKS like a read but is not one: `doctor --probe`
+  // starts every stdio server the manifest declares, speaks the MCP
+  // handshake, and reaps it. Running the project's declared code is exactly
+  // what the admin tier exists to gate, so it sits with the writes even
+  // though nothing is written.
+  [WS_METHODS.agentstackDoctorProbe]: AuthAgentstackAdminScope,
   [WS_METHODS.serverRefreshProviders]: AuthOrchestrationOperateScope,
   [WS_METHODS.serverUpdateProvider]: AuthOrchestrationOperateScope,
   [WS_METHODS.serverUpdateServer]: AuthOrchestrationOperateScope,

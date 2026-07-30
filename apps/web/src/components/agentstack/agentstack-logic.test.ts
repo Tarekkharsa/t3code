@@ -4,14 +4,19 @@ import {
   AGENTSTACK_FINDINGS_PREVIEW,
   agentstackFeatureKnownMissing,
   agentstackFindingAction,
+  classifyAgentstackEditPreview,
   deriveAgentstackActivityRows,
   deriveAgentstackOverviewRows,
+  deriveAgentstackPanelPosture,
   deriveAgentstackPolicyRows,
+  deriveAgentstackProbeRows,
   deriveAgentstackProtectionRows,
   deriveAgentstackStatusChip,
   deriveAgentstackFindings,
   deriveAgentstackShareFacts,
   deriveAgentstackTrustBadge,
+  describeAgentstackProbeSkip,
+  describeAgentstackSerialRoles,
   deriveToolsetRows,
   deriveTrustSurface,
   deriveWorkflowCounts,
@@ -1504,5 +1509,196 @@ describe("selectAgentstackUpdateOffer", () => {
     expect(
       selectAgentstackUpdateOffer({ isDesktop: false, action: "install", canCheck: true }).kind,
     ).toBe("none");
+  });
+});
+
+describe("classifyAgentstackEditPreview", () => {
+  const REFUSAL = "won't delete 'spare' — it is the only toolset here";
+
+  it("confirms on a digest, whatever else came along", () => {
+    const outcome = classifyAgentstackEditPreview({
+      preview: { consent_digest: "sha256:abc" },
+      refusal: null,
+    });
+    expect(outcome.kind).toBe("confirm");
+    expect(outcome.kind === "confirm" && outcome.digest).toBe("sha256:abc");
+  });
+
+  it("keeps the CLI's refusal as a refusal, never as old-CLI", () => {
+    expect(classifyAgentstackEditPreview({ preview: null, refusal: REFUSAL })).toEqual({
+      kind: "refused",
+      message: REFUSAL,
+    });
+  });
+
+  it("treats no-answer as unavailable — RPC null, or the server saying so", () => {
+    expect(classifyAgentstackEditPreview(null).kind).toBe("unavailable");
+    expect(
+      classifyAgentstackEditPreview({ preview: null, refusal: null, unavailable: true }).kind,
+    ).toBe("unavailable");
+  });
+
+  it("reserves unsupported for the genuinely digest-less answers", () => {
+    // A decoded preview with a null digest, or nothing decoded and nothing
+    // refused — the two shapes an old CLI actually produces.
+    expect(
+      classifyAgentstackEditPreview({ preview: { consent_digest: null }, refusal: null }).kind,
+    ).toBe("unsupported");
+    expect(classifyAgentstackEditPreview({ preview: null, refusal: null }).kind).toBe(
+      "unsupported",
+    );
+    // A blank refusal is no refusal.
+    expect(classifyAgentstackEditPreview({ preview: null, refusal: "  " }).kind).toBe(
+      "unsupported",
+    );
+  });
+});
+
+describe("deriveAgentstackPanelPosture", () => {
+  const healthy = {
+    hasStatus: true,
+    installed: true,
+    unreachable: false,
+    doctorReadable: true,
+    incompatible: false,
+    setupState: "ready",
+    hasConcern: false,
+  };
+
+  it("says ready only when the body would show the working-under region", () => {
+    expect(deriveAgentstackPanelPosture(healthy)).toBe("ready");
+  });
+
+  it("never says Ready for a needs_setup project, whatever else is true", () => {
+    // The regression: the header read only `concern`, so an uninitialized
+    // project (no concern, no findings) wore a Ready chip over a body that
+    // said "not set up". Sweep the other inputs to pin the invariant, not
+    // just the one observed combination.
+    for (const hasConcern of [true, false]) {
+      for (const incompatible of [true, false]) {
+        for (const unreachable of [true, false]) {
+          expect(
+            deriveAgentstackPanelPosture({
+              ...healthy,
+              setupState: "needs_setup",
+              hasConcern,
+              incompatible,
+              unreachable,
+            }),
+          ).not.toBe("ready");
+        }
+      }
+    }
+  });
+
+  it("warns for an incompatible CLI even when doctor decoded nothing", () => {
+    // The body shows "update needed" here; a hidden or green chip above that
+    // region would be the same split claim the needs_setup bug was.
+    expect(
+      deriveAgentstackPanelPosture({ ...healthy, incompatible: true, doctorReadable: false }),
+    ).toBe("attention");
+  });
+
+  it("warns when a concern is picked", () => {
+    expect(deriveAgentstackPanelPosture({ ...healthy, hasConcern: true })).toBe("attention");
+  });
+
+  it("stays hidden while checking, unreachable, not installed, or unreadable", () => {
+    expect(deriveAgentstackPanelPosture({ ...healthy, hasStatus: false, installed: false })).toBe(
+      "hidden",
+    );
+    expect(deriveAgentstackPanelPosture({ ...healthy, unreachable: true })).toBe("hidden");
+    expect(deriveAgentstackPanelPosture({ ...healthy, installed: false })).toBe("hidden");
+    expect(deriveAgentstackPanelPosture({ ...healthy, doctorReadable: false })).toBe("hidden");
+  });
+});
+
+describe("describeAgentstackSerialRoles", () => {
+  it("names the serial role and says the ceiling doesn't apply to it", () => {
+    const note = describeAgentstackSerialRoles({
+      serialRoles: ["builder"],
+      maxAgents: 4,
+      known: true,
+    });
+    expect(note).toContain("builder");
+    expect(note).toContain("one child at a time");
+    expect(note).toContain("4");
+  });
+
+  it("stays silent when the CLI doesn't advertise the contract", () => {
+    expect(
+      describeAgentstackSerialRoles({ serialRoles: ["builder"], maxAgents: 4, known: false }),
+    ).toBeNull();
+  });
+
+  it("stays silent when no role is serial", () => {
+    expect(
+      describeAgentstackSerialRoles({ serialRoles: [], maxAgents: 4, known: true }),
+    ).toBeNull();
+    expect(
+      describeAgentstackSerialRoles({ serialRoles: undefined, maxAgents: 4, known: true }),
+    ).toBeNull();
+  });
+
+  it("pluralizes for several serial roles", () => {
+    const note = describeAgentstackSerialRoles({
+      serialRoles: ["builder", "packager"],
+      maxAgents: 8,
+      known: true,
+    });
+    expect(note).toContain("builder, packager run");
+  });
+});
+
+describe("deriveAgentstackProbeRows", () => {
+  it("reports a started server with its identity and tool count", () => {
+    const [row] = deriveAgentstackProbeRows([
+      { server: "figma", status: "ok", server_name: "figma-mcp", tools: 12, elapsed_ms: 840 },
+    ]);
+    expect(row?.level).toBe("ok");
+    expect(row?.text).toContain("840ms");
+    expect(row?.text).toContain("figma-mcp");
+    expect(row?.text).toContain("12 tools");
+  });
+
+  it("keeps the CLI's own reason for a failure", () => {
+    const [row] = deriveAgentstackProbeRows([
+      { server: "broken", status: "failed", detail: "exited before the handshake" },
+    ]);
+    expect(row).toEqual({
+      name: "broken",
+      level: "error",
+      text: "exited before the handshake",
+    });
+  });
+
+  it("treats not_probeable as a warning, not a failure", () => {
+    const [row] = deriveAgentstackProbeRows([
+      { server: "search", status: "not_probeable", detail: "unresolved secret(s): SEARCH_TOKEN" },
+    ]);
+    expect(row?.level).toBe("warn");
+    expect(row?.text).toContain("SEARCH_TOKEN");
+  });
+
+  it("degrades an unknown status from a newer CLI without guessing", () => {
+    const [row] = deriveAgentstackProbeRows([{ server: "next", status: "quarantined" }]);
+    expect(row?.level).toBe("warn");
+    expect(row?.text).toBe("quarantined");
+  });
+});
+
+describe("describeAgentstackProbeSkip", () => {
+  it("routes an untrusted project to the review, not a retry", () => {
+    const skip = describeAgentstackProbeSkip("untrusted");
+    expect(skip.reviewTrust).toBe(true);
+    expect(skip.text).toContain("isn't trusted");
+  });
+
+  it("routes drift to the review too", () => {
+    expect(describeAgentstackProbeSkip("drifted").reviewTrust).toBe(true);
+  });
+
+  it("offers no review for an unexplained skip", () => {
+    expect(describeAgentstackProbeSkip(null).reviewTrust).toBe(false);
   });
 });

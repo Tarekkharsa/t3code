@@ -26,6 +26,8 @@ import {
   AgentstackActivityInput,
   AgentstackDiffInput,
   AgentstackDiffResult,
+  AgentstackDoctorProbeInput,
+  AgentstackDoctorProbeResult,
   AgentstackLibraryIndexInput,
   AgentstackLibraryIndexResult,
   AgentstackProfileEditApplyInput,
@@ -213,6 +215,7 @@ export const WS_METHODS = {
 
   // AgentStack methods
   agentstackStatus: "agentstack.status",
+  agentstackDoctorProbe: "agentstack.doctorProbe",
   agentstackActivity: "agentstack.activity",
   agentstackWorkflow: "agentstack.workflow",
   agentstackWorkflowRun: "agentstack.workflowRun",
@@ -325,6 +328,15 @@ export const WsServerGetConfigRpc = Rpc.make(WS_METHODS.serverGetConfig, {
 export const WsAgentstackStatusRpc = Rpc.make(WS_METHODS.agentstackStatus, {
   payload: AgentstackStatusInput,
   success: AgentstackStatus,
+  error: Schema.Union([AgentstackWorkspaceContextError, EnvironmentAuthorizationError]),
+});
+
+// A "read" with side effects: `doctor --probe` starts the manifest's stdio
+// servers to check they come up. Authorized like a write (agentstack:admin),
+// never like the passive status read.
+export const WsAgentstackDoctorProbeRpc = Rpc.make(WS_METHODS.agentstackDoctorProbe, {
+  payload: AgentstackDoctorProbeInput,
+  success: AgentstackDoctorProbeResult,
   error: Schema.Union([AgentstackWorkspaceContextError, EnvironmentAuthorizationError]),
 });
 
@@ -880,6 +892,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerProbeRpc,
   WsServerGetConfigRpc,
   WsAgentstackStatusRpc,
+  WsAgentstackDoctorProbeRpc,
   WsAgentstackActivityRpc,
   WsAgentstackWorkflowRpc,
   WsAgentstackWorkflowRunRpc,

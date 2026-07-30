@@ -476,6 +476,151 @@ export function agentstackFeatureKnownMissing(
   return Array.isArray(features) && features.length > 0 && !features.includes(feature);
 }
 
+// ── edit preview classification ──────────────────────────────────────────────
+
+export type AgentstackEditPreviewOutcome<P> =
+  /** A digestable preview: the confirm step can run. */
+  | { kind: "confirm"; digest: string; preview: P }
+  /** The CLI said no and named why — show ITS sentence, never "update". */
+  | { kind: "refused"; message: string }
+  /** No answer at all: RPC failed, spawn failed, or the CLI timed out. */
+  | { kind: "unavailable" }
+  /** The CLI answered but its preview carries no digest — genuinely old. */
+  | { kind: "unsupported" };
+
+/**
+ * Sort one preview result into the four things it can mean. The flow used to
+ * test only "is there a digest", which told a correct CLI refusal (deleting
+ * the only toolset widens access) apart from nothing and re-captioned it
+ * "update agentstack" — guidance that is wrong in both halves: updating won't
+ * help, and the terminal would refuse identically. The order is fixed:
+ * no-answer first (nothing was said), then the digest (the CLI's yes), then
+ * the refusal (the CLI's no), and "unsupported" only as the remainder — a
+ * decoded answer that offers nothing to confirm against.
+ */
+export function classifyAgentstackEditPreview<
+  P extends { readonly consent_digest?: string | null },
+>(
+  result: {
+    readonly preview: P | null;
+    readonly refusal?: string | null;
+    readonly unavailable?: boolean;
+  } | null,
+): AgentstackEditPreviewOutcome<P> {
+  if (result === null || result.unavailable === true) return { kind: "unavailable" };
+  const digest = result.preview?.consent_digest ?? null;
+  if (result.preview && digest !== null && digest !== undefined) {
+    return { kind: "confirm", digest, preview: result.preview };
+  }
+  const refusal = result.refusal ?? null;
+  if (refusal !== null && refusal.trim().length > 0) {
+    return { kind: "refused", message: refusal };
+  }
+  return { kind: "unsupported" };
+}
+
+// ── doctor probe (server startup test) ───────────────────────────────────────
+
+/** One stdio server's `doctor --probe` result, decoupled from the wire type. */
+export interface AgentstackProbeServerLike {
+  readonly server: string;
+  /** ok | failed | not_probeable */
+  readonly status: string;
+  readonly detail?: string | null;
+  readonly server_name?: string | null;
+  readonly tools?: number | null;
+  readonly elapsed_ms?: number;
+}
+
+export interface AgentstackProbeRow {
+  readonly name: string;
+  readonly level: AgentstackRowLevel;
+  readonly text: string;
+}
+
+/**
+ * One display row per probed server, in the CLI's own vocabulary: `ok` says
+ * what started and what it offered, `failed` repeats the CLI's sanitized
+ * reason, `not_probeable` is a warning (the launch is blocked, usually by an
+ * unresolved `${REF}`), and an unknown status from a newer CLI degrades to a
+ * warning that shows the raw word rather than guessing at its meaning.
+ */
+export function deriveAgentstackProbeRows(
+  servers: ReadonlyArray<AgentstackProbeServerLike>,
+): Array<AgentstackProbeRow> {
+  return servers.map((s) => {
+    if (s.status === "ok") {
+      const who = s.server_name ?? null;
+      const tools =
+        typeof s.tools === "number" ? `${formatAgentstackCount(s.tools, "tool")}` : "handshake OK";
+      const ms = typeof s.elapsed_ms === "number" ? `started in ${s.elapsed_ms}ms` : "started";
+      return {
+        name: s.server,
+        level: "ok",
+        text: [ms, who, tools].filter((p): p is string => p !== null).join(" · "),
+      };
+    }
+    if (s.status === "failed") {
+      return { name: s.server, level: "error", text: s.detail ?? "failed to start" };
+    }
+    if (s.status === "not_probeable") {
+      return { name: s.server, level: "warn", text: s.detail ?? "can't be started from here" };
+    }
+    return { name: s.server, level: "warn", text: s.detail ?? s.status };
+  });
+}
+
+/**
+ * The skipped-probe explanation. `ran: false` is a first-class answer from
+ * the CLI — it refuses to start servers for a project that is not trusted at
+ * its current bytes — so the copy points at the trust review, never at a
+ * retry (which would return the same refusal forever).
+ */
+export function describeAgentstackProbeSkip(reason: string | null | undefined): {
+  text: string;
+  reviewTrust: boolean;
+} {
+  if (reason === "untrusted") {
+    return {
+      text: "Nothing was started — this project isn't trusted yet, so its servers won't be run. Review this project first.",
+      reviewTrust: true,
+    };
+  }
+  if (reason === "drifted") {
+    return {
+      text: "Nothing was started — the manifest or lockfile changed since this project was trusted. Review this project again.",
+      reviewTrust: true,
+    };
+  }
+  return { text: "Nothing was started.", reviewTrust: false };
+}
+
+// ── workflow serial roles ────────────────────────────────────────────────────
+
+/**
+ * The scheduling sentence for one workflow row: which of its roles run their
+ * children one at a time, and why that is true despite the agent ceiling.
+ *
+ * Returns null when there is nothing to warn about — no serial roles, or a CLI
+ * that does not advertise the contract (the caller passes `known: false` there,
+ * so an older binary stays silent rather than implying full parallelism it
+ * never claimed either way).
+ */
+export function describeAgentstackSerialRoles(input: {
+  readonly serialRoles: ReadonlyArray<string> | undefined;
+  readonly maxAgents: number;
+  readonly known: boolean;
+}): string | null {
+  if (!input.known) return null;
+  const serial = input.serialRoles ?? [];
+  if (serial.length === 0) return null;
+  const names = serial.join(", ");
+  const which = serial.length === 1 ? `${names} runs` : `${names} run`;
+  // The ceiling is the thing that misleads: it is real, and it does not apply
+  // to these roles, so state both rather than only the cap.
+  return `${which} one child at a time — that harness takes no per-child MCP config, so the ≤${input.maxAgents} ceiling doesn't apply to it.`;
+}
+
 // ── undo (restore ledger) ────────────────────────────────────────────────────
 
 export interface AgentstackRestoreEntryLike {
@@ -1501,6 +1646,41 @@ export function selectAgentstackPrimaryConcern(input: {
     note: null,
     others: rest(1),
   };
+}
+
+// ── header posture ───────────────────────────────────────────────────────────
+
+/** What the popover header chip says, and whether the trigger dot warns. */
+export type AgentstackPanelPosture = "hidden" | "ready" | "attention";
+
+/**
+ * One posture for the header chip and the trigger dot, derived in the SAME
+ * order as the body's region switch — that ordering is the contract. The
+ * header used to read only the primary concern, so a project whose body said
+ * "not set up yet" wore a Ready chip above it: setup is a body branch, not a
+ * concern, and the two claims were derived separately. Any state whose body
+ * region asks the user for something (update needed, setup, a concern) is
+ * `attention`; `ready` is reserved for the working-under region; everything
+ * the chip cannot honestly summarize (still checking, unreachable, not
+ * installed, unreadable doctor) stays `hidden` and lets the body speak alone.
+ */
+export function deriveAgentstackPanelPosture(input: {
+  readonly hasStatus: boolean;
+  readonly installed: boolean;
+  readonly unreachable: boolean;
+  readonly doctorReadable: boolean;
+  readonly incompatible: boolean;
+  readonly setupState: string | null;
+  readonly hasConcern: boolean;
+}): AgentstackPanelPosture {
+  if (input.hasStatus && input.installed && input.incompatible) return "attention";
+  if (input.hasStatus && input.installed && input.setupState === "needs_setup") {
+    return "attention";
+  }
+  if (input.unreachable || !input.hasStatus || !input.installed || !input.doctorReadable) {
+    return "hidden";
+  }
+  return input.hasConcern ? "attention" : "ready";
 }
 
 // ── setup plan ───────────────────────────────────────────────────────────────

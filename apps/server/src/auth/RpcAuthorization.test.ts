@@ -1,4 +1,5 @@
 import {
+  AuthAgentstackAdminScope,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   AuthRelayReadScope,
@@ -35,6 +36,10 @@ describe("RPC authorization scopes", () => {
       AuthRelayReadScope,
     );
     expect(requiredScopeForRpcMethod(WS_METHODS.cloudInstallRelayClient)).toBe(AuthRelayWriteScope);
+  });
+
+  it("authorizes the doctor probe like a write — it starts the project's servers", () => {
+    expect(RPC_REQUIRED_SCOPES[WS_METHODS.agentstackDoctorProbe]).toBe(AuthAgentstackAdminScope);
   });
 
   it("rejects unknown RPC method names", () => {

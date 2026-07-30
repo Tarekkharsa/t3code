@@ -96,6 +96,94 @@ describe("AgentstackCli", () => {
     }).pipe(Effect.provide(ProcessRunnerTest));
   });
 
+  it.effect("an edit preview the CLI refused keeps the CLI's own sentence", () => {
+    // Deleting the only toolset exits nonzero with the reason on stderr. That
+    // is a correct answer, not a missing capability — collapsing it into the
+    // same null a digest-less legacy preview produces made the panel caption
+    // it "update agentstack".
+    const refusal =
+      "error: won't delete 'spare' — it is the only toolset here, and with none declared " +
+      "every server in the manifest becomes reachable instead of just this set.";
+    const run = vi.fn<ProcessRunner.ProcessRunner["Service"]["run"]>(() =>
+      Effect.succeed({
+        stdout: "",
+        stderr: `${refusal}\n`,
+        code: ChildProcessSpawner.ExitCode(1),
+        timedOut: false,
+        stdoutTruncated: false,
+        stderrTruncated: false,
+      } as const),
+    );
+
+    return Effect.gen(function* () {
+      const a = yield* AgentstackCli.make();
+      const r = yield* a.profileEditPreview({
+        workspaceRoot: "/proj",
+        edit: { kind: "delete-profile", name: "spare" },
+      });
+      expect(r.preview).toBeNull();
+      expect(r.refusal).toContain("only toolset here");
+      // The `error: ` prefix is the terminal's framing, not the sentence.
+      expect(r.refusal?.startsWith("error:")).toBe(false);
+      expect(r.unavailable).toBeUndefined();
+    }).pipe(
+      Effect.provide(
+        Layer.succeed(ProcessRunner.ProcessRunner, ProcessRunner.ProcessRunner.of({ run })),
+      ),
+    );
+  });
+
+  it.effect("an undecodable zero-exit preview stays a legacy null, not a refusal", () => {
+    // Exit 0 with non-JSON stdout is the genuinely-old-CLI case the
+    // "update agentstack" card exists for.
+    const run = vi.fn<ProcessRunner.ProcessRunner["Service"]["run"]>(() =>
+      Effect.succeed(okOutput("delete preview: spare\n")),
+    );
+
+    return Effect.gen(function* () {
+      const a = yield* AgentstackCli.make();
+      const r = yield* a.profileEditPreview({
+        workspaceRoot: "/proj",
+        edit: { kind: "delete-profile", name: "spare" },
+      });
+      expect(r.preview).toBeNull();
+      expect(r.refusal).toBeNull();
+      expect(r.unavailable).toBeUndefined();
+    }).pipe(
+      Effect.provide(
+        Layer.succeed(ProcessRunner.ProcessRunner, ProcessRunner.ProcessRunner.of({ run })),
+      ),
+    );
+  });
+
+  it.effect("a timed-out edit preview says unavailable, not old-CLI", () => {
+    const run = vi.fn<ProcessRunner.ProcessRunner["Service"]["run"]>(() =>
+      Effect.succeed({
+        stdout: "",
+        stderr: "",
+        code: null,
+        timedOut: true,
+        stdoutTruncated: false,
+        stderrTruncated: false,
+      } as const),
+    );
+
+    return Effect.gen(function* () {
+      const a = yield* AgentstackCli.make();
+      const r = yield* a.profileEditPreview({
+        workspaceRoot: "/proj",
+        edit: { kind: "delete-profile", name: "spare" },
+      });
+      expect(r.preview).toBeNull();
+      expect(r.refusal).toBeNull();
+      expect(r.unavailable).toBe(true);
+    }).pipe(
+      Effect.provide(
+        Layer.succeed(ProcessRunner.ProcessRunner, ProcessRunner.ProcessRunner.of({ run })),
+      ),
+    );
+  });
+
   it.effect("tells an unreadable call log apart from an empty one", () => {
     // Both produce zero rows, but only one of them is a statement about what
     // the agents did. Collapsing them makes the panel claim "nothing was
