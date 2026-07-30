@@ -447,6 +447,23 @@ export function deriveAgentstackProtectionRows(
   return rows;
 }
 
+/**
+ * A finding that says a CLI's config is on disk but its binary is not.
+ *
+ * Matched on doctor's phrase, positively: if doctor rewords it we simply stop
+ * offering the extra affordance, which is the safe direction — the finding
+ * still renders, we just say less about it.
+ *
+ * Worth singling out because it is the one finding class the checkup shows
+ * that names no fix and has no governed action, so it renders as a warning the
+ * reader cannot answer. The answer is real, though: `[targets]` in the
+ * manifest decides which CLIs commands act on, so dropping the name there
+ * stops AgentStack managing a tool that is not installed.
+ */
+export function isAgentstackAbsentAdapterFinding(finding: AgentstackFinding): boolean {
+  return finding.message.includes("config present but binary not on PATH");
+}
+
 // ── delivery mode ────────────────────────────────────────────────────────────
 
 export interface AgentstackModeFacts {

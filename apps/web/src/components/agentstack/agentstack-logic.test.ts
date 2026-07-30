@@ -49,6 +49,7 @@ import {
   describeAgentstackActivation,
   describeAgentstackMode,
   groupAgentstackFindingViews,
+  isAgentstackAbsentAdapterFinding,
   parseAgentstackDiff,
 } from "./agentstack-logic";
 
@@ -2109,5 +2110,38 @@ describe("describeAgentstackActivation", () => {
     expect(describeAgentstackActivation("never_activated")).toContain("Not activated yet");
     expect(describeAgentstackActivation("locked")).toBeNull();
     expect(describeAgentstackActivation(null)).toBeNull();
+  });
+});
+
+describe("isAgentstackAbsentAdapterFinding", () => {
+  const finding = (message: string) => ({
+    key: "k",
+    level: "warn" as const,
+    message,
+    fix: null,
+    fixOptions: [],
+    action: null,
+    section: "Adapters & CLIs",
+  });
+
+  it("recognizes the config-without-binary warning", () => {
+    expect(
+      isAgentstackAbsentAdapterFinding(finding("VS Code config present but binary not on PATH")),
+    ).toBe(true);
+  });
+
+  it("does not claim an installed adapter or an unrelated finding", () => {
+    // Over-matching here would offer "Edit targets" for a finding whose answer
+    // is not an edit, which is worse than offering nothing.
+    expect(isAgentstackAbsentAdapterFinding(finding("Codex CLI installed · parses"))).toBe(false);
+    expect(isAgentstackAbsentAdapterFinding(finding("not detected (ok unless you use it)"))).toBe(
+      false,
+    );
+    expect(isAgentstackAbsentAdapterFinding(finding("config invalid · bad toml"))).toBe(false);
+  });
+
+  it("stops claiming anything if doctor rewords the line", () => {
+    // The safe direction: the finding still renders, we just say less about it.
+    expect(isAgentstackAbsentAdapterFinding(finding("VS Code binary missing"))).toBe(false);
   });
 });

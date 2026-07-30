@@ -97,6 +97,7 @@ import {
   describeAgentstackActivation,
   describeAgentstackMode,
   groupAgentstackFindingViews,
+  isAgentstackAbsentAdapterFinding,
   partitionAgentstackOverviewRows,
   selectAgentstackFindingsView,
   selectAgentstackPrimaryConcern,
@@ -2709,6 +2710,7 @@ function SetupTab(props: ManageProps) {
         onRequestAction={props.onRequestAction}
         onReviewDrift={props.onReviewDrift}
         onReviewTrust={props.onReviewTrust}
+        onOpenManifest={props.onOpenManifest}
         alreadyOffered={matchAgentstackNextAction(doctor.next_action ?? null)}
         defaultOpen
       />
@@ -4040,6 +4042,7 @@ export function CheckupFindings({
   onReviewTrust,
   defaultOpen = false,
   alreadyOffered = null,
+  onOpenManifest = null,
 }: {
   findings: ReadonlyArray<AgentstackFinding>;
   features: ReadonlyArray<string> | undefined;
@@ -4082,6 +4085,17 @@ export function CheckupFindings({
    * exists to open.
    */
   onReviewDrift?: (() => void) | undefined;
+  /**
+   * Open the manifest, for the one finding class with no fix and no governed
+   * action: a CLI whose config is on disk but whose binary is not installed.
+   *
+   * Nothing can install it for you, and nothing should — but `[targets]` in the
+   * manifest decides which CLIs commands act on, so there IS an answer, and it
+   * is an edit. Without this the row is a warning the reader can only look at,
+   * which is how a machine ends up permanently at "Needs attention" over a
+   * folder some uninstalled editor left behind.
+   */
+  onOpenManifest?: (() => void) | null | undefined;
 }) {
   const [expanded, setExpanded] = useState(false);
   const view = selectAgentstackFindingsView(findings, expanded, features);
@@ -4126,7 +4140,10 @@ export function CheckupFindings({
                   }
                 : group.section === "Drift" && onReviewDrift
                   ? { label: "Review", run: onReviewDrift }
-                  : null;
+                  : group.items.every((v) => isAgentstackAbsentAdapterFinding(v.finding)) &&
+                      onOpenManifest
+                    ? { label: "Edit targets", run: onOpenManifest }
+                    : null;
           return (
             <li
               key={group.key}
@@ -4158,6 +4175,12 @@ export function CheckupFindings({
                     >
                       {finding.message}
                     </span>
+                    {isAgentstackAbsentAdapterFinding(finding) ? (
+                      <span className="text-[10.5px] leading-snug text-muted-foreground">
+                        Not installed here. Leftover config is enough for AgentStack to keep
+                        managing it — drop the name from [targets] to stop.
+                      </span>
+                    ) : null}
                     {/* One line per remedy doctor offered. Several are a choice
                         of two ("keep them: … · prune them: …"), and a single
                         copyable line there is not a command anyone can run.
@@ -4697,9 +4720,6 @@ function LibraryRow({
 }) {
   const [choosing, setChoosing] = useState(false);
   const composing = picked !== null;
-  // A toolset must exist before anything can be added to one, and composing a
-  // new one takes over what every row's button means.
-  const canChoose = !busy && profiles.length > 0;
   return (
     <div
       className={cn(
@@ -4770,17 +4790,18 @@ function LibraryRow({
           >
             {picked ? "Added" : "Add"}
           </Button>
-        ) : (
+        ) : profiles.length === 0 ? null : (
+          // Hidden, not disabled, when there is no toolset to add to: the
+          // empty state above states that once, and a dead control on every
+          // row states it again N times without becoming any more actionable.
+          // `busy` still disables rather than hides — that one is transient,
+          // and a control that vanishes mid-edit is worse than a greyed one.
           <Button
             size="xs"
             variant="outline"
-            disabled={!canChoose}
+            disabled={busy}
             onClick={() => setChoosing((c) => !c)}
-            title={
-              profiles.length === 0
-                ? "Create a toolset first, then add tools to it"
-                : "Add this to a toolset"
-            }
+            title="Add this to a toolset"
             className="shrink-0"
           >
             {choosing ? "Cancel" : "Add"}
