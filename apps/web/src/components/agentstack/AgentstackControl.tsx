@@ -167,6 +167,10 @@ const FEATURE_WORKFLOW_SERIAL_ROLES = "workflow-serial-roles-v1";
  *  project. Gated on the name, never sniffed off the field being present. */
 const FEATURE_DOCTOR_ADVISORIES = "doctor-advisories-v1";
 const FEATURE_DOCTOR_MODE = "doctor-mode-v1";
+/** The durable `.gitignore` opt-out (`set-gitignore` verb + doctor's
+ *  `gitignore` field). An older binary refuses the verb with a clap usage
+ *  error rather than degrading, so the control must not exist without it. */
+const FEATURE_GITIGNORE_OPT_OUT = "gitignore-opt-out-v1";
 /** The startup test (`doctor --probe`) — the ONLY doctor contract with side
  *  effects: the CLI starts each stdio server, speaks the MCP handshake, and
  *  reaps it. Gated positively on the name so the affordance cannot exist
@@ -895,6 +899,7 @@ export function AgentstackControl({
   // `mode`/`activation`, and with them the one affordance that can move a
   // project off "never activated".
   const canReadMode = hasAgentstackFeature(features, FEATURE_DOCTOR_MODE);
+  const canSetGitignore = hasAgentstackFeature(features, FEATURE_GITIGNORE_OPT_OUT);
   // The workflow monitor negotiates off its OWN enveloped read, not the doctor
   // status: a newer CLI's workflow reads can be schema-incompatible even when
   // the status read is fine, and vice versa. Legacy binaries (no envelope) leave
@@ -1231,6 +1236,7 @@ export function AgentstackControl({
           features={features}
           advisories={canReadAdvisories ? (status?.doctor?.advisories ?? null) : null}
           canReadMode={canReadMode}
+          canSetGitignore={canSetGitignore}
           canRestore={canRestore}
           canProbe={canProbe}
           probeState={probeState}
@@ -2686,6 +2692,7 @@ interface ManageProps {
   advisories: number | null;
   /** The CLI advertises `doctor-mode-v1`, so mode/activation are readable. */
   canReadMode: boolean;
+  canSetGitignore: boolean;
   canRestore: boolean;
   /** Whether the CLI advertises `doctor-probe-v1`. False hides the startup
    *  test entirely — the button must not exist where it can't be honored. */
@@ -2984,6 +2991,14 @@ function SetupTab(props: ManageProps) {
           <Button size="xs" variant="outline" onClick={props.onOpenManifest}>
             Open manifest
           </Button>
+        ) : null}
+        {props.canSetGitignore && doctor.gitignore != null ? (
+          <GitignoreControl
+            managed={doctor.gitignore}
+            previewProfileEdit={props.previewProfileEdit}
+            applyProfileEdit={props.applyProfileEdit}
+            onDone={() => void props.onRecheck()}
+          />
         ) : null}
         <UndoAffordance
           loadInventory={props.loadRestoreInventory}
@@ -4733,6 +4748,91 @@ function PanelDialog({
 }
 
 /** A plain-language sentence for the change being confirmed. */
+/**
+ * The `.gitignore` opt-out, as a control rather than a fact.
+ *
+ * The panel stated how files were delivered but never let you change whether
+ * agentstack manages your `.gitignore`, and the CLI's `--no-gitignore` was
+ * unreachable from here. A per-call flag could not have fixed it either: the
+ * Switch button runs an activation, which re-added the block. So this records
+ * the durable manifest setting through the same digest-bound edit path every
+ * other manifest mutation uses.
+ *
+ * Rendered only when the CLI advertises `gitignore-opt-out-v1`: an older binary
+ * refuses the verb with a clap usage error rather than degrading, so the button
+ * must not exist for it.
+ */
+function GitignoreControl({
+  managed,
+  previewProfileEdit,
+  applyProfileEdit,
+  onDone,
+}: {
+  /** Whether the project currently manages the block. */
+  managed: boolean;
+  previewProfileEdit: (
+    edit: AgentstackProfileEdit,
+  ) => Promise<AgentstackProfileEditPreviewResult | null>;
+  applyProfileEdit: (
+    edit: AgentstackProfileEdit,
+    digest: string,
+  ) => Promise<{ ok: boolean; message: string }>;
+  onDone: () => void;
+}) {
+  const [flow, setFlow] = useState<EditFlow>({ phase: "idle" });
+
+  const begin = useCallback(async () => {
+    const edit: AgentstackProfileEdit = { kind: "set-gitignore", enabled: !managed };
+    const title = describeEdit(edit);
+    setFlow({ phase: "previewing", edit, title });
+    const outcome = classifyAgentstackEditPreview(await previewProfileEdit(edit));
+    setFlow(
+      outcome.kind === "confirm"
+        ? {
+            phase: "confirm",
+            edit,
+            title,
+            digest: outcome.digest,
+            note: outcome.preview.note ?? null,
+            removal: outcome.preview.removal ?? null,
+          }
+        : outcome.kind === "refused"
+          ? { phase: "refused", title, message: outcome.message }
+          : outcome.kind === "unavailable"
+            ? { phase: "unavailable", title }
+            : { phase: "unsupported", title },
+    );
+  }, [managed, previewProfileEdit]);
+
+  const confirm = useCallback(async () => {
+    if (flow.phase !== "confirm") return;
+    const { edit, title, digest } = flow;
+    setFlow({ phase: "running", edit, title });
+    const result = await applyProfileEdit(edit, digest);
+    setFlow({ phase: "done", edit, title, ok: result.ok, message: result.message });
+    if (result.ok) onDone();
+  }, [flow, applyProfileEdit, onDone]);
+
+  if (flow.phase !== "idle") {
+    return (
+      <div className="w-full">
+        <EditFlowCard
+          flow={flow}
+          createNeedsActivation={false}
+          onActivate={null}
+          onConfirm={() => void confirm()}
+          onBack={() => setFlow({ phase: "idle" })}
+        />
+      </div>
+    );
+  }
+  return (
+    <Button size="xs" variant="outline" onClick={() => void begin()}>
+      {managed ? "Keep .gitignore as is" : "Manage .gitignore again"}
+    </Button>
+  );
+}
+
 function describeEdit(edit: AgentstackProfileEdit): string {
   switch (edit.kind) {
     case "add-skill-to-profile":
@@ -4755,6 +4855,13 @@ function describeEdit(edit: AgentstackProfileEdit): string {
       if (removes > 0) parts.push(`remove ${removes}`);
       return `Update toolset "${edit.profile}" — ${parts.join(", ")}`;
     }
+    case "set-gitignore":
+      // Said as the consequence, not as the setting: `gitignore = false` is
+      // what gets written, but what the user is deciding is whether these
+      // files show up in `git status`.
+      return edit.enabled
+        ? "Keep generated files out of git again"
+        : "Stop managing this project's .gitignore";
     case "rename-profile":
       return `Rename toolset "${edit.name}" to "${edit.to}"`;
     case "delete-profile":

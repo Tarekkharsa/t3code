@@ -322,6 +322,11 @@ export function validateProfileEdit(edit: AgentstackProfileEdit): string | null 
       if (!isPlainName(edit.name)) return "toolset name looks malformed";
       return null;
     }
+    case "set-gitignore": {
+      // No free values at all — the only field is a boolean the schema already
+      // decoded, so there is nothing here that could reach argv unshaped.
+      return null;
+    }
     case "remove-from-library": {
       // The name is the only free value: a plain capability name, never the
       // `*` wildcard (there is no "remove everything" in this closed set).
@@ -584,6 +589,13 @@ export function profileEditArgv(
     }
     case "delete-profile": {
       const argv = [...base, "delete-profile", "--name", edit.name];
+      return [...argv, ...(consent ? ["--yes", "--consented", consent.digest] : ["--preview"])];
+    }
+    case "set-gitignore": {
+      // Nothing renders, so `--allow-unresolved` would be inert. `--enabled`
+      // takes an explicit value: the CLI declares it as a Set-action flag so
+      // "off" is a value the panel sends, not a flag it omits.
+      const argv = [...base, "set-gitignore", "--enabled", edit.enabled ? "true" : "false"];
       return [...argv, ...(consent ? ["--yes", "--consented", consent.digest] : ["--preview"])];
     }
     case "remove-from-library": {

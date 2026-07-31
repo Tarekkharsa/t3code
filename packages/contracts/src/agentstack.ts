@@ -144,6 +144,13 @@ export const AgentstackDoctorReport = Schema.Struct({
    * activated)". Same availability rules as `mode` (`doctor-mode-v1`).
    */
   activation: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  /**
+   * Whether this project maintains the managed `.gitignore` block. Needed to
+   * label the opt-out toggle honestly — offering "Keep .gitignore as is" to a
+   * project that already opted out states the wrong current state
+   * (`gitignore-opt-out-v1`).
+   */
+  gitignore: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
   /** One recommended command (e.g. `agentstack secret set SEARCH_TOKEN`), or
    *  null when nothing is pending. Shown verbatim as the next step. */
   next_action: Schema.optionalKey(Schema.NullOr(Schema.String)),
@@ -1025,10 +1032,31 @@ export const AgentstackDeleteProfileEdit = Schema.Struct({
 });
 export type AgentstackDeleteProfileEdit = typeof AgentstackDeleteProfileEdit.Type;
 
+/**
+ * Record whether this project manages its `.gitignore` block.
+ *
+ * A manifest edit rather than a flag on `apply`/`use`, deliberately. A per-call
+ * flag would put the durability in this frontend's memory of which flag to
+ * pass, and the panel is never an enforcement boundary. Recorded in the
+ * manifest, every later command reads it — so the Switch button, which was the
+ * thing that used to silently undo a decline, needs no change at all.
+ *
+ * Disabling also removes a managed block already on disk. That removal is
+ * consented HERE and nowhere else: routine commands must leave a block a team
+ * may have committed alone. The preview's `removes_block` says whether this
+ * call would perform it. Gate on `gitignore-opt-out-v1`.
+ */
+export const AgentstackSetGitignoreEdit = Schema.Struct({
+  kind: Schema.Literal("set-gitignore"),
+  enabled: Schema.Boolean,
+});
+export type AgentstackSetGitignoreEdit = typeof AgentstackSetGitignoreEdit.Type;
+
 export const AgentstackProfileEdit = Schema.Union([
   AgentstackAddSkillEdit,
   AgentstackAddServerEdit,
   AgentstackCreateProfileEdit,
+  AgentstackSetGitignoreEdit,
   AgentstackEditProfileEdit,
   AgentstackRenameProfileEdit,
   AgentstackDeleteProfileEdit,
