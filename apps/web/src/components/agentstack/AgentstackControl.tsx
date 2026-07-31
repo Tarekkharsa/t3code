@@ -5389,6 +5389,17 @@ export function EditFlowCard({
           Only the grouping goes. The servers and skills in it stay declared in this project and
           stay in your library. Nothing is rendered, and nothing is written until you confirm.
         </p>
+      ) : flow.edit.kind === "set-gitignore" ? (
+        // The generic copy below would claim this re-locks and re-renders the
+        // toolset and could be blocked by a `${REF}`. Neither is true here: it
+        // writes one manifest key and renders nothing. Saying otherwise on a
+        // consent step is exactly the mismatch this setting exists to remove.
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          {flow.edit.enabled
+            ? "AgentStack will keep generated files out of git again. This writes one setting in the manifest and renders nothing."
+            : "This writes one setting in the manifest and renders nothing. A managed block already in .gitignore is removed too, so the generated files become visible to `git status` again."}{" "}
+          Nothing is written until you confirm.
+        </p>
       ) : (
         <p className="text-[11px] leading-relaxed text-muted-foreground">
           Applying re-locks and re-renders the toolset. An unresolved{" "}
