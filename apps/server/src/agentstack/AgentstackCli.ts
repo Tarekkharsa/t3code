@@ -327,6 +327,11 @@ export function validateProfileEdit(edit: AgentstackProfileEdit): string | null 
       // decoded, so there is nothing here that could reach argv unshaped.
       return null;
     }
+    case "set-mode": {
+      // The mode is a closed literal set the schema already decoded; nothing
+      // free ever reaches argv.
+      return null;
+    }
     case "remove-from-library": {
       // The name is the only free value: a plain capability name, never the
       // `*` wildcard (there is no "remove everything" in this closed set).
@@ -597,6 +602,13 @@ export function profileEditArgv(
       // "off" is a value the panel sends, not a flag it omits.
       const argv = [...base, "set-gitignore", "--enabled", edit.enabled ? "true" : "false"];
       return [...argv, ...(consent ? ["--yes", "--consented", consent.digest] : ["--preview"])];
+    }
+    case "set-mode": {
+      // The `static` leg RENDERS (the one activation path), so
+      // `--allow-unresolved` passes through like edit-profile's; the two
+      // nothing-at-rest legs never resolve a `${REF}` and ignore it.
+      const argv = [...base, "set-mode", edit.mode];
+      return [...argv, ...consentFlags];
     }
     case "remove-from-library": {
       // Machine-wide: no toolset, no scope, and nothing renders — so

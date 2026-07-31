@@ -532,6 +532,48 @@ export function describeAgentstackMode(
   }
 }
 
+/** One delivery mode as the chooser presents it. `word` is the footer's
+ *  clickable spelling; `title`/`desc` are the option card. */
+export interface AgentstackModeOption {
+  readonly mode: "static" | "clean-at-rest" | "zero-files";
+  readonly word: string;
+  readonly title: string;
+  readonly desc: string;
+}
+
+/**
+ * The three delivery modes, in the order the chooser lists them. One
+ * vocabulary for the footer word and the option cards, so the word someone
+ * clicks and the option they land on can never drift apart.
+ */
+export const AGENTSTACK_MODE_OPTIONS: ReadonlyArray<AgentstackModeOption> = [
+  {
+    mode: "static",
+    word: "on disk",
+    title: "On disk",
+    desc: "Config files in each CLI, kept out of git. Works with every CLI, zero moving parts.",
+  },
+  {
+    mode: "zero-files",
+    word: "served live",
+    title: "Served live",
+    desc: "Nothing written into this repo; your CLIs fetch capabilities from AgentStack.",
+  },
+  {
+    mode: "clean-at-rest",
+    word: "only while you work",
+    title: "Only while you work",
+    desc: "Files appear when you start and are put back exactly as they were when you stop.",
+  },
+];
+
+/** The footer's word for a doctor-reported mode; the raw label for a mode
+ *  this build doesn't know (a future CLI must not render as blank). */
+export function agentstackModeWord(mode: string | null | undefined): string | null {
+  if (mode === null || mode === undefined || mode === "") return null;
+  return AGENTSTACK_MODE_OPTIONS.find((o) => o.mode === mode)?.word ?? mode;
+}
+
 /**
  * Whether this project has ever been activated (`doctor-mode-v1`).
  *

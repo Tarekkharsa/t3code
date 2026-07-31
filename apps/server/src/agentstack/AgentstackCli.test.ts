@@ -919,6 +919,29 @@ describe("AgentstackCli", () => {
       "--consented",
       digest,
     ]);
+
+    // set-mode: the mode is a closed literal (never a free string on argv),
+    // and the static leg renders — so `--allow-unresolved` passes through,
+    // exactly like edit-profile's.
+    expect(
+      AgentstackCli.profileEditArgv("/proj", { kind: "set-mode", mode: "zero-files" }),
+    ).toEqual(["--manifest-dir", "/proj", "set-mode", "zero-files", "--preview"]);
+    expect(
+      AgentstackCli.profileEditArgv(
+        "/proj",
+        { kind: "set-mode", mode: "static" },
+        { digest, allowUnresolved: true },
+      ),
+    ).toEqual([
+      "--manifest-dir",
+      "/proj",
+      "set-mode",
+      "static",
+      "--yes",
+      "--consented",
+      digest,
+      "--allow-unresolved",
+    ]);
   });
 
   it("never builds a bare edit argv — every verb is a --preview or a digest-bound apply", () => {
@@ -933,6 +956,7 @@ describe("AgentstackCli", () => {
       { kind: "create-profile", name: "web", skills: ["pdf"], servers: [] },
       { kind: "remove-from-library", group: "skill", name: "pdf" },
       { kind: "remove-capability", group: "server", name: "computer-use" },
+      { kind: "set-mode", mode: "clean-at-rest" },
     ];
     for (const edit of edits) {
       expect(AgentstackCli.profileEditArgv("/proj", edit)).toContain("--preview");

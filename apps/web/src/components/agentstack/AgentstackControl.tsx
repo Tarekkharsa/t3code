@@ -63,6 +63,7 @@ import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { DiffStatLabel, hasNonZeroStat } from "../chat/DiffStatLabel";
 import { AgentstackMark } from "./AgentstackMark";
 import { DiffLines } from "./DiffLines";
+import { InlineToolsetSwitch, ModeChooser, PopoverFooter } from "./PopoverHome";
 import { TomlEditor } from "./TomlEditor";
 import {
   AGENTSTACK_ACTION_META as ACTION_META,
@@ -171,6 +172,16 @@ const FEATURE_DOCTOR_MODE = "doctor-mode-v1";
  *  `gitignore` field). An older binary refuses the verb with a clap usage
  *  error rather than degrading, so the control must not exist without it. */
 const FEATURE_GITIGNORE_OPT_OUT = "gitignore-opt-out-v1";
+/**
+ * The delivery-mode switch with a real un-render/render leg and digest-bound
+ * consent. The footer's mode word is clickable only on this name: before it,
+ * `mode_switch_plan` had no un-render leg, so a picker would apply a switch
+ * whose derived mode never changed — the panel would display a mode the
+ * system refuses.
+ */
+const FEATURE_SET_MODE = "set-mode-v1";
+/** `doctor.clis` — the honest denominator for the footer's CLI count. */
+const FEATURE_CLI_COVERAGE = "doctor-cli-coverage-v1";
 /** The startup test (`doctor --probe`) — the ONLY doctor contract with side
  *  effects: the CLI starts each stdio server, speaks the MCP handshake, and
  *  reaps it. Gated positively on the name so the affordance cannot exist
@@ -402,6 +413,13 @@ export function AgentstackControl({
   threadId?: ThreadId;
 }) {
   const [open, setOpen] = useState(false);
+  /**
+   * Which surface the popover's body shows: the resting card, the inline
+   * toolset switch, or the delivery-mode chooser. Only ever one — the popover
+   * stays one region — and it resets whenever the popover closes, so it can
+   * never reopen mid-flow onto a stale list.
+   */
+  const [homeView, setHomeView] = useState<"card" | "switch" | "mode">("card");
   /** Null = the Manage dialog is closed; otherwise the tab it is showing. */
   const [manageTab, setManageTab] = useState<Tab | null>(null);
   const [status, setStatus] = useState<AgentstackStatus | null>(null);
@@ -514,6 +532,7 @@ export function AgentstackControl({
     projectEpoch.current += 1;
     primeAttempts.current = 0;
     setOpen(false);
+    setHomeView("card");
     setManageTab(null);
     // The new project's own last-known status, not null: a project already
     // read this session gets its chip label back immediately, and one never
@@ -900,6 +919,10 @@ export function AgentstackControl({
   // project off "never activated".
   const canReadMode = hasAgentstackFeature(features, FEATURE_DOCTOR_MODE);
   const canSetGitignore = hasAgentstackFeature(features, FEATURE_GITIGNORE_OPT_OUT);
+  // The mode word is clickable only when the CLI can actually switch; the CLI
+  // count renders only when the CLI reports it. Both degrade to silence.
+  const canSetMode = hasAgentstackFeature(features, FEATURE_SET_MODE);
+  const canSeeCliCoverage = hasAgentstackFeature(features, FEATURE_CLI_COVERAGE);
   // The workflow monitor negotiates off its OWN enveloped read, not the doctor
   // status: a newer CLI's workflow reads can be schema-incompatible even when
   // the status read is fine, and vice versa. Legacy binaries (no envelope) leave
@@ -934,11 +957,6 @@ export function AgentstackControl({
           })
         : null,
     [status, overviewRows, findings, trust],
-  );
-
-  const healthyLine = useMemo(
-    () => summarizeAgentstackHealthyRows(partitionAgentstackOverviewRows(overviewRows).healthy),
-    [overviewRows],
   );
 
   // One posture for the trigger dot AND the header chip, derived in the same
@@ -1050,7 +1068,10 @@ export function AgentstackControl({
           // Only the popover's own transient state resets here. The dialogs
           // below are siblings with their own lifetime — clearing them here
           // meant dismissing the popover silently killed an open review.
-          if (!next) setActionState({ phase: "idle" });
+          if (!next) {
+            setActionState({ phase: "idle" });
+            setHomeView("card");
+          }
         }}
         open={open}
       >
@@ -1096,33 +1117,16 @@ export function AgentstackControl({
           ) : null}
         </PopoverTrigger>
         <PopoverPopup align="end" className="w-[400px] p-0" side="bottom">
-          {/* Header — the mark, the name, and one word for the state. The
-              version number, the trust pill and the readiness chip all used to
-              sit here; a build fact and two pills saying the same thing are
-              not what someone opens this for. */}
+          {/* Header — the mark and the name, nothing else. The version
+              number, the trust pill and the readiness chip all used to sit
+              here; the readiness word now lives in the footer beside the mode
+              and the CLI count (wireframe v2), so the header saying it too
+              would be the same fact twice on one small surface. The collapsed
+              trigger keeps its own label — that is the affordance that must
+              be noticed. */}
           <div className="flex items-center gap-2 px-4 pb-2.5 pt-3.5">
             <AgentstackMark className="size-[22px]" />
             <span className="font-semibold text-sm text-foreground">AgentStack</span>
-            {posture !== "hidden" ? (
-              <span
-                className={cn(
-                  "ml-auto flex shrink-0 items-center gap-1.5 text-[11.5px]",
-                  posture === "attention" ? "text-warning-foreground" : "text-muted-foreground",
-                )}
-              >
-                {/* No pulse here: the live-run strip below is already the
-                    animated thing on screen, and two of them read as two
-                    separate events. */}
-                <span
-                  aria-hidden
-                  className={cn(
-                    "size-1.5 rounded-full",
-                    posture === "attention" ? "bg-warning" : "bg-success",
-                  )}
-                />
-                {posture === "attention" ? "Needs you" : "Ready"}
-              </span>
-            ) : null}
           </div>
 
           {/* Live workflow strip */}
@@ -1166,6 +1170,38 @@ export function AgentstackControl({
             <NotInstalled onRecheck={refresh} />
           ) : status.doctor === null ? (
             <DoctorUnreadable onRecheck={refresh} failure={status?.doctorFailure ?? null} />
+          ) : homeView === "switch" ? (
+            /* The inline toolset switch — the daily verb without the Manage
+               trip. Picking applies (temporary session) and closes; the list
+               view carries no footer, exactly as drawn. */
+            <InlineToolsetSwitch
+              toolsets={toolsets}
+              canSessions={canSessions}
+              onStart={onSessionStart}
+              onEnd={onSessionEnd}
+              onReviewTrust={() => openReader(setReviewing)}
+              onManage={() => openManage("toolsets")}
+              onDone={() => {
+                setHomeView("card");
+                setOpen(false);
+              }}
+              onBack={() => setHomeView("card")}
+            />
+          ) : homeView === "mode" ? (
+            /* The delivery-mode chooser. Deliberately NOT the toolset list's
+               shape: nothing commits from this list — each option expands
+               into the CLI's real plan, and the confirm is the third click.
+               A mode switch is machine-scope and asymmetric; a toolset switch
+               is project-scope and reversible. Equal-looking controls teach
+               equal safety, so these two must not look alike. */
+            <ModeChooser
+              currentMode={status.doctor.mode ?? null}
+              previewEdit={previewProfileEdit}
+              applyEdit={applyProfileEdit}
+              onReviewTrust={() => openReader(setReviewing)}
+              onDone={() => setHomeView("card")}
+              onBack={() => setHomeView("card")}
+            />
           ) : (
             <>
               {concern ? (
@@ -1174,7 +1210,11 @@ export function AgentstackControl({
                 <WorkingUnder
                   toolsets={toolsets}
                   canSessions={canSessions}
-                  onSwitch={() => openManage("toolsets")}
+                  onSwitch={
+                    // Inline when the CLI can apply a pick; the Manage rail
+                    // otherwise (a list that cannot apply is not a switch).
+                    canSessions ? () => setHomeView("switch") : () => openManage("toolsets")
+                  }
                   onEnd={onSessionEnd}
                 />
               )}
@@ -1190,29 +1230,32 @@ export function AgentstackControl({
                 </div>
               ) : null}
 
-              {/* Footer — one sentence about everything not shown, and the
-                  door to it. The sentence carries the number ("2 more
-                  findings"), the door stays a plain word: the earlier split —
-                  vague words on the left, a bare amber count riding the
-                  button — said the same thing twice and let the number read
-                  as a warning you could not act on. */}
-              <div className="flex items-center gap-2 border-t border-border/60 px-4 py-2.5">
-                <span className="min-w-0 flex-1 truncate text-[11.5px] text-muted-foreground">
-                  {concern
-                    ? concern.others > 0
-                      ? `${formatAgentstackCount(concern.others, "more finding")} to review`
-                      : "Nothing else needs you."
-                    : (healthyLine ?? "This project is set up and in sync.")}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => openManage("setup")}
-                  className="flex shrink-0 items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-foreground/[0.05] hover:text-foreground"
-                >
-                  Manage
-                  <span aria-hidden>›</span>
-                </button>
-              </div>
+              {/* Footer — the readiness word, the delivery mode as a
+                  clickable word (not a second card: mode changes almost
+                  never, and the resting surface stays ONE card), and the CLI
+                  count scoped honestly to the mode. In the not-ready state
+                  the count is dropped — one concern is the rule, and a number
+                  beside a warning reads as a second one. */}
+              <PopoverFooter
+                concern={concern !== null}
+                modeLabel={canReadMode ? (status.doctor.mode ?? null) : null}
+                onMode={
+                  canSetMode && canReadMode && status.doctor.mode != null
+                    ? () => setHomeView("mode")
+                    : null
+                }
+                clis={
+                  canSeeCliCoverage && status.doctor.clis != null
+                    ? {
+                        capable: status.doctor.clis.bridge_capable,
+                        detected: status.doctor.clis.detected,
+                      }
+                    : null
+                }
+                servedLive={status.doctor.mode === "zero-files"}
+                onCoverage={() => openManage("setup")}
+                onManage={() => openManage("setup")}
+              />
             </>
           )}
         </PopoverPopup>
@@ -4862,6 +4905,10 @@ function describeEdit(edit: AgentstackProfileEdit): string {
       return edit.enabled
         ? "Keep generated files out of git again"
         : "Stop managing this project's .gitignore";
+    case "set-mode":
+      // The chooser draws its own plan card; this title backs any generic
+      // surface that ever names the edit.
+      return `Switch delivery mode to ${edit.mode}`;
     case "rename-profile":
       return `Rename toolset "${edit.name}" to "${edit.to}"`;
     case "delete-profile":

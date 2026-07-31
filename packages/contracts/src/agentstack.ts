@@ -151,6 +151,23 @@ export const AgentstackDoctorReport = Schema.Struct({
    * (`gitignore-opt-out-v1`).
    */
   gitignore: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
+  /**
+   * This machine's CLI coverage: how many CLIs are installed and how many of
+   * those can host the stdio bridge (live delivery). The honest denominator
+   * for the footer's count — a zero-files project reaches `bridge_capable` of
+   * `detected`, and the ones it cannot reach are NAMED, because a coverage
+   * number that shrinks silently is worse than no number. Same availability
+   * rules as `mode`; gate on `doctor-cli-coverage-v1`.
+   */
+  clis: Schema.optionalKey(
+    Schema.NullOr(
+      Schema.Struct({
+        detected: Schema.Number,
+        bridge_capable: Schema.Number,
+        bridge_incapable: Schema.Array(Schema.String),
+      }),
+    ),
+  ),
   /** One recommended command (e.g. `agentstack secret set SEARCH_TOKEN`), or
    *  null when nothing is pending. Shown verbatim as the next step. */
   next_action: Schema.optionalKey(Schema.NullOr(Schema.String)),
@@ -1052,11 +1069,31 @@ export const AgentstackSetGitignoreEdit = Schema.Struct({
 });
 export type AgentstackSetGitignoreEdit = typeof AgentstackSetGitignoreEdit.Type;
 
+/**
+ * Switch this project's delivery mode. The mode is DERIVED from disk, so the
+ * CLI changes the facts the derivation reads: `static` renders configs,
+ * `clean-at-rest` un-renders and pins the lock, `zero-files` registers the
+ * machine-wide bridge and un-renders — refusing while the project is
+ * untrusted (trust is granted in the review, never here).
+ *
+ * The preview is the REAL transition plan (removals, bridge coverage, scope
+ * warning, blockers) and the apply is digest-bound like every other edit —
+ * this is the panel's most consequential write, and the one place a
+ * confirm-less commit would be indefensible. A closed literal set: nothing
+ * free ever reaches argv. Gate on `set-mode-v1`.
+ */
+export const AgentstackSetModeEdit = Schema.Struct({
+  kind: Schema.Literal("set-mode"),
+  mode: Schema.Literals(["static", "clean-at-rest", "zero-files"]),
+});
+export type AgentstackSetModeEdit = typeof AgentstackSetModeEdit.Type;
+
 export const AgentstackProfileEdit = Schema.Union([
   AgentstackAddSkillEdit,
   AgentstackAddServerEdit,
   AgentstackCreateProfileEdit,
   AgentstackSetGitignoreEdit,
+  AgentstackSetModeEdit,
   AgentstackEditProfileEdit,
   AgentstackRenameProfileEdit,
   AgentstackDeleteProfileEdit,
@@ -1109,6 +1146,50 @@ export const AgentstackProfileEditPreview = Schema.Struct({
   /** create-profile: the seeded members. */
   skills: Schema.optionalKey(Schema.Array(Schema.String)),
   servers: Schema.optionalKey(Schema.Array(Schema.String)),
+  /**
+   * set-mode: the transition plan. The CLI emits these flat (one preview
+   * shape decodes every verb); all absent for other verbs. `mode` is the
+   * target, `current_mode` what the project derives right now, `changed`
+   * false when they already agree (the apply refuses that case).
+   */
+  mode: Schema.optionalKey(Schema.String),
+  current_mode: Schema.optionalKey(Schema.String),
+  changed: Schema.optionalKey(Schema.Boolean),
+  /** Everything the un-render leg takes off disk, as display rows. */
+  removes: Schema.optionalKey(
+    Schema.Array(Schema.Struct({ label: Schema.String, path: Schema.String })),
+  ),
+  removes_gitignore_block: Schema.optionalKey(Schema.Boolean),
+  /** Compiled CLAUDE.md/AGENTS.md regions come off and are NOT served live. */
+  removes_instructions: Schema.optionalKey(Schema.Boolean),
+  /** → static: the toolset the render leg would activate. */
+  renders: Schema.optionalKey(Schema.NullOr(Schema.Struct({ profile: Schema.String }))),
+  /** → static, but no toolset can be picked implicitly (CLI's own sentence). */
+  render_blocker: Schema.optionalKey(Schema.String),
+  /** → clean-at-rest: whether the switch pins agentstack.lock first. */
+  locks: Schema.optionalKey(Schema.Boolean),
+  /** → zero-files: machine-wide bridge registration and its honest coverage. */
+  bridge: Schema.optionalKey(
+    Schema.NullOr(
+      Schema.Struct({
+        registers: Schema.Boolean,
+        detected: Schema.Number,
+        capable: Schema.Number,
+        incapable: Schema.Array(Schema.String),
+      }),
+    ),
+  ),
+  /** → zero-files on an untrusted project: the apply will refuse; route to
+   *  the trust review instead of offering a confirm that cannot succeed. */
+  requires_trust: Schema.optionalKey(Schema.Boolean),
+  /** The switch cannot be honored project-scope (CLI's own sentence). */
+  mode_blocker: Schema.optionalKey(Schema.String),
+  /** A session holds this project's files; every direction refuses. */
+  session_active: Schema.optionalKey(Schema.String),
+  /** True when applying changes every CLI's config on this machine. */
+  machine_scope: Schema.optionalKey(Schema.Boolean),
+  /** The exact undo command for the un-render half. */
+  undo: Schema.optionalKey(Schema.String),
   /**
    * remove-from-library/remove-capability: what leaves, where it goes, and this
    * project's stake in it. `used_by_this_project` is what turns a
