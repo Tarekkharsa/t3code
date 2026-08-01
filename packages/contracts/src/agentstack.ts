@@ -131,6 +131,18 @@ export const AgentstackDoctorReport = Schema.Struct({
    */
   state: Schema.optionalKey(Schema.NullOr(Schema.String)),
   /**
+   * The honest readiness verdict (`status-honesty-v1`), and the field to
+   * render instead of `state`. `state` answers only "did any check find
+   * something to repair?", so it says `ready` over a project that is
+   * untrusted and never activated — zero findings is true, "ready" is not.
+   * Values: `needs_setup` | `needs_attention` | `untrusted` | `drifted` |
+   * `empty` | `never_activated` | `ready` | `unknown` — every value except
+   * `ready` means "not live", with `next_action` as the step. Kept a free
+   * string so a future verdict still decodes; gate rendering on the feature
+   * name, never on this key being present.
+   */
+  readiness: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  /**
    * static | clean-at-rest | zero-files — the project's delivery mode, the
    * same derived reading `agentstack status` prints (contract
    * `doctor-mode-v1`). Null when doctor ran with no project (`needs_setup`);
@@ -454,6 +466,42 @@ export const AgentstackTrustExtension = Schema.Struct({
 });
 export type AgentstackTrustExtension = typeof AgentstackTrustExtension.Type;
 
+/**
+ * One declared hook (`trust-review-card-v1`) — an EXECUTABLE kind: agentstack
+ * compiles it into each harness's native config, the harness runs the command
+ * at the user's permission, and agentstack does not govern it at runtime.
+ * Until this contract the machine-readable preview omitted hooks entirely, so
+ * a panel showed a project's executable surface as smaller than it is.
+ */
+export const AgentstackTrustHook = Schema.Struct({
+  name: Schema.String,
+  /** The harness event it fires on, e.g. `pre-tool-use`. */
+  event: Schema.String,
+  /** Event matcher pattern, when the hook declares one. */
+  matcher: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  /** The full command line the harness will execute. */
+  runs: Schema.String,
+  /** The CLIs this hook is compiled into. Empty means all targets. */
+  targets: Schema.Array(Schema.String),
+  /** Always true from the CLI — carried so the row can never be mistaken
+   *  for passive configuration if a future kind shares the shape. */
+  executable: Schema.optionalKey(Schema.Boolean),
+});
+export type AgentstackTrustHook = typeof AgentstackTrustHook.Type;
+
+/**
+ * One declared settings block (`trust-review-card-v1`): values agentstack
+ * merges into the named CLI's own config file. Not executable, but a settings
+ * key can change how that harness behaves, so the review names the keys.
+ */
+export const AgentstackTrustSetting = Schema.Struct({
+  /** The CLI whose config file receives the merge, e.g. `claude-code`. */
+  adapter: Schema.String,
+  /** The top-level keys the block sets, sorted by the CLI. */
+  sets: Schema.Array(Schema.String),
+});
+export type AgentstackTrustSetting = typeof AgentstackTrustSetting.Type;
+
 export const AgentstackTrustPreview = Schema.Struct({
   path: Schema.String,
   /** trusted | drifted | untrusted */
@@ -472,6 +520,9 @@ export const AgentstackTrustPreview = Schema.Struct({
     workflows: Schema.Number,
     extensions: Schema.Number,
     instructions: Schema.Number,
+    /** Present under `trust-review-card-v1`; absent on older previews. */
+    hooks: Schema.optionalKey(Schema.Number),
+    settings: Schema.optionalKey(Schema.Number),
   }),
   /**
    * The complete named surface behind the counts, when a newer CLI emits it:
@@ -484,6 +535,23 @@ export const AgentstackTrustPreview = Schema.Struct({
   workflows: Schema.optionalKey(Schema.Array(AgentstackTrustWorkflow)),
   extensions: Schema.optionalKey(Schema.Array(AgentstackTrustExtension)),
   instructions: Schema.optionalKey(Schema.Array(Schema.String)),
+  /**
+   * `trust-review-card-v1`: the kinds the terminal review card discloses that
+   * this JSON previously omitted. All `optionalKey` so older previews decode;
+   * the panel renders them only when the CLI advertises the feature name —
+   * never sniffed off the fields being present. NOTE the CLI's documented
+   * limits: a drifted library server stays redacted here (the terminal shows
+   * it annotated instead), and blockers cover servers/local executables only —
+   * this payload is the machine-readable surface, not "everything the terminal
+   * reviewer will see".
+   */
+  hooks: Schema.optionalKey(Schema.Array(AgentstackTrustHook)),
+  settings: Schema.optionalKey(Schema.Array(AgentstackTrustSetting)),
+  /** The `[policy.*]` narrowing the project requests, as the CLI's own
+   *  pre-formatted review lines (sanitized display text). */
+  policy_requested: Schema.optionalKey(Schema.Array(Schema.String)),
+  /** Path of the machine manifest whose ceiling caps the requested policy. */
+  machine_policy_ceiling: Schema.optionalKey(Schema.NullOr(Schema.String)),
   /**
    * The previewed-surface digest (`sha256:<hex>`) — the exact value a
    * consent-bound grant must present back as `--consented-digest`, so "a

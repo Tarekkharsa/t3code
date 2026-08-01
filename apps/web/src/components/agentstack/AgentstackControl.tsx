@@ -103,7 +103,7 @@ import {
   partitionAgentstackOverviewRows,
   selectAgentstackFindingsView,
   selectAgentstackPrimaryConcern,
-  selectAgentstackUndoView,
+  deriveAgentstackUndoLedger,
   shortDigest,
   shortenAgentstackPath,
   shortenAgentstackPathsIn,
@@ -117,6 +117,7 @@ import {
   type AgentstackPrimaryConcern,
   type AgentstackRowLevel,
   type AgentstackToolsetRow,
+  type AgentstackUndoLedgerRow,
 } from "./agentstack-logic";
 
 /** End-to-end contract names the CLI advertises in its read envelope. */
@@ -188,6 +189,41 @@ const FEATURE_CLI_COVERAGE = "doctor-cli-coverage-v1";
  *  against a binary that can't honor it; the action is admin-authorized
  *  server-side, like the writes. */
 const FEATURE_DOCTOR_PROBE = "doctor-probe-v1";
+/** The consent-review read itself (`trust --preview` with `surface_digest`).
+ *  Positively gated like the other reads: without the name the review screen
+ *  states its absence and points at the terminal, rather than firing a read
+ *  the binary may not serve and rendering whatever came back. */
+const FEATURE_TRUST_PREVIEW = "trust-preview";
+/** Server-resolution/local-executable blockers on the preview. Read only under
+ *  the name — an absent field on an older CLI means "unknown", and sniffing it
+ *  as an empty list would claim "no known blockers" off missing data. */
+const FEATURE_TRUST_SERVER_BLOCKERS = "trust-server-blockers-v1";
+/** The per-item consent card fields (`hooks`, `settings`, `policy_requested`,
+ *  `machine_policy_ceiling`). Hooks are the reason this exists: they are an
+ *  executable kind, and a panel on the old payload showed a project's
+ *  executable surface as smaller than it is. Without the name the review
+ *  degrades to the pre-card rendering and never sniffs the fields. */
+const FEATURE_TRUST_REVIEW_CARD = "trust-review-card-v1";
+/** `doctor.readiness` — the honest "is this project actually live?" verdict.
+ *  `state` answers only "did any check find something to repair?", which reads
+ *  "ready" over an untrusted, never-activated project; this panel's Ready chip
+ *  was the known mislabel (E2E F1) the contract exists to fix. */
+const FEATURE_STATUS_HONESTY = "status-honesty-v1";
+/** The drift comparison (`diff --json` per target). Without it the drift
+ *  review states its absence instead of comparing nothing. */
+const FEATURE_DIFF = "diff-v1";
+/** Per-target `managed`/`hand_edited`/`foreign_untracked` on the diff. Only
+ *  under this name may a change be narrated as a hand-edit; an older binary's
+ *  absent field is "cause unknown", not "not edited". */
+const FEATURE_DIFF_OWNERSHIP = "diff-ownership-v1";
+/** The toolset list read (`use --list --json`). Without it the toolset
+ *  surfaces state their absence instead of reading an empty list as "no
+ *  toolsets yet" — a claim about a read the binary never served. */
+const FEATURE_PROFILES = "profiles-v1";
+/** The setup detection plan (`init --plan` with `plan_digest`). Without it
+ *  setup points at the terminal instead of requesting a plan the binary
+ *  cannot emit. */
+const FEATURE_INIT_PLAN = "init-plan";
 
 const LEVEL_DOT: Record<AgentstackRowLevel, string> = {
   ok: "bg-success",
@@ -923,6 +959,17 @@ export function AgentstackControl({
   // count renders only when the CLI reports it. Both degrade to silence.
   const canSetMode = hasAgentstackFeature(features, FEATURE_SET_MODE);
   const canSeeCliCoverage = hasAgentstackFeature(features, FEATURE_CLI_COVERAGE);
+  // The read-side gates: each read is consumed only under its contract name,
+  // matching the write-side gates above — a field that happens to be present
+  // on an unadvertised binary is never sniffed.
+  const canTrustPreview = hasAgentstackFeature(features, FEATURE_TRUST_PREVIEW);
+  const canServerBlockers = hasAgentstackFeature(features, FEATURE_TRUST_SERVER_BLOCKERS);
+  const canReviewCard = hasAgentstackFeature(features, FEATURE_TRUST_REVIEW_CARD);
+  const canReadReadiness = hasAgentstackFeature(features, FEATURE_STATUS_HONESTY);
+  const canDiff = hasAgentstackFeature(features, FEATURE_DIFF);
+  const canDiffOwnership = hasAgentstackFeature(features, FEATURE_DIFF_OWNERSHIP);
+  const canListToolsets = hasAgentstackFeature(features, FEATURE_PROFILES);
+  const canPlanSetup = hasAgentstackFeature(features, FEATURE_INIT_PLAN);
   // The workflow monitor negotiates off its OWN enveloped read, not the doctor
   // status: a newer CLI's workflow reads can be schema-incompatible even when
   // the status read is fine, and vice versa. Legacy binaries (no envelope) leave
@@ -945,6 +992,13 @@ export function AgentstackControl({
   // row is where they finally appear.
   const findings = useMemo(() => deriveAgentstackFindings(status?.doctor ?? null), [status]);
 
+  // The doctor's honest verdict (`status-honesty-v1`) — only read under the
+  // feature name, so an older CLI degrades to the `state`-era behavior rather
+  // than a sniffed field. This replaces the F1 false-ready reconstruction:
+  // `state` reads "ready" over an untrusted, never-activated project, and the
+  // chip/posture/concern below all reconstructed liveness around that.
+  const readiness = canReadReadiness ? (status?.doctor?.readiness ?? null) : null;
+
   // The first page shows ONE problem. Everything else it would have listed is
   // counted here and read in Manage.
   const concern = useMemo(
@@ -954,15 +1008,17 @@ export function AgentstackControl({
             rows: overviewRows,
             findings,
             trust: trust?.state ?? "unknown",
+            readiness,
           })
         : null,
-    [status, overviewRows, findings, trust],
+    [status, overviewRows, findings, trust, readiness],
   );
 
   // One posture for the trigger dot AND the header chip, derived in the same
   // order as the body's region switch below. Reading `concern` alone here is
   // how a needs-setup project ended up wearing a Ready chip over a body that
-  // said the opposite.
+  // said the opposite; `readiness` closes the remaining gap (a findings-free
+  // project that is untrusted or never activated is not "ready" either).
   const posture = deriveAgentstackPanelPosture({
     hasStatus: status !== null,
     installed: status?.installed ?? false,
@@ -970,6 +1026,7 @@ export function AgentstackControl({
     doctorReadable: (status?.doctor ?? null) !== null,
     incompatible: incompatible !== null,
     setupState,
+    readiness,
     hasConcern: concern !== null,
   });
 
@@ -1209,6 +1266,7 @@ export function AgentstackControl({
               ) : (
                 <WorkingUnder
                   toolsets={toolsets}
+                  canListToolsets={canListToolsets}
                   canSessions={canSessions}
                   onSwitch={
                     // Inline when the CLI can apply a pick; the Manage rail
@@ -1279,6 +1337,8 @@ export function AgentstackControl({
           features={features}
           advisories={canReadAdvisories ? (status?.doctor?.advisories ?? null) : null}
           canReadMode={canReadMode}
+          canReadReadiness={canReadReadiness}
+          canListToolsets={canListToolsets}
           canSetGitignore={canSetGitignore}
           canRestore={canRestore}
           canProbe={canProbe}
@@ -1352,6 +1412,9 @@ export function AgentstackControl({
             onTrust={onTrust}
             onClose={() => closeChild(() => setReviewing(false))}
             trustConsentMissing={trustConsentMissing}
+            canTrustPreview={canTrustPreview}
+            canServerBlockers={canServerBlockers}
+            canReviewCard={canReviewCard}
             canRemoveCapabilities={canRemoveCapabilities}
             previewProfileEdit={previewProfileEdit}
             applyProfileEdit={applyProfileEdit}
@@ -1379,6 +1442,8 @@ export function AgentstackControl({
             onAction={runDriftAction}
             root={manifestSource?.path}
             servedLive={status?.doctor?.mode === "zero-files"}
+            canDiff={canDiff}
+            canDiffOwnership={canDiffOwnership}
           />
         </PanelDialog>
       ) : null}
@@ -1395,6 +1460,7 @@ export function AgentstackControl({
               if (r.ok) setSettingUp(false);
               return r;
             }}
+            canPlan={canPlanSetup}
             canApply={canApplySetup}
           />
         </PanelDialog>
@@ -1629,16 +1695,28 @@ export function ConcernCard({
  */
 export function WorkingUnder({
   toolsets,
+  canListToolsets,
   canSessions,
   onSwitch,
   onEnd,
 }: {
   toolsets: AgentstackToolsetsResult | null;
+  /** The CLI advertises `profiles-v1` (the `use --list` read). False states
+   *  the absence — "no toolsets yet" over a read the binary never served
+   *  would be a claim about nothing. */
+  canListToolsets: boolean;
   canSessions: boolean;
   onSwitch: () => void;
   onEnd: () => Promise<{ ok: boolean; message: string }>;
 }) {
   const [busy, setBusy] = useState(false);
+  if (!canListToolsets) {
+    return (
+      <p className="px-4 pb-3 pt-0.5 text-xs leading-relaxed text-muted-foreground">
+        This agentstack CLI doesn't list toolsets — update it to pick one from here.
+      </p>
+    );
+  }
   const data = toolsets?.toolsets ?? null;
   const session = data?.session ?? null;
   const rows = useMemo(() => (data ? deriveToolsetRows(data.profiles, data.trust) : []), [data]);
@@ -1874,6 +1952,9 @@ function TrustReviewPanel({
   onTrust,
   onClose,
   trustConsentMissing,
+  canTrustPreview,
+  canServerBlockers,
+  canReviewCard,
   canRemoveCapabilities,
   previewProfileEdit,
   applyProfileEdit,
@@ -1887,6 +1968,19 @@ function TrustReviewPanel({
   onClose: () => void;
   /** True when the CLI advertises its features but not consent-bound trust. */
   trustConsentMissing: boolean;
+  /** The CLI advertises the preview read itself (`trust-preview`). False
+   *  states the absence instead of firing the read and rendering whatever
+   *  came back. */
+  canTrustPreview: boolean;
+  /** The CLI advertises `trust-server-blockers-v1`. Only then is the
+   *  `server_blockers` field read — an absent field on an older binary means
+   *  "unknown", and an empty list sniffed off it would claim "no known
+   *  blockers" from missing data. */
+  canServerBlockers: boolean;
+  /** The CLI advertises `trust-review-card-v1`: hooks, settings, requested
+   *  policy and the machine ceiling ride on the preview. False degrades to
+   *  the pre-card rendering and never sniffs the fields. */
+  canReviewCard: boolean;
   /** The CLI advertises digest-bound project manifest removal. */
   canRemoveCapabilities: boolean;
   previewProfileEdit: (
@@ -1909,6 +2003,9 @@ function TrustReviewPanel({
   }, [loadPreview]);
 
   useEffect(() => {
+    // No `trust-preview` in the feature list → the read is never fired; the
+    // body below states the absence instead.
+    if (!canTrustPreview) return;
     let alive = true;
     void loadPreview().then((result) => {
       if (alive) setLoad(result ? { phase: "loaded", result } : { phase: "error" });
@@ -1916,7 +2013,7 @@ function TrustReviewPanel({
     return () => {
       alive = false;
     };
-  }, [loadPreview]);
+  }, [loadPreview, canTrustPreview]);
 
   const preview = load.phase === "loaded" ? load.result.preview : null;
   const state = preview?.state;
@@ -1926,7 +2023,7 @@ function TrustReviewPanel({
   // the server refuses digest-less grants, so offering the click would only
   // manufacture a failure.
   const consentDigest = preview?.surface_digest ?? null;
-  const serverBlockers = preview?.server_blockers ?? [];
+  const serverBlockers = (canServerBlockers ? preview?.server_blockers : null) ?? [];
   // Granting needs the digest (existing gate) AND, when the CLI advertises its
   // features, the consent-bound-trust contract to be among them.
   const canGrant = consentDigest !== null && !trustConsentMissing && serverBlockers.length === 0;
@@ -1982,13 +2079,19 @@ function TrustReviewPanel({
 
   // Named lists when a newer CLI emits them, the counts otherwise — the same
   // fallback the evidence below uses, so the bar can never summarize a smaller
-  // surface than the one on screen.
+  // surface than the one on screen. Hooks and settings join only under the
+  // review-card contract, matching the sections below.
+  const hooks = (canReviewCard ? preview?.hooks : null) ?? [];
+  const settings = (canReviewCard ? preview?.settings : null) ?? [];
+  const policyRequested = (canReviewCard ? preview?.policy_requested : null) ?? [];
   const surface = deriveTrustSurface(preview?.servers ?? [], {
     skills: preview?.skills?.length ?? preview?.counts.skills ?? 0,
     workflows: preview?.workflows?.length ?? preview?.counts.workflows ?? 0,
     extensions: preview?.extensions?.length ?? preview?.counts.extensions ?? 0,
     instructions: preview?.instructions?.length ?? preview?.counts.instructions ?? 0,
     secrets: preview?.secrets.length ?? 0,
+    hooks: canReviewCard ? (preview?.hooks?.length ?? preview?.counts.hooks ?? 0) : 0,
+    settings: canReviewCard ? (preview?.settings?.length ?? preview?.counts.settings ?? 0) : 0,
   });
 
   if (removeFlow.phase !== "idle") {
@@ -2006,21 +2109,27 @@ function TrustReviewPanel({
   return (
     // A column, not a block: the evidence scrolls and the verdict bar does not.
     <div className="flex min-h-0 flex-1 flex-col">
-      {load.phase === "loading" ? (
+      {!canTrustPreview ? (
+        <p className="px-4 py-4 text-xs leading-relaxed text-muted-foreground">
+          This agentstack CLI can't show the review here — update it, or review in a terminal with{" "}
+          <code className="font-mono">agentstack trust</code>, where the review itself is the
+          consent.
+        </p>
+      ) : load.phase === "loading" ? (
         <p className="px-4 py-4 text-xs text-muted-foreground">Loading review…</p>
       ) : preview === null ? (
         <p className="px-4 py-4 text-xs leading-relaxed text-muted-foreground">
-          Couldn't load the trust review — the CLI didn't return one for this project.
+          Couldn't load the review — the CLI didn't return one for this project.
         </p>
       ) : (
         <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-4 py-3">
           <p className="text-[12.5px] leading-relaxed text-muted-foreground">
             {state === "trusted"
-              ? "This repo is trusted at its current bytes. Editing the manifest or lockfile re-gates it."
+              ? "This project is approved at its current bytes. Editing the manifest or lockfile re-opens the review."
               : state === "drifted"
-                ? "This repo was trusted, but its manifest or lockfile changed since — re-review and re-trust."
-                : "This repo is inert until trusted. Review what auto-mode may run and contact, then consent."}
-            {preview.re_trust && state !== "trusted" ? " You trusted it before." : ""}
+                ? "You approved this project before, but its content changed since — review the new bytes and say yes again. The terminal review marks exactly what changed since your last yes."
+                : "This project is inert until you review it. Look over what it would be allowed to run and contact, then give your yes."}
+            {preview.re_trust && state === "untrusted" ? " You approved it before." : ""}
           </p>
 
           {surface.serverCount === 0 ? (
@@ -2164,13 +2273,102 @@ function TrustReviewPanel({
             ) : null;
           })()}
 
+          {/* `trust-review-card-v1` — the kinds the terminal card discloses
+              that the machine preview previously omitted. Hooks lead: they are
+              an EXECUTABLE kind, and a review that hid them showed the
+              project's executable surface as smaller than it is. Rendered only
+              under the feature name; an older CLI degrades to the sections
+              above, never to sniffed fields. */}
+          {hooks.length > 0 ? (
+            <div className="rounded-lg border border-warning/25 bg-warning/[0.04] px-2.5 py-2">
+              <p className="text-[11px] font-semibold text-warning-foreground">
+                Hooks that run commands ({hooks.length})
+              </p>
+              <p className="mt-0.5 text-[10.5px] leading-relaxed text-muted-foreground/70">
+                Compiled into each coding tool&apos;s own config; the tool runs them at your
+                permission. AgentStack does not govern them while they run.
+              </p>
+              <ul className="mt-1 flex flex-col gap-1">
+                {hooks.map((h) => (
+                  <li key={h.name} className="text-[11px] leading-relaxed">
+                    <span className="font-semibold text-foreground">{h.name}</span>{" "}
+                    <span className="text-muted-foreground">
+                      on {h.event}
+                      {h.matcher != null && h.matcher !== "" ? ` (${h.matcher})` : ""}
+                      {h.targets.length > 0 ? ` · ${h.targets.join(", ")}` : ""}
+                    </span>
+                    <br />
+                    <code className="break-all font-mono text-[10.5px] text-muted-foreground/90">
+                      {h.runs}
+                    </code>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
+          {settings.length > 0 ? (
+            <div>
+              <p className="mb-1 text-xs font-semibold text-foreground">
+                Settings ({settings.length})
+              </p>
+              <p className="mb-1.5 text-[10.5px] leading-relaxed text-muted-foreground/70">
+                Values merged into each coding tool&apos;s own config file.
+              </p>
+              <ul className="flex flex-col gap-0.5">
+                {settings.map((s) => (
+                  <li key={s.adapter} className="text-[11px] leading-relaxed">
+                    <span className="font-semibold text-foreground">{s.adapter}</span>{" "}
+                    <span className="text-muted-foreground">
+                      sets{" "}
+                      {s.sets.length > 0 ? (
+                        <code className="break-all font-mono text-[10.5px]">
+                          {s.sets.join(", ")}
+                        </code>
+                      ) : (
+                        "no keys"
+                      )}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
+          {canReviewCard && policyRequested.length > 0 ? (
+            <div>
+              <p className="mb-1 text-xs font-semibold text-foreground">
+                Policy this project requests
+              </p>
+              <ul className="flex flex-col gap-0.5">
+                {/* One line per (dimension, server) pair, so the line is its
+                    own stable identity. */}
+                {policyRequested.map((line) => (
+                  <li
+                    key={line}
+                    className="break-all font-mono text-[10.5px] leading-relaxed text-muted-foreground"
+                  >
+                    {line.replace(/^\s*·\s*/, "")}
+                  </li>
+                ))}
+              </ul>
+              {preview.machine_policy_ceiling != null ? (
+                <p className="mt-1 text-[10.5px] leading-relaxed text-muted-foreground/70">
+                  Requests only ever narrow — the machine ceiling at{" "}
+                  <code className="break-all font-mono">{preview.machine_policy_ceiling}</code> caps
+                  whatever this project asks for.
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+
           {/* Said here rather than left to be discovered by looking for a
-              control that does not exist. Trust is granted over one digest of
-              the whole surface, so there is no per-item opt-out to hunt for —
-              and the way to exclude something is named. */}
+              control that does not exist. Approval is granted over one digest
+              of the whole surface, so there is no per-item opt-out to hunt
+              for — and the way to exclude something is named. */}
           {state !== "trusted" ? (
             <p className="text-[10.5px] leading-relaxed text-muted-foreground/70">
-              Approving covers this whole list — there is no per-item opt-out, because trust is
+              Your yes covers this whole list — there is no per-item opt-out, because approval is
               granted over one digest of the entire surface. To leave something out, remove it from
               the project&apos;s manifest and review again.
             </p>
@@ -2198,8 +2396,8 @@ function TrustReviewPanel({
           {(consentDigest === null || trustConsentMissing) && state !== "trusted" ? (
             <p className="text-[11px] leading-relaxed text-warning-foreground">
               {consentDigest === null
-                ? "This agentstack CLI predates consent-bound trust (its preview has no surface digest), so granting from here is disabled. Update agentstack, or trust from a terminal where the review itself is the consent."
-                : `This agentstack CLI doesn't support consent-bound trust from ${AGENTSTACK_HOST_NAME}. Update agentstack, or trust from a terminal where the review itself is the consent.`}
+                ? "This agentstack CLI predates consent-bound approval (its preview has no surface digest), so approving from here is disabled. Update agentstack, or review in a terminal, where the review itself is the consent."
+                : `This agentstack CLI doesn't support consent-bound approval from ${AGENTSTACK_HOST_NAME}. Update agentstack, or review in a terminal, where the review itself is the consent.`}
             </p>
           ) : null}
 
@@ -2237,7 +2435,7 @@ function TrustReviewPanel({
             className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground"
             title={surface.summary}
           >
-            {state === "trusted" ? "Trusted: " : "You would be approving: "}
+            {state === "trusted" ? "Approved: " : "You would be approving: "}
             <span className="text-foreground">{surface.summary}</span>
           </span>
           <div className="flex flex-none items-center gap-2">
@@ -2248,7 +2446,7 @@ function TrustReviewPanel({
                 onClick={() => run("trust-revoke")}
                 className="inline-flex h-7 items-center rounded-lg border border-destructive/40 bg-destructive/10 px-3 text-xs font-semibold text-destructive-foreground disabled:opacity-60"
               >
-                {running ? "Revoking…" : "Revoke trust"}
+                {running ? "Withdrawing…" : "Withdraw approval"}
               </button>
             ) : (
               <button
@@ -2258,10 +2456,10 @@ function TrustReviewPanel({
                 className="inline-flex h-7 items-center rounded-lg border border-success/40 bg-success/10 px-3 text-xs font-semibold text-success-foreground disabled:opacity-60"
               >
                 {running
-                  ? "Trusting…"
+                  ? "Approving…"
                   : serverBlockers.length > 0
                     ? "Resolve blockers first"
-                    : "Trust this repo"}
+                    : "Approve this project"}
               </button>
             )}
             <button
@@ -2365,11 +2563,20 @@ function DriftReviewPanel({
   onAction,
   root,
   servedLive,
+  canDiff,
+  canDiffOwnership,
 }: {
   loadDiff: (scope: "global" | "project") => Promise<AgentstackDiffResult | null>;
   onAction: (action: ActionKind) => Promise<{ ok: boolean; message: string }>;
   /** Project root, so target paths read relative to the repo. */
   root: string | undefined;
+  /** The CLI advertises `diff-v1` — the comparison read itself. False states
+   *  the absence instead of comparing nothing. */
+  canDiff: boolean;
+  /** The CLI advertises `diff-ownership-v1`, so `hand_edited` may be read and
+   *  a change narrated as an edit. False means "cause unknown", not "not
+   *  edited" — the field is never sniffed off an older binary. */
+  canDiffOwnership: boolean;
   /**
    * `doctor-mode-v1` says this project is zero-files: rendered configs are kept
    * off disk on purpose and the CLI skips the drift comparison entirely.
@@ -2396,8 +2603,11 @@ function DriftReviewPanel({
   }, [loadDiff]);
 
   useEffect(() => {
+    // No `diff-v1` → the comparison read is never fired; the body states the
+    // absence instead.
+    if (!canDiff) return;
     void reload();
-  }, [reload]);
+  }, [reload, canDiff]);
 
   const run = async (action: ActionKind) => {
     setAct({ phase: "running" });
@@ -2424,7 +2634,12 @@ function DriftReviewPanel({
 
   return (
     <div>
-      {load.phase === "loading" ? (
+      {!canDiff ? (
+        <p className="px-4 py-4 text-xs leading-relaxed text-muted-foreground">
+          This agentstack CLI can't report drift here — update it, or compare in a terminal with{" "}
+          <code className="font-mono">agentstack diff</code>.
+        </p>
+      ) : load.phase === "loading" ? (
         <p className="px-4 py-4 text-xs text-muted-foreground">Loading drift…</p>
       ) : load.phase === "error" ? (
         <p className="px-4 py-4 text-xs leading-relaxed text-muted-foreground">
@@ -2447,6 +2662,7 @@ function DriftReviewPanel({
                 report={report}
                 root={root}
                 disabled={running}
+                canDiffOwnership={canDiffOwnership}
                 onPick={(action) => void run(action)}
               />
             ) : null,
@@ -2495,6 +2711,7 @@ function DriftScopeSection({
   report,
   root,
   disabled,
+  canDiffOwnership,
   onPick,
 }: {
   scope: "global" | "project";
@@ -2502,6 +2719,8 @@ function DriftScopeSection({
   /** Project root, so a target path reads `.codex/config.toml`, not `/Users/…`. */
   root: string | undefined;
   disabled: boolean;
+  /** `diff-ownership-v1` advertised — only then may `hand_edited` be read. */
+  canDiffOwnership: boolean;
   onPick: (action: ActionKind) => void;
 }) {
   // Parsed once here and handed down: the section header needs the totals and
@@ -2529,9 +2748,9 @@ function DriftScopeSection({
   // `changed` alone is not evidence of an edit: it is also true when the
   // manifest moved ahead of a file nobody touched. Only `hand_edited` says
   // somebody wrote to the file outside agentstack, so only that may be
-  // narrated as an edit. Absent on older CLIs → we describe the difference
-  // without claiming a cause.
-  const edited = changed.filter((c) => c.target.hand_edited === true).length;
+  // narrated as an edit — and only under `diff-ownership-v1`; on an older CLI
+  // the cause stays unclaimed rather than sniffed off a maybe-present field.
+  const edited = canDiffOwnership ? changed.filter((c) => c.target.hand_edited === true).length : 0;
 
   const where = scope === "global" ? "Machine-wide configs" : "This project";
   const adopt: ActionKind = scope === "global" ? "adopt-global" : "adopt-project";
@@ -2735,6 +2954,11 @@ interface ManageProps {
   advisories: number | null;
   /** The CLI advertises `doctor-mode-v1`, so mode/activation are readable. */
   canReadMode: boolean;
+  /** The CLI advertises `status-honesty-v1`, so the chip may read the honest
+   *  `readiness` verdict instead of the false-ready-prone `state`. */
+  canReadReadiness: boolean;
+  /** The CLI advertises `profiles-v1` (the toolset list read). */
+  canListToolsets: boolean;
   canSetGitignore: boolean;
   canRestore: boolean;
   /** Whether the CLI advertises `doctor-probe-v1`. False hides the startup
@@ -2918,6 +3142,9 @@ function SetupTab(props: ManageProps) {
   const healthyLine = summarizeAgentstackHealthyRows(healthy);
   const chip = deriveAgentstackStatusChip({
     state: doctor.state,
+    // The honest verdict wins when the CLI serves it (`status-honesty-v1`) —
+    // `state` alone called an untrusted, never-activated project "Ready".
+    readiness: props.canReadReadiness ? doctor.readiness : null,
     protection: doctor.protection,
   });
   const mode = props.canReadMode ? describeAgentstackMode(doctor.mode) : null;
@@ -3461,42 +3688,51 @@ function ToolsetsTab(
     // every step of an edit happens where you already are.
     <div className="flex min-h-0 flex-1 flex-col">
       <div className={cn("flex min-h-0 flex-1", rows.length === 0 && draft === null && "flex-col")}>
-        <ToolsetRail
-          rows={rows}
-          profiles={profiles}
-          session={session}
-          canSessions={props.canSessions}
-          sessionsKnownMissing={props.sessionsKnownMissing}
-          canEditProfiles={props.canEditProfiles}
-          busy={sessionBusy}
-          done={sessionDone}
-          draft={draft}
-          onDraft={setDraft}
-          onCreate={() => {
-            if (draft) {
-              void beginEdit({
-                kind: "create-profile",
-                name: draft.name,
-                skills: [...draft.skills],
-                servers: [...draft.servers],
-              });
-            }
-          }}
-          selected={selected}
-          onSelect={(name) => {
-            // Switching target abandons ticks aimed at the previous one rather
-            // than silently re-aiming them at a different toolset.
-            setSelected((cur) => (cur === name ? null : name));
-            setPending({ add: [], remove: [] });
-          }}
-          canRename={props.canRenameToolset}
-          canDelete={props.canDeleteToolset}
-          onRename={(name, to) => void beginEdit({ kind: "rename-profile", name, to })}
-          onDelete={(name) => void beginEdit({ kind: "delete-profile", name })}
-          onStart={(name) => void runSession(name, () => props.onSessionStart(name))}
-          onEnd={() => void runSession("__end__", props.onSessionEnd)}
-          onReviewTrust={props.onReviewTrust}
-        />
+        {!props.canListToolsets ? (
+          // `profiles-v1` missing: the `use --list` read was never served, so
+          // an empty rail would claim "no toolsets yet" about a list that
+          // doesn't exist. State the absence instead.
+          <p className="shrink-0 basis-56 px-3 py-3 text-[11px] leading-relaxed text-muted-foreground">
+            This agentstack CLI doesn't list toolsets — update it to see and switch them here.
+          </p>
+        ) : (
+          <ToolsetRail
+            rows={rows}
+            profiles={profiles}
+            session={session}
+            canSessions={props.canSessions}
+            sessionsKnownMissing={props.sessionsKnownMissing}
+            canEditProfiles={props.canEditProfiles}
+            busy={sessionBusy}
+            done={sessionDone}
+            draft={draft}
+            onDraft={setDraft}
+            onCreate={() => {
+              if (draft) {
+                void beginEdit({
+                  kind: "create-profile",
+                  name: draft.name,
+                  skills: [...draft.skills],
+                  servers: [...draft.servers],
+                });
+              }
+            }}
+            selected={selected}
+            onSelect={(name) => {
+              // Switching target abandons ticks aimed at the previous one rather
+              // than silently re-aiming them at a different toolset.
+              setSelected((cur) => (cur === name ? null : name));
+              setPending({ add: [], remove: [] });
+            }}
+            canRename={props.canRenameToolset}
+            canDelete={props.canDeleteToolset}
+            onRename={(name, to) => void beginEdit({ kind: "rename-profile", name, to })}
+            onDelete={(name) => void beginEdit({ kind: "delete-profile", name })}
+            onStart={(name) => void runSession(name, () => props.onSessionStart(name))}
+            onEnd={() => void runSession("__end__", props.onSessionEnd)}
+            onReviewTrust={props.onReviewTrust}
+          />
+        )}
         {props.canEditProfiles ? (
           <LibraryPane
             load={load}
@@ -4641,18 +4877,13 @@ type UndoLoad =
   | { phase: "idle" }
   | { phase: "loading" }
   | { phase: "empty" }
-  | {
-      phase: "ready";
-      /** `operation` is null on a CLI that records no command for the entry. */
-      entry: { id: string; summary: string; time_unix: number; operation: string | null };
-      /** Newer entries outside this project that the drawer will not offer. */
-      newerElsewhere: number;
-    };
+  | { phase: "ready"; rows: ReadonlyArray<AgentstackUndoLedgerRow> };
 
 type UndoAct =
   | { phase: "idle" }
-  | { phase: "confirm" }
-  | { phase: "running" }
+  /** The confirm/revert target is one specific ledger entry, by full id. */
+  | { phase: "confirm"; id: string }
+  | { phase: "running"; id: string }
   | { phase: "done"; ok: boolean; message: string };
 
 function undoAge(unixSeconds: number): string {
@@ -5772,10 +6003,12 @@ function ProjectRemovalConfirmBody({
 }
 
 /**
- * "Undo last change" — backed by the machine-global restore ledger. On demand
- * it loads the inventory and picks the newest entry whose files live under THIS
- * workspace and that hasn't been undone yet (never a blind `--last`), shows its
- * summary and age, and undoes that specific entry by id behind a confirm step.
+ * "Undo a change…" — backed by the machine-global restore ledger. On demand it
+ * loads the inventory and renders it as a browsable list, newest first. Every
+ * entry is visible (so "latest" is never a false claim about a machine-global
+ * ledger), but Revert is offered only on entries whose files live under THIS
+ * workspace and that aren't already undone — never a blind `--last`; each
+ * revert presents one specific entry's id behind its own confirm step.
  * Disabled with an upgrade hint when the CLI doesn't advertise the contract.
  */
 function UndoAffordance({
@@ -5794,34 +6027,22 @@ function UndoAffordance({
     setLoad({ phase: "loading" });
     setAct({ phase: "idle" });
     const result = await loadInventory();
-    const view = result?.inventory
-      ? selectAgentstackUndoView(result.inventory.entries)
-      : { entry: null, newerElsewhere: 0 };
-    const entry = view.entry;
-    setLoad(
-      entry
-        ? {
-            phase: "ready",
-            entry: {
-              id: entry.id,
-              summary: entry.summary,
-              time_unix: entry.time_unix,
-              operation: entry.operation ?? null,
-            },
-            newerElsewhere: view.newerElsewhere,
-          }
-        : { phase: "empty" },
-    );
+    const rows = result?.inventory ? deriveAgentstackUndoLedger(result.inventory.entries) : [];
+    setLoad(rows.length > 0 ? { phase: "ready", rows } : { phase: "empty" });
   }, [loadInventory]);
 
-  const run = useCallback(async () => {
-    if (load.phase !== "ready") return;
-    setAct({ phase: "running" });
-    const r = await onUndo(load.entry.id);
-    setAct({ phase: "done", ok: r.ok, message: r.message });
-    // Re-pull so a repeat click reflects the entry now being undone.
-    await reveal();
-  }, [load, onUndo, reveal]);
+  const run = useCallback(
+    async (id: string) => {
+      setAct({ phase: "running", id });
+      const r = await onUndo(id);
+      setAct({ phase: "done", ok: r.ok, message: r.message });
+      // Re-pull so the list reflects the entry now being undone.
+      const result = await loadInventory();
+      const rows = result?.inventory ? deriveAgentstackUndoLedger(result.inventory.entries) : [];
+      setLoad(rows.length > 0 ? { phase: "ready", rows } : { phase: "empty" });
+    },
+    [onUndo, loadInventory],
+  );
 
   // Renders inline in the Status tab's utility row: the idle state is one
   // button among its siblings, and everything after the click opens as a
@@ -5838,7 +6059,7 @@ function UndoAffordance({
   if (load.phase === "idle") {
     return (
       <Button size="xs" variant="outline" onClick={() => void reveal()}>
-        Undo last change…
+        Undo a change…
       </Button>
     );
   }
@@ -5849,60 +6070,81 @@ function UndoAffordance({
         <span className="text-[11px] text-muted-foreground">Checking recent changes…</span>
       ) : load.phase === "empty" ? (
         <span className="text-[11px] text-muted-foreground">
-          Nothing to undo — no recorded change touches this project.
+          Nothing to undo — no change has been recorded yet.
         </span>
-      ) : (
+      ) : load.phase === "ready" ? (
         <>
-          {/* What it undoes, and where. "Undo 1 file · 2h ago" named neither
-              the command nor the project, on a ledger that is machine-global —
-              so the one thing the user had to know (is this MY change?) was the
-              one thing the line did not say. */}
-          <p className="text-[11px] font-semibold text-foreground">
-            Latest recorded change in this project
-          </p>
-          <p className="text-[11px] leading-relaxed text-muted-foreground">
-            {load.entry.operation !== null ? (
-              <>
-                <span className="font-semibold text-foreground">{load.entry.operation}</span>
-                {" · "}
-              </>
-            ) : null}
-            {load.entry.summary}
-            <span className="text-muted-foreground/70"> · {undoAge(load.entry.time_unix)}</span>
-          </p>
-          {load.newerElsewhere > 0 ? (
-            // The selection deliberately skips entries outside this project —
-            // undoing another project's write from here is exactly the blind
-            // `--last` it exists to avoid. Saying how many were skipped is what
-            // keeps "latest" from reading as a false claim about the ledger.
-            <p className="text-[10.5px] leading-relaxed text-muted-foreground/70">
-              {load.newerElsewhere === 1
-                ? "1 newer machine-wide change isn't shown here"
-                : `${load.newerElsewhere} newer machine-wide changes aren't shown here`}
-              {" — "}
-              <code className="font-mono">agentstack restore</code> in a terminal lists everything.
-            </p>
-          ) : null}
-          {act.phase === "confirm" || act.phase === "running" ? (
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                disabled={act.phase === "running"}
-                onClick={() => void run()}
-                className="inline-flex h-6 items-center rounded-md border border-warning/40 bg-warning/15 px-2.5 text-[11px] font-semibold text-warning-foreground disabled:opacity-60"
+          {/* The whole ledger, newest first — not just the newest entry. The
+              single-entry drawer made every older recoverable write
+              unreachable from the panel, though `restore <id> --write` (the
+              action behind Revert) serves any entry. Machine-wide rows render
+              revert-less rather than hidden, so "latest" is never a false
+              claim about a machine-global ledger. */}
+          <p className="text-[11px] font-semibold text-foreground">Recorded changes</p>
+          <ul className="flex max-h-56 flex-col gap-1 overflow-y-auto">
+            {load.rows.map((row) => (
+              <li
+                key={row.id}
+                className={cn(
+                  "flex items-start gap-2 rounded-md px-1 py-0.5 text-[11px] leading-relaxed",
+                  !row.canUndo && "opacity-70",
+                )}
               >
-                {act.phase === "running" ? "Undoing…" : "Undo this change"}
-              </button>
-              <button
-                type="button"
-                disabled={act.phase === "running"}
-                onClick={() => setAct({ phase: "idle" })}
-                className="inline-flex h-6 items-center rounded-md px-2 text-[11px] font-medium text-muted-foreground disabled:opacity-60"
-              >
-                Cancel
-              </button>
-            </div>
-          ) : act.phase === "done" ? (
+                <span className="min-w-0 flex-1">
+                  {row.operation !== null ? (
+                    <>
+                      <span className="font-semibold text-foreground">{row.operation}</span>
+                      {" · "}
+                    </>
+                  ) : null}
+                  <span className="text-muted-foreground">{row.summary}</span>
+                  <span className="text-muted-foreground/70"> · {undoAge(row.time_unix)}</span>
+                  {row.undone ? (
+                    <span className="text-muted-foreground/70"> · already undone</span>
+                  ) : !row.touchesProject ? (
+                    <span className="text-muted-foreground/70"> · elsewhere on this machine</span>
+                  ) : null}
+                </span>
+                {row.canUndo ? (
+                  act.phase === "confirm" && act.id === row.id ? (
+                    <span className="flex shrink-0 items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => void run(row.id)}
+                        className="inline-flex h-6 items-center rounded-md border border-warning/40 bg-warning/15 px-2.5 text-[11px] font-semibold text-warning-foreground"
+                      >
+                        Revert this change
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setAct({ phase: "idle" })}
+                        className="inline-flex h-6 items-center rounded-md px-2 text-[11px] font-medium text-muted-foreground"
+                      >
+                        Cancel
+                      </button>
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={act.phase === "running"}
+                      onClick={() => setAct({ phase: "confirm", id: row.id })}
+                      className="shrink-0 text-[11px] font-semibold text-warning-foreground underline-offset-2 hover:underline disabled:opacity-60"
+                    >
+                      {act.phase === "running" && act.id === row.id ? "Reverting…" : "Revert"}
+                    </button>
+                  )
+                ) : null}
+              </li>
+            ))}
+          </ul>
+          {/* Machine-wide entries stay inert here on purpose: reverting
+              another project's write from this panel is exactly the blind
+              `--last` the per-id action exists to avoid. */}
+          <p className="text-[10.5px] leading-relaxed text-muted-foreground/70">
+            Only this project&apos;s changes can be reverted from here —{" "}
+            <code className="font-mono">agentstack restore</code> in a terminal serves the rest.
+          </p>
+          {act.phase === "done" ? (
             <div
               className={cn(
                 "rounded-md border px-2.5 py-1.5 text-[11px] leading-relaxed",
@@ -5922,17 +6164,9 @@ function UndoAffordance({
               {" — "}
               <span className="break-words font-mono text-muted-foreground">{act.message}</span>
             </div>
-          ) : (
-            <button
-              type="button"
-              onClick={() => setAct({ phase: "confirm" })}
-              className="self-start text-[11px] font-semibold text-warning-foreground underline-offset-2 hover:underline"
-            >
-              Undo this change
-            </button>
-          )}
+          ) : null}
         </>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -6129,6 +6363,7 @@ const SECRETS_CHOICES: ReadonlyArray<{
 function SetupPanel({
   loadPlan,
   onApply,
+  canPlan,
   canApply,
 }: {
   loadPlan: (
@@ -6138,6 +6373,10 @@ function SetupPanel({
     planDigest: string,
     secretsDestination: AgentstackSecretsDestination,
   ) => Promise<{ ok: boolean; message: string }>;
+  /** The CLI advertises `init-plan` — the detection-plan read itself. False
+   *  points at the terminal instead of requesting a plan the binary cannot
+   *  emit. */
+  canPlan: boolean;
   canApply: boolean;
 }) {
   // `.env` by default (product principle); the picker below appears only when
@@ -6151,6 +6390,8 @@ function SetupPanel({
   const [act, setAct] = useState<SetupAct>({ phase: "idle" });
 
   useEffect(() => {
+    // No `init-plan` → the read is never fired; the body states the absence.
+    if (!canPlan) return;
     let alive = true;
     setReloading(true);
     void loadPlan(secretsChoice).then((result) => {
@@ -6165,7 +6406,7 @@ function SetupPanel({
     return () => {
       alive = false;
     };
-  }, [loadPlan, secretsChoice]);
+  }, [loadPlan, secretsChoice, canPlan]);
 
   // Switching the store invalidates the reviewed digest and any prior result,
   // so reset the confirm/done state; the effect above re-reads for the new one.
@@ -6199,6 +6440,14 @@ function SetupPanel({
     setAct({ phase: "done", ok: r.ok, message: r.message });
   };
 
+  if (!canPlan) {
+    return (
+      <p className="px-4 py-4 text-xs leading-relaxed text-muted-foreground">
+        This agentstack CLI can't preview a setup plan here — update it, or set up in a terminal
+        with <code className="font-mono">agentstack init</code>.
+      </p>
+    );
+  }
   if (load.phase === "loading") {
     return <p className="px-4 py-4 text-xs text-muted-foreground">Preparing setup…</p>;
   }

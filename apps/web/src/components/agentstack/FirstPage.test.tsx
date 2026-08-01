@@ -73,6 +73,7 @@ describe("the first page — ready", () => {
   it("names the toolset it is working under and offers the one verb that changes it", () => {
     const markup = renderToStaticMarkup(
       <WorkingUnder
+        canListToolsets
         toolsets={toolsets(
           [
             profile({
@@ -103,6 +104,7 @@ describe("the first page — ready", () => {
     const profiles = [profile({ name: "backend" })];
     const idle = renderToStaticMarkup(
       <WorkingUnder
+        canListToolsets
         toolsets={toolsets(profiles, null)}
         canSessions
         onSwitch={noop}
@@ -116,6 +118,7 @@ describe("the first page — ready", () => {
 
     const live = renderToStaticMarkup(
       <WorkingUnder
+        canListToolsets
         toolsets={toolsets(profiles, {
           profile: "backend",
           scope: "project",

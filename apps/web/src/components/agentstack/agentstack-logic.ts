@@ -643,29 +643,62 @@ export interface AgentstackStatusChip {
 }
 
 /**
- * Derive the single status chip from the doctor's structured `state`. "Protected"
- * is a strictly stronger "Ready": it appears only when the project is ready AND
- * both cooperative host protections (the pre-tool-use guard and a machine policy
- * ceiling) are on. It is deliberately NOT a claim of sandboxing. When `state` is
- * absent (older CLI) the chip is null and the caller falls back to the row
- * rollup.
+ * Derive the single status chip. "Protected" is a strictly stronger "Ready":
+ * it appears only when the project is ready AND both cooperative host
+ * protections (the pre-tool-use guard and a machine policy ceiling) are on.
+ * It is deliberately NOT a claim of sandboxing.
+ *
+ * `readiness` is the honest verdict (`status-honesty-v1`) and wins when the
+ * caller passes it — the caller only does so when the CLI advertises the
+ * feature, never sniffed. `state` answers "did any check find something to
+ * repair?", which reads `ready` over an untrusted, never-activated project;
+ * that mislabel (E2E finding F1) is exactly what `readiness` replaces. An
+ * unrecognized readiness word falls through to the `state` reading, and when
+ * both are absent (older CLI) the chip is null and the caller falls back to
+ * the row rollup.
  */
 export function deriveAgentstackStatusChip(input: {
   state?: string | null | undefined;
+  /** Only pass under `status-honesty-v1`; null/absent reads by `state`. */
+  readiness?: string | null | undefined;
   protection?: AgentstackProtection | null | undefined;
 }): AgentstackStatusChip | null {
+  const ready = () => {
+    const isProtected =
+      input.protection?.guard === true && input.protection?.machine_policy === true;
+    return isProtected
+      ? { label: "Protected", level: "ok" as const, isProtected: true }
+      : { label: "Ready", level: "ok" as const, isProtected: false };
+  };
+  switch (input.readiness) {
+    case "needs_setup":
+      return { label: "Needs setup", level: "warn", isProtected: false };
+    case "needs_attention":
+      return { label: "Needs attention", level: "warn", isProtected: false };
+    // The consent gate is what stands between here and live — say so in
+    // review language rather than a generic warning.
+    case "untrusted":
+      return { label: "Review pending", level: "warn", isProtected: false };
+    case "drifted":
+      return { label: "Needs re-review", level: "warn", isProtected: false };
+    // Consented or not, nothing was ever rendered/declared: not a fault, but
+    // not live either — the one case `state` called "Ready".
+    case "never_activated":
+      return { label: "Not active yet", level: "warn", isProtected: false };
+    case "empty":
+      return { label: "Nothing declared", level: "warn", isProtected: false };
+    case "ready":
+      return ready();
+    default:
+      break;
+  }
   switch (input.state) {
     case "needs_setup":
       return { label: "Needs setup", level: "warn", isProtected: false };
     case "needs_attention":
       return { label: "Needs attention", level: "warn", isProtected: false };
-    case "ready": {
-      const isProtected =
-        input.protection?.guard === true && input.protection?.machine_policy === true;
-      return isProtected
-        ? { label: "Protected", level: "ok", isProtected: true }
-        : { label: "Ready", level: "ok", isProtected: false };
-    }
+    case "ready":
+      return ready();
     default:
       return null;
   }
@@ -902,60 +935,48 @@ export interface AgentstackRestoreEntryLike {
   operation?: string | undefined;
 }
 
-/**
- * The entry the panel's "Undo last change" affordance acts on: the newest
- * project-touching entry that has not already been undone. The ledger is
- * machine-global, so a blind `--last` could revert an unrelated project's
- * change — this filters to `touches_project` first, then picks the newest by
- * `time_unix` (not relying on inventory order). Null when there is nothing
- * safe to undo here.
- */
-export function selectAgentstackUndoEntry(
-  entries: ReadonlyArray<AgentstackRestoreEntryLike>,
-): AgentstackRestoreEntryLike | null {
-  let best: AgentstackRestoreEntryLike | null = null;
-  for (const entry of entries) {
-    if (!entry.touches_project || entry.undone) continue;
-    if (best === null || entry.time_unix > best.time_unix) best = entry;
-  }
-  return best;
-}
-
-/** The undo drawer's whole reading of the ledger. */
-export interface AgentstackUndoView {
-  /** The entry the button acts on — exactly [`selectAgentstackUndoEntry`]. */
-  readonly entry: AgentstackRestoreEntryLike | null;
+/** One ledger row as the undo drawer renders it. */
+export interface AgentstackUndoLedgerRow {
+  /** Full hex id — what a per-entry revert presents to `restore <id> --write`. */
+  readonly id: string;
+  readonly summary: string;
+  /** The recorded command ("apply", "use 'web'"), or null on an older CLI. */
+  readonly operation: string | null;
+  readonly time_unix: number;
+  readonly touchesProject: boolean;
+  readonly undone: boolean;
   /**
-   * How many newer, not-yet-undone entries the drawer is deliberately not
-   * offering because their files are outside this project.
+   * Whether the drawer offers Revert on this row: it touches this project and
+   * has not already been undone. Rows outside the project stay visible but
+   * inert — the ledger is machine-global, and reverting another project's
+   * write from here is the blind `--last` this drawer exists to avoid; they
+   * are shown (not hidden) so "latest" can never read as a false claim about
+   * the ledger.
    */
-  readonly newerElsewhere: number;
+  readonly canUndo: boolean;
 }
 
 /**
- * The selected entry, plus how much newer machine-wide history it is NOT the
- * front of.
- *
- * The drawer says "Undo last change" and the ledger is machine-global, so the
- * common case is honestly confusing: a global `apply` and a `use 'web'` both
- * land after this project's last change, and the drawer offers neither. It is
- * right not to (undoing another project's write from here is exactly the blind
- * `--last` this selection exists to avoid) — so the count is surfaced instead,
- * and the drawer points at the terminal for the rest.
- *
- * Selection semantics are unchanged: this wraps the same pick rather than
- * re-deriving it, so there is one definition of "the entry this project may
- * undo". Zero when nothing is selected — with no entry there is no "newer".
+ * The whole ledger as a browsable list, newest first by `time_unix` (never
+ * trusting inventory order). This replaced a single-entry pick: collapsing the
+ * ledger to one "Undo last change" button made every older recoverable write
+ * unreachable from the panel, though `restore <id> --write` — the exact action
+ * the button already invoked — serves any entry.
  */
-export function selectAgentstackUndoView(
+export function deriveAgentstackUndoLedger(
   entries: ReadonlyArray<AgentstackRestoreEntryLike>,
-): AgentstackUndoView {
-  const entry = selectAgentstackUndoEntry(entries);
-  if (entry === null) return { entry: null, newerElsewhere: 0 };
-  const newerElsewhere = entries.filter(
-    (e) => !e.undone && !e.touches_project && e.time_unix > entry.time_unix,
-  ).length;
-  return { entry, newerElsewhere };
+): AgentstackUndoLedgerRow[] {
+  return [...entries]
+    .sort((a, b) => b.time_unix - a.time_unix)
+    .map((e) => ({
+      id: e.id,
+      summary: e.summary,
+      operation: e.operation ?? null,
+      time_unix: e.time_unix,
+      touchesProject: e.touches_project,
+      undone: e.undone,
+      canUndo: e.touches_project && !e.undone,
+    }));
 }
 
 // ── policy tab ───────────────────────────────────────────────────────────────
@@ -1996,6 +2017,19 @@ const CONCERN_COPY: Record<string, { readonly title: string; readonly detail: st
     title: "Your coding tool configs changed outside AgentStack",
     detail: "Keep what's on disk or re-render from the manifest — you choose which truth to keep.",
   },
+  // The two verdicts only `readiness` can state (`status-honesty-v1`): a
+  // findings-free project that still isn't live. Before the field, this exact
+  // state wore a Ready chip (E2E finding F1).
+  "never-activated": {
+    title: "Set up but not active yet",
+    detail:
+      "Nothing this project declares is live in your coding tools until it is activated once.",
+  },
+  empty: {
+    title: "This setup declares nothing yet",
+    detail:
+      "The manifest exists but lists no servers, skills, or instructions — add something to it before activating.",
+  },
 };
 
 /**
@@ -2013,7 +2047,23 @@ export function selectAgentstackPrimaryConcern(input: {
   readonly rows: ReadonlyArray<AgentstackOverviewRow>;
   readonly findings: ReadonlyArray<AgentstackFinding>;
   readonly trust: AgentstackTrustState;
+  /**
+   * The doctor's honest verdict (`status-honesty-v1`), or null when the CLI
+   * doesn't advertise it. Two jobs: an authoritative source for the
+   * consent-gate states (`untrusted`/`drifted`) ahead of the trust badge's
+   * prose fallback, and the only source for `never_activated`/`empty` — the
+   * findings-free not-live states nothing else here can see.
+   */
+  readonly readiness?: string | null;
 }): AgentstackPrimaryConcern | null {
+  // Prefer readiness for the consent-gate reading; the badge-derived `trust`
+  // (which falls back to section prose on older CLIs) remains for the rest.
+  const trust: AgentstackTrustState =
+    input.readiness === "untrusted"
+      ? "inert"
+      : input.readiness === "drifted"
+        ? "drifted"
+        : input.trust;
   // The Checkup row is a pointer at the findings list, not a problem of its
   // own — counting it beside the findings it summarizes counted every warning
   // twice, and "2 more in Manage" over one warning is a claim the reader can
@@ -2030,10 +2080,10 @@ export function selectAgentstackPrimaryConcern(input: {
    *  consumes none of them; every other branch consumes the one it picked. */
   const rest = (picked: number) => Math.max(0, total - picked);
 
-  if (input.trust === "inert" || input.trust === "drifted") {
-    const copy = CONCERN_COPY[input.trust === "inert" ? "trust-inert" : "trust-drifted"]!;
+  if (trust === "inert" || trust === "drifted") {
+    const copy = CONCERN_COPY[trust === "inert" ? "trust-inert" : "trust-drifted"]!;
     return {
-      key: `trust:${input.trust}`,
+      key: `trust:${trust}`,
       title: copy.title,
       detail: copy.detail,
       act: { kind: "review-trust" },
@@ -2106,6 +2156,35 @@ export function selectAgentstackPrimaryConcern(input: {
     };
   }
 
+  // The readiness-only verdicts: findings-free, trusted, and still not live.
+  // Only reachable via `readiness` (`status-honesty-v1`), so an older CLI
+  // simply never shows them — which is the pre-honesty behavior, not a lie.
+  if (input.readiness === "never_activated") {
+    const copy = CONCERN_COPY["never-activated"]!;
+    const meta = AGENTSTACK_ACTION_META["lock-write"];
+    return {
+      key: "readiness:never_activated",
+      title: copy.title,
+      detail: copy.detail,
+      act: { kind: "action", action: "lock-write" },
+      label: meta.label,
+      note: meta.note,
+      others: rest(0),
+    };
+  }
+  if (input.readiness === "empty") {
+    const copy = CONCERN_COPY.empty!;
+    return {
+      key: "readiness:empty",
+      title: copy.title,
+      detail: copy.detail,
+      act: { kind: "manage" },
+      label: "Open setup",
+      note: null,
+      others: rest(0),
+    };
+  }
+
   const worst =
     problems.find((r) => r.level === "error") ??
     findings.find((f) => f.level === "error") ??
@@ -2146,6 +2225,13 @@ export function deriveAgentstackPanelPosture(input: {
   readonly doctorReadable: boolean;
   readonly incompatible: boolean;
   readonly setupState: string | null;
+  /**
+   * The doctor's honest verdict (`status-honesty-v1`), or null when the CLI
+   * doesn't advertise it. Anything except `ready` means "not live", so the
+   * chip may not say ready over it — the F1 mislabel was exactly `state`
+   * saying "ready" for an untrusted, never-activated project.
+   */
+  readonly readiness: string | null;
   readonly hasConcern: boolean;
 }): AgentstackPanelPosture {
   if (input.hasStatus && input.installed && input.incompatible) return "attention";
@@ -2154,6 +2240,11 @@ export function deriveAgentstackPanelPosture(input: {
   }
   if (input.unreachable || !input.hasStatus || !input.installed || !input.doctorReadable) {
     return "hidden";
+  }
+  // `unknown` (doctor ran with no project verdict) claims nothing either way,
+  // so it falls through to the concern reading like an absent field.
+  if (input.readiness !== null && input.readiness !== "unknown" && input.readiness !== "ready") {
+    return "attention";
   }
   return input.hasConcern ? "attention" : "ready";
 }
@@ -2240,6 +2331,13 @@ export function deriveTrustSurface(
     readonly extensions: number;
     readonly instructions: number;
     readonly secrets: number;
+    /**
+     * Only under `trust-review-card-v1` (pass 0 otherwise): hooks are an
+     * executable kind, so a bar that omitted them summarized a smaller
+     * surface than the one being approved.
+     */
+    readonly hooks?: number;
+    readonly settings?: number;
   },
 ): AgentstackTrustSurface {
   const of = (kind: string) => servers.filter((s) => s.kind === kind);
@@ -2314,6 +2412,9 @@ export function deriveTrustSurface(
     extra.workflows > 0 ? countOf(extra.workflows, "workflow") : null,
     extra.extensions > 0 ? countOf(extra.extensions, "extension") : null,
     extra.instructions > 0 ? countOf(extra.instructions, "instruction") : null,
+    // Executable like the stdio band, so the bar may not omit them.
+    (extra.hooks ?? 0) > 0 ? countOf(extra.hooks!, "hook") : null,
+    (extra.settings ?? 0) > 0 ? `settings for ${countOf(extra.settings!, "tool")}` : null,
     // Named last and never omitted when present: these are the values the
     // project's declared capabilities become able to read.
     extra.secrets > 0 ? countOf(extra.secrets, "secret") : null,

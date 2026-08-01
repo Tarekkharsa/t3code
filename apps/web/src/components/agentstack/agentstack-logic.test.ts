@@ -37,8 +37,7 @@ import {
   selectAgentstackUpdateOffer,
   shortenAgentstackPath,
   shortenAgentstackPathsIn,
-  selectAgentstackUndoEntry,
-  selectAgentstackUndoView,
+  deriveAgentstackUndoLedger,
   shortDigest,
   stripAgentstackErrorPrefix,
   summarizeAgentstackHealthyRows,
@@ -376,6 +375,39 @@ describe("deriveAgentstackStatusChip", () => {
     expect(deriveAgentstackStatusChip({})).toBeNull();
     expect(deriveAgentstackStatusChip({ state: "something-new" })).toBeNull();
   });
+
+  it("lets the honest readiness verdict override a false-ready state", () => {
+    // The F1 mislabel this exists to fix: doctor `state` says "ready" over an
+    // untrusted, never-activated project because zero findings is true. The
+    // readiness verdict wins whenever the caller (feature-gated) passes it.
+    expect(deriveAgentstackStatusChip({ state: "ready", readiness: "untrusted" })).toMatchObject({
+      label: "Review pending",
+      level: "warn",
+    });
+    expect(deriveAgentstackStatusChip({ state: "ready", readiness: "drifted" })).toMatchObject({
+      label: "Needs re-review",
+      level: "warn",
+    });
+    expect(
+      deriveAgentstackStatusChip({ state: "ready", readiness: "never_activated" }),
+    ).toMatchObject({ label: "Not active yet", level: "warn" });
+    expect(deriveAgentstackStatusChip({ state: "ready", readiness: "empty" })).toMatchObject({
+      label: "Nothing declared",
+      level: "warn",
+    });
+    // ready readiness keeps the Ready/Protected pair intact.
+    expect(
+      deriveAgentstackStatusChip({
+        readiness: "ready",
+        protection: { guard: true, machine_policy: true },
+      }),
+    ).toMatchObject({ label: "Protected", isProtected: true });
+    // An unrecognized future verdict falls through to the state reading
+    // rather than silencing the chip.
+    expect(
+      deriveAgentstackStatusChip({ state: "needs_attention", readiness: "brand-new-word" }),
+    ).toMatchObject({ label: "Needs attention" });
+  });
 });
 
 describe("feature gating", () => {
@@ -399,7 +431,7 @@ describe("feature gating", () => {
   });
 });
 
-describe("selectAgentstackUndoEntry", () => {
+describe("deriveAgentstackUndoLedger", () => {
   const entry = (over: Partial<AgentstackRestoreEntryLike>): AgentstackRestoreEntryLike => ({
     id: "a".repeat(16),
     time_unix: 1_000,
@@ -410,69 +442,38 @@ describe("selectAgentstackUndoEntry", () => {
     ...over,
   });
 
-  it("picks the newest project-touching, not-yet-undone entry", () => {
-    const chosen = selectAgentstackUndoEntry([
+  it("orders newest first by time, never trusting inventory order", () => {
+    const rows = deriveAgentstackUndoLedger([
       entry({ id: "old", time_unix: 100 }),
       entry({ id: "newest", time_unix: 300 }),
       entry({ id: "mid", time_unix: 200 }),
     ]);
-    expect(chosen?.id).toBe("newest");
+    expect(rows.map((r) => r.id)).toEqual(["newest", "mid", "old"]);
   });
 
-  it("skips already-undone and non-project entries", () => {
-    const chosen = selectAgentstackUndoEntry([
-      entry({ id: "undone", time_unix: 900, undone: true }),
-      entry({ id: "other-project", time_unix: 800, touches_project: false }),
-      entry({ id: "safe", time_unix: 500 }),
-    ]);
-    expect(chosen?.id).toBe("safe");
-  });
-
-  it("returns null when nothing is safe to undo here", () => {
-    expect(selectAgentstackUndoEntry([])).toBeNull();
-    expect(
-      selectAgentstackUndoEntry([entry({ touches_project: false }), entry({ undone: true })]),
-    ).toBeNull();
-  });
-});
-
-describe("selectAgentstackUndoView", () => {
-  const entry = (over: Partial<AgentstackRestoreEntryLike>): AgentstackRestoreEntryLike => ({
-    id: "a".repeat(16),
-    time_unix: 1_000,
-    scope: "project",
-    summary: "1 file",
-    undone: false,
-    touches_project: true,
-    ...over,
-  });
-
-  it("counts the newer machine-wide entries it is deliberately not offering", () => {
-    // The real ledger after a machine-wide apply and a `use web` elsewhere: the
-    // drawer still acts on this project's own last change, and now says how
-    // much newer history it is not the front of.
-    const view = selectAgentstackUndoView([
+  it("keeps every entry visible but only offers revert on this project's live ones", () => {
+    // The real ledger after a machine-wide apply and a `use web` elsewhere:
+    // those rows render (so "latest" is never a false claim about the ledger)
+    // but stay inert — reverting another project's write from here is the
+    // blind `--last` this drawer exists to avoid. Undone rows also stay
+    // visible, revert-less.
+    const rows = deriveAgentstackUndoLedger([
       entry({ id: "global-apply", time_unix: 900, scope: "global", touches_project: false }),
-      entry({ id: "use-web", time_unix: 800, touches_project: false }),
       entry({ id: "project-apply", time_unix: 500, operation: "apply" }),
-      // Older than the selection, so not "newer"; already undone, so not counted.
-      entry({ id: "older-elsewhere", time_unix: 200, touches_project: false }),
-      entry({ id: "undone-elsewhere", time_unix: 950, touches_project: false, undone: true }),
+      entry({ id: "project-undone", time_unix: 400, undone: true }),
     ]);
-    expect(view.entry?.id).toBe("project-apply");
-    expect(view.entry?.operation).toBe("apply");
-    expect(view.newerElsewhere).toBe(2);
+    expect(rows.map((r) => [r.id, r.canUndo])).toEqual([
+      ["global-apply", false],
+      ["project-apply", true],
+      ["project-undone", false],
+    ]);
+    expect(rows[1]?.operation).toBe("apply");
+    // Absent operation (older CLI) normalizes to null, not undefined.
+    expect(rows[0]?.operation).toBeNull();
   });
 
-  it("counts nothing when there is nothing selected", () => {
-    expect(selectAgentstackUndoView([])).toEqual({ entry: null, newerElsewhere: 0 });
-    // Every project entry already undone → no selection, so no "newer" either.
-    expect(
-      selectAgentstackUndoView([
-        entry({ id: "done", undone: true }),
-        entry({ id: "elsewhere", time_unix: 9_000, touches_project: false }),
-      ]),
-    ).toEqual({ entry: null, newerElsewhere: 0 });
+  it("derives an empty ledger from an empty inventory", () => {
+    expect(deriveAgentstackUndoLedger([])).toEqual([]);
   });
 });
 
@@ -1639,6 +1640,55 @@ describe("selectAgentstackPrimaryConcern", () => {
     expect(concern?.act).toEqual({ kind: "review-trust" });
     expect(concern?.others).toBe(1);
   });
+
+  it("reads the consent gate from the readiness verdict ahead of the badge", () => {
+    // `status-honesty-v1`: an older badge derivation falls back to section
+    // prose; the readiness verdict is authoritative when the CLI serves it.
+    const inert = selectAgentstackPrimaryConcern({
+      rows: [],
+      findings: [],
+      trust: "unknown",
+      readiness: "untrusted",
+    });
+    expect(inert?.act).toEqual({ kind: "review-trust" });
+    const drifted = selectAgentstackPrimaryConcern({
+      rows: [],
+      findings: [],
+      trust: "unknown",
+      readiness: "drifted",
+    });
+    expect(drifted?.key).toBe("trust:drifted");
+  });
+
+  it("surfaces the readiness-only not-live verdicts instead of a blank first page", () => {
+    // Findings-free, trusted, never activated: before `readiness` this state
+    // produced no concern and wore a Ready chip (F1). The one next step is
+    // activation, through the same confirm the Setup tab's row uses.
+    const notActive = selectAgentstackPrimaryConcern({
+      rows: [],
+      findings: [],
+      trust: "trusted",
+      readiness: "never_activated",
+    });
+    expect(notActive?.act).toEqual({ kind: "action", action: "lock-write" });
+    expect(notActive?.label).toBe("Activate");
+    const empty = selectAgentstackPrimaryConcern({
+      rows: [],
+      findings: [],
+      trust: "trusted",
+      readiness: "empty",
+    });
+    expect(empty?.act).toEqual({ kind: "manage" });
+    // A ready verdict adds nothing: the healthy page stays concern-free.
+    expect(
+      selectAgentstackPrimaryConcern({
+        rows: [],
+        findings: [],
+        trust: "trusted",
+        readiness: "ready",
+      }),
+    ).toBeNull();
+  });
 });
 
 describe("describeAgentstackFindingSection", () => {
@@ -1758,6 +1808,31 @@ describe("deriveTrustSurface", () => {
     });
     expect(s.groups.map((g) => g.key)).toEqual(["unresolvable"]);
     expect(s.serverCount).toBe(1);
+  });
+
+  it("counts hooks and settings in the bar when the review card carries them", () => {
+    // `trust-review-card-v1`: hooks are executable, so a bar that omitted them
+    // summarized a smaller surface than the one being approved. Secrets keep
+    // the last word.
+    const s = deriveTrustSurface([], {
+      skills: 0,
+      workflows: 0,
+      extensions: 0,
+      instructions: 0,
+      secrets: 1,
+      hooks: 2,
+      settings: 1,
+    });
+    expect(s.summary).toBe("0 servers · 2 hooks · settings for 1 tool · 1 secret");
+    // Absent (older preview, or the feature ungated) → unchanged summary.
+    const older = deriveTrustSurface([], {
+      skills: 1,
+      workflows: 0,
+      extensions: 0,
+      instructions: 0,
+      secrets: 0,
+    });
+    expect(older.summary).toBe("0 servers · 1 skill");
   });
 });
 
@@ -1897,11 +1972,27 @@ describe("deriveAgentstackPanelPosture", () => {
     doctorReadable: true,
     incompatible: false,
     setupState: "ready",
+    readiness: null,
     hasConcern: false,
   };
 
   it("says ready only when the body would show the working-under region", () => {
     expect(deriveAgentstackPanelPosture(healthy)).toBe("ready");
+  });
+
+  it("never says ready over a readiness verdict that isn't ready", () => {
+    // The F1 mislabel: `state` reads "ready" over an untrusted, never-activated
+    // project. With `status-honesty-v1` the verdict wins over the concern
+    // reading — every non-ready value is attention, whatever else derived.
+    for (const readiness of ["untrusted", "drifted", "never_activated", "empty"]) {
+      expect(deriveAgentstackPanelPosture({ ...healthy, readiness })).toBe("attention");
+    }
+    expect(deriveAgentstackPanelPosture({ ...healthy, readiness: "ready" })).toBe("ready");
+    // `unknown` claims nothing either way and falls back to the concern.
+    expect(deriveAgentstackPanelPosture({ ...healthy, readiness: "unknown" })).toBe("ready");
+    expect(
+      deriveAgentstackPanelPosture({ ...healthy, readiness: "unknown", hasConcern: true }),
+    ).toBe("attention");
   });
 
   it("never says Ready for a needs_setup project, whatever else is true", () => {
