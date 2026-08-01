@@ -189,7 +189,7 @@ describe("CheckupFindings — acting on what it found", () => {
       />,
     );
     expect(markup).toContain("not trusted at its current bytes");
-    expect(markup).toContain("Review &amp; trust");
+    expect(markup).toContain("Review &amp; use");
 
     // No review surface to open → the command alone, as before.
     const noSurface = renderToStaticMarkup(

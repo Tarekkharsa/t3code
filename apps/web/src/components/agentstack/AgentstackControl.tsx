@@ -1450,7 +1450,7 @@ export function AgentstackControl({
       {settingUp ? (
         <PanelDialog
           title="Set up this project"
-          description="Import the coding tools already on this machine into one manifest."
+          description="Bring the coding tools already on this machine into one setup they can all share."
           onClose={() => setSettingUp(false)}
         >
           <SetupPanel
@@ -1469,7 +1469,7 @@ export function AgentstackControl({
         <PanelDialog
           title="Edit AgentStack manifest"
           back={backLabel}
-          description="Review the project's source of truth before deciding whether to trust it."
+          description="See exactly what this project is asking to use, before you decide whether to use it."
           onClose={closeManifestEditor}
           footer={
             discardingManifest ? (
@@ -1633,8 +1633,8 @@ function NeedsSetup({ onOpen }: { onOpen: () => void }) {
     <div className="flex flex-col gap-2.5 px-4 py-4">
       <p className="text-xs font-semibold text-foreground">This project isn't set up yet</p>
       <p className="text-xs leading-relaxed text-muted-foreground">
-        AgentStack can import the coding tools already on this machine into one manifest your CLIs
-        render from. You'll see exactly what it would write before anything is written.
+        AgentStack can bring the coding tools already on this machine into one setup they all read
+        from. You'll see exactly what it would write before anything is written.
       </p>
       <Button size="sm" onClick={onOpen} className="self-start">
         Review setup
@@ -2125,9 +2125,9 @@ function TrustReviewPanel({
         <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-4 py-3">
           <p className="text-[12.5px] leading-relaxed text-muted-foreground">
             {state === "trusted"
-              ? "This project is approved at its current bytes. Editing the manifest or lockfile re-opens the review."
+              ? "You approved this project at exactly the contents below. Change what it declares, or what those declarations point at, and the review re-opens."
               : state === "drifted"
-                ? "You approved this project before, but its content changed since — review the new bytes and say yes again. The terminal review marks exactly what changed since your last yes."
+                ? "You approved this project before, but its contents changed since — look over what it asks for now and say yes again. The terminal review marks exactly what changed since your last yes."
                 : "This project is inert until you review it. Look over what it would be allowed to run and contact, then give your yes."}
             {preview.re_trust && state === "untrusted" ? " You approved it before." : ""}
           </p>
@@ -2199,6 +2199,16 @@ function TrustReviewPanel({
               </p>
               <p className="mt-0.5 break-all font-mono text-[10.5px] text-muted-foreground">
                 {preview.secrets.join(" · ")}
+              </p>
+              {/* Where the values come from, said next to the names — otherwise
+                  a reader has to guess whether approving this list also hands
+                  the project a copy of each value. Only the names travel: the
+                  value is looked up on this machine at the moment it is
+                  needed. */}
+              <p className="mt-1 text-[10.5px] leading-relaxed text-muted-foreground/70">
+                Only the names are stored. AgentStack looks each value up on this machine when
+                something needs it, and never writes the values into your setup or your coding
+                tools&apos; own configs.
               </p>
             </div>
           ) : null}
@@ -2368,9 +2378,9 @@ function TrustReviewPanel({
               for — and the way to exclude something is named. */}
           {state !== "trusted" ? (
             <p className="text-[10.5px] leading-relaxed text-muted-foreground/70">
-              Your yes covers this whole list — there is no per-item opt-out, because approval is
-              granted over one digest of the entire surface. To leave something out, remove it from
-              the project&apos;s manifest and review again.
+              Your yes covers this whole list — there is no per-item opt-out, because you approve
+              everything here at once, exactly as it stands. To leave something out, remove it from
+              what this project declares and review again.
             </p>
           ) : null}
 
@@ -2396,7 +2406,7 @@ function TrustReviewPanel({
           {(consentDigest === null || trustConsentMissing) && state !== "trusted" ? (
             <p className="text-[11px] leading-relaxed text-warning-foreground">
               {consentDigest === null
-                ? "This agentstack CLI predates consent-bound approval (its preview has no surface digest), so approving from here is disabled. Update agentstack, or review in a terminal, where the review itself is the consent."
+                ? "This agentstack CLI is too old to tie your yes to the exact contents you just read, so approving from here is disabled. Update agentstack, or review in a terminal, where the review itself is the consent."
                 : `This agentstack CLI doesn't support consent-bound approval from ${AGENTSTACK_HOST_NAME}. Update agentstack, or review in a terminal, where the review itself is the consent.`}
             </p>
           ) : null}
@@ -2520,7 +2530,7 @@ export function TrustServerBlockerNotice({
       </ul>
       <p className="mt-1.5 text-[10.5px] leading-relaxed text-muted-foreground">
         {blockers.every((blocker) => blocker.fix === "agentstack lock")
-          ? "Lock the current bytes, review the lockfile change, then reopen this review."
+          ? "Lock the contents this project has now, look over what that changes, then reopen this review."
           : "Edit or remove the blocked server definition, then lock and review again."}
       </p>
     </div>
@@ -4617,7 +4627,7 @@ export function CheckupFindings({
           const act =
             group.action === "review-trust"
               ? onReviewTrust
-                ? { label: "Review & trust", run: onReviewTrust }
+                ? { label: "Review & use", run: onReviewTrust }
                 : null
               : group.action !== null
                 ? {
@@ -4848,7 +4858,7 @@ export function StatusSummary({
                 onClick={onReviewTrust}
                 className="ml-auto h-[22px] font-semibold sm:h-[22px] sm:text-[11px]"
               >
-                Review &amp; trust
+                Review &amp; use
               </Button>
             ) : null
           ) : runnable && onRunNextAction ? (
@@ -6466,7 +6476,7 @@ function SetupPanel({
       <p className="text-xs leading-relaxed text-muted-foreground">
         Setup reads the {plan.detected.length} coding{" "}
         {plan.detected.length === 1 ? "tool" : "tools"} on this machine and writes{" "}
-        <span className="font-semibold text-foreground">one manifest</span> your CLIs render from.
+        <span className="font-semibold text-foreground">one shared setup</span> they all read from.
         Nothing is written until you confirm.
       </p>
 
@@ -6612,7 +6622,7 @@ function SetupPanel({
             <code className="wrap-break-word font-mono text-muted-foreground/90">
               {shortenAgentstackPath(plan.manifest_path, paths)}
             </code>{" "}
-            <span className="text-muted-foreground/70">— the manifest, written by setup</span>
+            <span className="text-muted-foreground/70">— your shared setup, written here</span>
           </li>
           {(plan.destinations ?? []).map((d) => (
             <li key={`${d.id}:${d.path}`}>
@@ -6636,7 +6646,7 @@ function SetupPanel({
       {setupUnsupported ? (
         <p className="text-[11px] leading-relaxed text-warning-foreground">
           {canApply
-            ? "This agentstack CLI's plan has no digest to confirm against, so setup from here is disabled. Update agentstack, or run agentstack init in a terminal."
+            ? "This agentstack CLI can't tie setup to the exact plan you just read, so setup from here is disabled. Update agentstack, or run agentstack init in a terminal."
             : "This agentstack CLI doesn't support one-click setup. Update agentstack, or run agentstack init in a terminal."}
         </p>
       ) : null}
@@ -6841,6 +6851,29 @@ function ActionConfirm({
   );
 }
 
+/**
+ * Plain words for the `lock_status` slugs `agentstack workflow list` emits.
+ *
+ * Everything except `matches` used to render as the raw slug, so the panel
+ * showed `resolve_failed` and `unavailable` to a reader who has never seen the
+ * CLI's vocabulary — a pill that says what state the machine is in rather than
+ * what it means for the person reading it. The slug itself stays reachable as
+ * the pill's tooltip, so anyone matching the panel against CLI output or the
+ * docs still has the exact word. An unknown slug falls through to itself,
+ * which is the behavior this replaced — a future state is shown, never hidden.
+ */
+const WORKFLOW_LOCK_LABELS: Readonly<Record<string, string>> = {
+  matches: "locked",
+  // No lock entry yet — nothing has pinned what this workflow currently is.
+  missing: "not locked yet",
+  // Content, roles or rev moved since the pin was taken.
+  drifted: "out of date",
+  // Unresolvable right now (an uncached git source, offline) — not a verdict.
+  unavailable: "can't check",
+  // The resolve itself errored; this one needs a human.
+  resolve_failed: "needs attention",
+};
+
 function WorkflowPanel({
   data,
   incompatible,
@@ -6961,8 +6994,9 @@ function WorkflowPanel({
                   ? "bg-muted-foreground/10 text-muted-foreground"
                   : "bg-destructive/10 text-destructive-foreground",
               )}
+              title={`lock status: ${w.lock_status}`}
             >
-              {w.lock_status === "matches" ? "locked" : w.lock_status}
+              {WORKFLOW_LOCK_LABELS[w.lock_status] ?? w.lock_status}
             </span>
           </div>
         ))}

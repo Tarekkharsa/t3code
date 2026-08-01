@@ -61,6 +61,6 @@ describe("TrustServerBlockerNotice", () => {
     expect(markup).toContain("cannot be trusted yet");
     expect(markup).toContain("computer-use");
     expect(markup).toContain("Edit or remove");
-    expect(markup).not.toContain("Lock the current bytes");
+    expect(markup).not.toContain("Lock the contents this project has now");
   });
 });

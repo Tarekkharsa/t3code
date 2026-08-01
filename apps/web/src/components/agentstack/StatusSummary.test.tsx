@@ -131,7 +131,7 @@ describe("StatusSummary", () => {
     // command that performs it: the button is the actionable form, and printing
     // argv beside it is the same instruction twice.
     expect(markup).toContain("Review what this project declares");
-    expect(markup).toContain("Review &amp; trust");
+    expect(markup).toContain("Review &amp; use");
     expect(markup).not.toContain("agentstack trust .");
 
     // No review surface → the command still reads as a command to run, and

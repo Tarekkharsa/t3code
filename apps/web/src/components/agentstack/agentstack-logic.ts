@@ -2088,7 +2088,7 @@ export function selectAgentstackPrimaryConcern(input: {
       detail: copy.detail,
       act: { kind: "review-trust" },
       label: "Review this project",
-      note: "you approve exact bytes",
+      note: "you approve exactly what you review",
       others: rest(0),
     };
   }
@@ -2137,8 +2137,8 @@ export function selectAgentstackPrimaryConcern(input: {
       title: actionFinding.message,
       detail: null,
       act: { kind: "review-trust" },
-      label: "Review & trust",
-      note: "you approve exact bytes",
+      label: "Review & use",
+      note: "you approve exactly what you review",
       others: rest(1),
     };
   }

@@ -852,7 +852,7 @@ describe("matchAgentstackNextAction", () => {
   it("routes trust-with-the-project's-own-path to the review too", () => {
     // Doctor's real recommendation carries the absolute project path, which
     // the exact list can never contain — and rendering IT as dead text while
-    // the finding below offered "Review & trust" was one instruction in two
+    // the finding below offered "Review & use" was one instruction in two
     // forms, only one of them pressable.
     expect(matchAgentstackNextAction("agentstack trust /Users/x/proj")).toBe("review-trust");
     // A flagged form is a different command; a path with spaces stays text
