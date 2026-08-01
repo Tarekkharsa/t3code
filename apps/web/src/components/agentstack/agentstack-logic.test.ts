@@ -3,6 +3,8 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   AGENTSTACK_FINDINGS_PREVIEW,
   agentstackFeatureKnownMissing,
+  deriveAgentstackReviewCard,
+  describeAgentstackDriftReviewTail,
   agentstackFindingAction,
   classifyAgentstackEditPreview,
   deriveAgentstackActivityRows,
@@ -45,6 +47,8 @@ import {
   type AgentstackFinding,
   type AgentstackOverviewRow,
   type AgentstackRestoreEntryLike,
+  type AgentstackReviewItemLike,
+  type AgentstackReviewLike,
   type AgentstackWorkflowStepLike,
   describeAgentstackActivation,
   describeAgentstackMode,
@@ -419,6 +423,24 @@ describe("feature gating", () => {
     expect(hasAgentstackFeature([], "apply-setup")).toBe(false);
   });
 
+  it("gates the consent card and the skill-load feed on their own contract names", () => {
+    // Both are read-side gates with real consequences for getting them wrong:
+    // without the card name the review must degrade to its terminal-pointing
+    // shape, and without the load name the activity read must not ask for
+    // `--include-loads` — an older binary refuses the unknown flag, and the
+    // whole feed then reads as a failure.
+    const both = ["trust-preview", "trust-card-diff-v1", "activity-skill-load-v1"];
+    expect(hasAgentstackFeature(both, "trust-card-diff-v1")).toBe(true);
+    expect(hasAgentstackFeature(both, "activity-skill-load-v1")).toBe(true);
+    // A CLI with the older review card but not the diff: the neighbouring name
+    // is not licence for the newer one.
+    const older = ["trust-preview", "trust-review-card-v1"];
+    expect(hasAgentstackFeature(older, "trust-card-diff-v1")).toBe(false);
+    expect(hasAgentstackFeature(older, "activity-skill-load-v1")).toBe(false);
+    expect(hasAgentstackFeature(undefined, "trust-card-diff-v1")).toBe(false);
+    expect(hasAgentstackFeature(undefined, "activity-skill-load-v1")).toBe(false);
+  });
+
   it("only reports a contract as known-missing when the CLI advertised its features", () => {
     // Known list that omits it → known-missing (add the extra gate).
     expect(agentstackFeatureKnownMissing(["apply-setup"], "trust-consent")).toBe(true);
@@ -700,6 +722,80 @@ describe("deriveAgentstackActivityRows", () => {
     );
     expect(row!.reason!.length).toBeLessThanOrEqual(120);
     expect(row!.reason!.endsWith("…")).toBe(true);
+  });
+
+  it("reads a skill load as its own kind of row, never as a call that succeeded", () => {
+    // Verbatim from `activity-with-loads.json`: the real binary's merged feed
+    // after one `agentstack_load` over MCP.
+    const now = 1_785_608_000;
+    const [row] = deriveAgentstackActivityRows(
+      [
+        {
+          kind: "skill_load",
+          ts: 1_785_607_989,
+          name: "summarize",
+          reason: "capturing the wire shape for the handoff",
+          run: "r-capture",
+          project: "/work/project/.agentstack",
+        },
+      ],
+      now,
+    );
+    expect(row).toMatchObject({
+      kind: "load",
+      label: "summarize",
+      reason: "capturing the wire shape for the handoff",
+      run: "r-capture",
+      runShort: "r-captur",
+      age: "now",
+    });
+    // Nothing was brokered, so there is no outcome, no duration and no argument
+    // digest to show. Defaulting any of them would dress a load up as a call.
+    expect(row).not.toHaveProperty("outcome");
+    expect(row).not.toHaveProperty("duration");
+    expect(row).not.toHaveProperty("digest");
+  });
+
+  it("interleaves loads with calls in the CLI's own order, newest first", () => {
+    const now = 10_000;
+    const rows = deriveAgentstackActivityRows(
+      [
+        { ts: now - 300, server: "figma", tool: "get_file", outcome: "ok", ms: 42, kind: "call" },
+        { kind: "skill_load", ts: now - 120, name: "review", reason: "opening a PR" },
+        { ts: now - 60, server: "github", tool: "create_pr", outcome: "denied", ms: 0 },
+      ],
+      now,
+    );
+    expect(rows.map((r) => r.kind)).toEqual(["call", "load", "call"]);
+    expect(rows.map((r) => r.label)).toEqual(["github__create_pr", "review", "figma__get_file"]);
+  });
+
+  it("bounds a load's name and reason exactly like a call's, both being caller text", () => {
+    const [row] = deriveAgentstackActivityRows(
+      [
+        {
+          kind: "skill_load",
+          ts: 10_000,
+          name: `n${"a".repeat(200)}`,
+          reason: `why ${"y".repeat(400)}`,
+        },
+      ],
+      10_000,
+    );
+    expect(row!.label.length).toBeLessThanOrEqual(48);
+    expect(row!.reason!.length).toBeLessThanOrEqual(120);
+    // Control characters are flattened before the string reaches the DOM.
+    // Asserting the control characters are GONE is the point of the check.
+    // eslint-disable-next-line no-control-regex
+    expect(row!.reason).not.toMatch(/[\u0000-\u001f]/);
+  });
+
+  it("omits a load's second line when the caller gave no reason", () => {
+    const [row] = deriveAgentstackActivityRows(
+      [{ kind: "skill_load", ts: 10_000, name: "quiet", reason: "   " }],
+      10_000,
+    );
+    expect(row).not.toHaveProperty("reason");
   });
 });
 
@@ -2290,5 +2386,302 @@ describe("isAgentstackAbsentAdapterFinding", () => {
   it("stops claiming anything if doctor rewords the line", () => {
     // The safe direction: the finding still renders, we just say less about it.
     expect(isAgentstackAbsentAdapterFinding(finding("VS Code binary missing"))).toBe(false);
+  });
+});
+
+describe("deriveAgentstackReviewCard", () => {
+  // Fixtures are rows from the real captured payloads (agentstack 0.18.0-rc.2,
+  // `trust <path> --preview` over the maximal fixture), trimmed to the item
+  // under test.
+  const item = (over: Partial<AgentstackReviewItemLike>): AgentstackReviewItemLike => ({
+    kind: "server",
+    name: "filesystem",
+    change: "unchanged",
+    identity: "npx -y @modelcontextprotocol/server-filesystem .",
+    runs: [],
+    contacts: [],
+    may_read: [],
+    pin: null,
+    prior_pin: null,
+    recognized_other_projects: null,
+    diff: null,
+    ...over,
+  });
+  const review = (over: Partial<AgentstackReviewLike>): AgentstackReviewLike => ({
+    re_review: true,
+    prior_recorded: true,
+    items: [],
+    removed: [],
+    ...over,
+  });
+  /** The `summarize` row from `preview-regate.json`, verbatim. */
+  const editedSkill = item({
+    kind: "skill",
+    name: "summarize",
+    change: "unchanged",
+    identity: "inline",
+    pin: "d6f7db9bafc6cf41bc5a71db1e422a8c8f3b7f9737ba29e8e73bbbf483f4e2d7",
+    prior_pin: "ba546e7fd3492cb905c87792948a2fb384657e35f1dfbccd6e703959c7ef27a5",
+    recognized_other_projects: 0,
+    diff: {
+      status: "changed",
+      headline: "changed 2 lines",
+      files: [
+        {
+          path: "SKILL.md",
+          change: "modified",
+          added: 1,
+          removed: 1,
+          lines: ["# Summarize", "- body", "+ body changed here"],
+        },
+      ],
+      capped: false,
+    },
+  });
+
+  it("marks an item whose BYTES moved, even though its identity did not", () => {
+    // The divergence the CLI documents: an inline skill's identity is its
+    // origin word, so a body edit leaves `change: "unchanged"`. Reading that
+    // field alone would show a re-review in which nothing appears to have
+    // changed — which is the exact question the re-review is asking.
+    const card = deriveAgentstackReviewCard(review({ items: [editedSkill] }), { showDiffs: true });
+    expect(card.rows[0]?.badge).toBe("changed");
+    expect(card.markedCount).toBe(1);
+    expect(card.showsDiff).toBe(true);
+    expect(card.rows[0]?.diff).toMatchObject({ kind: "changed", headline: "changed 2 lines" });
+    expect(card.rows[0]?.diff?.files[0]).toMatchObject({ path: "SKILL.md", counts: "+1 −1" });
+    // The lines survive as classified diff lines, so the panel draws the same
+    // add/delete colouring it draws for a config diff.
+    const parsed = card.rows[0]?.diff?.files[0]?.parsed;
+    expect(parsed?.additions).toBe(1);
+    expect(parsed?.deletions).toBe(1);
+    expect(parsed?.lines.map((l) => l.kind)).toEqual(["context", "del", "add"]);
+    expect(card.rows[0]?.pinned).toBe(true);
+  });
+
+  it("never says 'changed since your last yes' to a project that was never approved", () => {
+    // `preview-fresh.json`: no prior surface, so every item reads `added` and a
+    // pinned kind degrades to `no_snapshot`. Marking all of them marks nothing,
+    // and a diff here would claim a yes that never happened.
+    const card = deriveAgentstackReviewCard(
+      review({
+        re_review: false,
+        prior_recorded: false,
+        items: [
+          item({ change: "added" }),
+          item({
+            kind: "skill",
+            name: "summarize",
+            change: "added",
+            identity: "inline",
+            diff: { status: "no_snapshot", headline: null, files: [], capped: false },
+          }),
+        ],
+      }),
+      { showDiffs: true },
+    );
+    expect(card.rows.every((r) => r.badge === null)).toBe(true);
+    expect(card.rows.every((r) => r.diff === null)).toBe(true);
+    expect(card.markedCount).toBe(0);
+    expect(card.showsDiff).toBe(false);
+  });
+
+  it("keeps the diff off a review that is not comparing anything", () => {
+    // A trusted, undrifted project: the card still lists every item, but there
+    // is nothing to diff, so no row claims otherwise.
+    const card = deriveAgentstackReviewCard(review({ items: [editedSkill] }), { showDiffs: false });
+    expect(card.showsDiff).toBe(false);
+    expect(card.rows[0]?.diff).toBeNull();
+    // The mark stays: what moved is still true, only the line bodies are gone.
+    expect(card.rows[0]?.badge).toBe("changed");
+  });
+
+  it("degrades an unchanged pin to no diff at all, not to an empty one", () => {
+    const card = deriveAgentstackReviewCard(
+      review({
+        items: [
+          item({
+            kind: "instruction",
+            name: "house-rules",
+            identity: "",
+            pin: "b62df69457befe282c7ed32bbba558789610714be4a22977a905621ae303309f",
+            prior_pin: "b62df69457befe282c7ed32bbba558789610714be4a22977a905621ae303309f",
+            recognized_other_projects: 0,
+            diff: { status: "unchanged", headline: null, files: [], capped: false },
+          }),
+        ],
+      }),
+      { showDiffs: true },
+    );
+    expect(card.rows[0]?.diff).toBeNull();
+    expect(card.rows[0]?.badge).toBeNull();
+  });
+
+  it("keeps the counts and says what it is not showing when the CLI capped the diff", () => {
+    const card = deriveAgentstackReviewCard(
+      review({
+        items: [
+          item({
+            kind: "skill",
+            name: "big",
+            identity: "inline",
+            pin: "a".repeat(64),
+            prior_pin: "b".repeat(64),
+            diff: {
+              status: "changed",
+              headline: "changed 400 lines",
+              files: [
+                { path: "SKILL.md", change: "modified", added: 200, removed: 200, lines: null },
+                { path: "extra.md", change: "added", added: 0, removed: 0, lines: null },
+              ],
+              capped: true,
+            },
+          }),
+        ],
+      }),
+      { showDiffs: true },
+    );
+    const diff = card.rows[0]?.diff;
+    expect(diff?.countsOnly).toBe(true);
+    expect(diff?.files[0]).toMatchObject({ counts: "+200 −200", parsed: null });
+    // Zero counts on an added file would read as "nothing happened"; the word
+    // is the fact worth reporting.
+    expect(diff?.files[1]?.counts).toBe("added");
+    expect(diff?.note).toContain("terminal");
+  });
+
+  it("renders the no-snapshot degrade with the pins and no invented diff", () => {
+    const card = deriveAgentstackReviewCard(
+      review({
+        items: [
+          item({
+            kind: "skill",
+            name: "summarize",
+            identity: "inline",
+            pin: "d6f7db9bafc6cf41bc5a71db1e422a8c8f3b7f9737ba29e8e73bbbf483f4e2d7",
+            prior_pin: "ba546e7fd3492cb905c87792948a2fb384657e35f1dfbccd6e703959c7ef27a5",
+            diff: { status: "no_snapshot", headline: null, files: [], capped: false },
+          }),
+        ],
+      }),
+      { showDiffs: true },
+    );
+    const diff = card.rows[0]?.diff;
+    expect(diff?.kind).toBe("no_snapshot");
+    expect(diff?.files).toEqual([]);
+    expect(diff?.note).toContain("no approved snapshot");
+    expect(diff?.pins).toContain("was sha256:ba54");
+    expect(diff?.pins).toContain("now sha256:d6f7");
+  });
+
+  it("states the facts in plain words and only where there are any", () => {
+    const card = deriveAgentstackReviewCard(
+      review({
+        items: [
+          item({ runs: ["npx -y @modelcontextprotocol/server-filesystem ."] }),
+          item({ name: "docs", contacts: ["https://api.example.com/mcp/docs"] }),
+          item({ kind: "secrets", name: "", identity: "DOCS_TOKEN", may_read: ["DOCS_TOKEN"] }),
+          item({ kind: "policy", name: "", identity: "· egress docs: api.example.com" }),
+        ],
+      }),
+      { showDiffs: false },
+    );
+    expect(card.rows[0]?.facts).toEqual([
+      { key: "runs", value: "npx -y @modelcontextprotocol/server-filesystem ." },
+    ]);
+    expect(card.rows[1]?.facts).toEqual([
+      { key: "contacts", value: "https://api.example.com/mcp/docs" },
+    ]);
+    expect(card.rows[2]?.facts).toEqual([{ key: "may read", value: "DOCS_TOKEN" }]);
+    // A row with nothing to say says nothing, rather than three empty labels.
+    expect(card.rows[3]?.facts).toEqual([]);
+    // A kind with no name still gets a row — dropping it would understate the
+    // surface, and an unknown kind must survive the same way.
+    expect(card.rows[3]?.name).toBe("");
+    expect(card.rows[3]?.kind).toBe("policy");
+  });
+
+  it("carries recognition as display words, never as a count that reads like a vote", () => {
+    const card = deriveAgentstackReviewCard(
+      review({ items: [item({ recognized_other_projects: 3 }), item({ name: "b" })] }),
+      { showDiffs: false },
+    );
+    expect(card.rows[0]?.recognition).toBe(
+      "these exact contents are already approved in 3 other projects on this machine",
+    );
+    // Null (the CLI could not read its index) and 0 are both "say nothing" —
+    // never "approved in 0 other projects".
+    expect(card.rows[1]?.recognition).toBeNull();
+  });
+
+  it("lists what the last yes covered and this surface no longer declares", () => {
+    const card = deriveAgentstackReviewCard(
+      review({ removed: [{ kind: "server", name: "gone", identity: "node gone.js" }] }),
+      { showDiffs: true },
+    );
+    expect(card.removed[0]).toMatchObject({
+      kind: "server",
+      name: "gone",
+      identity: "node gone.js",
+    });
+  });
+
+  it("bounds every string it draws, because all of it is repository content", () => {
+    const card = deriveAgentstackReviewCard(
+      review({
+        items: [
+          item({
+            name: `evil${"n".repeat(400)}`,
+            identity: `lineone\nline two${"x".repeat(400)}`,
+            runs: [`run ${"r".repeat(400)}`],
+            diff: {
+              status: "changed",
+              headline: `changed ${"h".repeat(400)} lines`,
+              files: [
+                {
+                  path: `p${"a".repeat(400)}`,
+                  change: "modified",
+                  added: 1,
+                  removed: 0,
+                  lines: [`+ ${"y".repeat(400)}`],
+                },
+              ],
+              capped: false,
+            },
+            pin: "a".repeat(64),
+            prior_pin: "b".repeat(64),
+          }),
+        ],
+      }),
+      { showDiffs: true },
+    );
+    const row = card.rows[0]!;
+    expect(row.name.length).toBeLessThanOrEqual(160);
+    expect(row.identity.length).toBeLessThanOrEqual(160);
+    // Control characters and newlines are flattened, not carried into the DOM.
+    // Asserting the control characters are GONE is the point of the check.
+    // eslint-disable-next-line no-control-regex
+    expect(row.identity).not.toMatch(/[\u0000-\u001f]/);
+    expect(row.identity).not.toContain("\n");
+    expect(row.facts[0]!.value.length).toBeLessThanOrEqual(240);
+    expect(row.diff!.headline!.length).toBeLessThanOrEqual(160);
+    expect(row.diff!.files[0]!.path.length).toBeLessThanOrEqual(160);
+    expect(row.diff!.files[0]!.parsed!.lines[0]!.text.length).toBeLessThanOrEqual(200);
+  });
+});
+
+describe("describeAgentstackDriftReviewTail", () => {
+  it("keeps the terminal-pointing sentence verbatim when nothing is marked here", () => {
+    // The exact sentence the panel has always shown on a drifted project. It is
+    // what an older CLI (no card) must still read, character for character.
+    expect(describeAgentstackDriftReviewTail(false)).toBe(
+      "The terminal review marks exactly what changed since your last yes.",
+    );
+  });
+
+  it("only claims to mark the changes when a diff is actually on screen", () => {
+    expect(describeAgentstackDriftReviewTail(true)).toBe(
+      "What changed since your last yes is marked below.",
+    );
   });
 });

@@ -203,6 +203,91 @@ describe("AgentstackCli", () => {
     }).pipe(Effect.provide(layer(empty)));
   });
 
+  it.effect("asks for skill loads with one fixed literal flag, and only when asked", () => {
+    // The whole argv surface this contract adds. `--include-loads` is appended
+    // verbatim or not at all — there is no interpolation for a client to reach
+    // — and the default call's argv stays byte-identical to the older one.
+    const run = vi.fn<ProcessRunner.ProcessRunner["Service"]["run"]>(() =>
+      Effect.succeed(okOutput(JSON.stringify({ events: [] }))),
+    );
+    const base = [
+      "--manifest-dir",
+      "/proj",
+      "report",
+      "calls",
+      "--json",
+      "--tail",
+      "20",
+      "--project",
+      "/proj",
+    ];
+
+    return Effect.gen(function* () {
+      const a = yield* AgentstackCli.make();
+      yield* a.activity({ workspaceRoot: "/proj", limit: 20 });
+      expect(run.mock.calls[0]?.[0]?.args).toEqual(base);
+
+      yield* a.activity({ workspaceRoot: "/proj", limit: 20, includeLoads: false });
+      expect(run.mock.calls[1]?.[0]?.args).toEqual(base);
+
+      yield* a.activity({ workspaceRoot: "/proj", limit: 20, includeLoads: true });
+      expect(run.mock.calls[2]?.[0]?.args).toEqual([...base, "--include-loads"]);
+    }).pipe(
+      Effect.provide(
+        Layer.succeed(ProcessRunner.ProcessRunner, ProcessRunner.ProcessRunner.of({ run })),
+      ),
+    );
+  });
+
+  it.effect("reads a merged feed without letting a load be mistaken for a call", () => {
+    // Rows in the real binary's `--include-loads` shape: a load carries no
+    // outcome and no duration, because nothing was brokered.
+    const run = vi.fn<ProcessRunner.ProcessRunner["Service"]["run"]>(() =>
+      Effect.succeed(
+        okOutput(
+          JSON.stringify({
+            calls: { total: 0, ok: 0, error: 0, denied: 0, span_days: 0 },
+            events: [
+              {
+                ts: 1785606764,
+                run: "r-capture",
+                project: "/proj",
+                server: "figma",
+                tool: "get_file",
+                args_digest: "0123456789ab",
+                outcome: "ok",
+                ms: 42,
+                kind: "call",
+              },
+              {
+                kind: "skill_load",
+                ts: 1785607989,
+                name: "summarize",
+                reason: "capturing the wire shape for the handoff",
+                run: "r-capture",
+                project: "/proj/.agentstack",
+              },
+            ],
+          }),
+        ),
+      ),
+    );
+
+    return Effect.gen(function* () {
+      const a = yield* AgentstackCli.make();
+      const r = yield* a.activity({ workspaceRoot: "/proj", limit: 20, includeLoads: true });
+      expect(r.readFailed).toBeUndefined();
+      expect(r.events).toHaveLength(2);
+      expect(r.events[0]).toMatchObject({ server: "figma", outcome: "ok", kind: "call" });
+      expect(r.events[1]).toMatchObject({ kind: "skill_load", name: "summarize" });
+      expect(r.events[1]).not.toHaveProperty("outcome");
+    }).pipe(
+      Effect.provide(
+        Layer.succeed(ProcessRunner.ProcessRunner, ProcessRunner.ProcessRunner.of({ run })),
+      ),
+    );
+  });
+
   it.effect("a non-zero exit is a failed read", () =>
     Effect.gen(function* () {
       const a = yield* AgentstackCli.make();
@@ -451,6 +536,58 @@ describe("AgentstackCli", () => {
     const without = AgentstackCli.parseTrustPreview(JSON.stringify(base));
     expect(without).not.toBeNull();
     expect(without?.surface_digest).toBeUndefined();
+    // Same for the consent card: absent on this older payload, so the panel
+    // has an honest "no card" to degrade to rather than an empty one.
+    expect(without?.review).toBeUndefined();
+
+    // And the whole card survives the trip through THIS decoder — the preview
+    // read hands the panel the decoded object, so a field lost here is a field
+    // no feature gate downstream can ever render.
+    const carded = AgentstackCli.parseTrustPreview(
+      JSON.stringify({
+        ...base,
+        state: "drifted",
+        re_trust: true,
+        review: {
+          re_review: true,
+          prior_recorded: true,
+          items: [
+            {
+              kind: "skill",
+              name: "summarize",
+              change: "unchanged",
+              identity: "inline",
+              runs: [],
+              contacts: [],
+              may_read: [],
+              pin: "d6f7db9bafc6cf41bc5a71db1e422a8c8f3b7f9737ba29e8e73bbbf483f4e2d7",
+              prior_pin: "ba546e7fd3492cb905c87792948a2fb384657e35f1dfbccd6e703959c7ef27a5",
+              recognized_other_projects: 0,
+              diff: {
+                status: "changed",
+                headline: "changed 2 lines",
+                files: [
+                  {
+                    path: "SKILL.md",
+                    change: "modified",
+                    added: 1,
+                    removed: 1,
+                    lines: ["# Summarize", "- body", "+ body changed here"],
+                  },
+                ],
+                capped: false,
+              },
+            },
+          ],
+          removed: [],
+        },
+      }),
+    );
+    expect(carded?.review?.items[0]?.diff?.files[0]?.lines).toEqual([
+      "# Summarize",
+      "- body",
+      "+ body changed here",
+    ]);
   });
 
   it("parses the workflow run history and degrades to [] on unknown shapes", () => {

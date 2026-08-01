@@ -1088,7 +1088,9 @@ function firstMessage(
 
 // ── recent-calls activity feed ───────────────────────────────────────────────
 
-export interface AgentstackActivityEventLike {
+/** One brokered call, as the CLI's feed spells it. */
+export interface AgentstackCallEventLike {
+  readonly kind?: "call";
   readonly ts: number;
   readonly server: string;
   readonly tool: string;
@@ -1099,25 +1101,59 @@ export interface AgentstackActivityEventLike {
   readonly detail?: string;
 }
 
-export interface AgentstackActivityRow {
+/**
+ * One skill the agent pulled into its own context (`activity-skill-load-v1`).
+ * Nothing was brokered, so there is no outcome and no duration to carry — the
+ * shape says so rather than defaulting them to something that reads like a
+ * successful call.
+ */
+export interface AgentstackSkillLoadEventLike {
+  readonly kind: "skill_load";
+  readonly ts: number;
+  readonly name: string;
+  readonly reason: string;
+  readonly run?: string;
+  readonly project?: string;
+}
+
+export type AgentstackActivityEventLike = AgentstackCallEventLike | AgentstackSkillLoadEventLike;
+
+interface AgentstackActivityRowBase {
   key: string;
-  outcome: "ok" | "error" | "denied";
-  /** `server__tool`, truncated — guard entries embed the whole command. */
+  /** `server__tool` for a call, the skill name for a load; truncated — guard
+   *  entries embed the whole command. */
   label: string;
   age: string;
   run?: string;
   /** Short run id for display; the full value stays in `run`. */
   runShort?: string;
   /**
-   * Why this call ended the way it did — the policy rule that denied it, or
-   * the fixed class an error was reduced to. Only ever set on a call that did
-   * not succeed: a "reason" on an ok row would be an explanation of nothing.
+   * The row's second line, bounded and flattened before it reaches the DOM.
+   * On a call it is why the call ended the way it did — set only when it did
+   * NOT succeed, because a reason on an ok row explains nothing. On a load it
+   * is the agent's own words for why it wanted the skill.
    */
   reason?: string;
+}
+
+export interface AgentstackActivityCallRow extends AgentstackActivityRowBase {
+  kind: "call";
+  outcome: "ok" | "error" | "denied";
   /** First hex chars of the argument digest. Never an argument value. */
   digest?: string;
   duration?: string;
 }
+
+/**
+ * A load is informational, not an outcome: it was neither allowed nor denied,
+ * so the row deliberately carries none of the ok/denied/error vocabulary and
+ * the panel must not colour it with one.
+ */
+export interface AgentstackActivitySkillLoadRow extends AgentstackActivityRowBase {
+  kind: "load";
+}
+
+export type AgentstackActivityRow = AgentstackActivityCallRow | AgentstackActivitySkillLoadRow;
 
 const ACTIVITY_LABEL_MAX = 48;
 /**
@@ -1136,6 +1172,28 @@ const ACTIVITY_REASON_MAX = 120;
 /** Digests are already 12 hex chars from the recorder; bounded anyway. */
 const ACTIVITY_DIGEST_MAX = 12;
 
+/**
+ * Make a recorded string safe to draw: control characters out, whitespace
+ * collapsed, length capped. See `ACTIVITY_REASON_MAX` above for why the risk
+ * here is a 200 KB "reason" owning the panel rather than injection.
+ *
+ * Shared so every CLI-sourced string on this screen gets the SAME treatment —
+ * a second, kinder copy written for a newer field is exactly how one of them
+ * ends up unbounded.
+ */
+export function sanitizeAgentstackRecordedText(text: string, max: number): string {
+  return clamp(
+    text
+      // Control characters first: a filename may legally contain them, and
+      // they survive a whitespace collapse.
+      // eslint-disable-next-line no-control-regex
+      .replaceAll(/[\u0000-\u001f\u007f]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim(),
+    max,
+  );
+}
+
 function formatAge(seconds: number): string {
   if (seconds < 60) return "now";
   if (seconds < 3_600) return `${Math.floor(seconds / 60)}m ago`;
@@ -1146,39 +1204,54 @@ function formatAge(seconds: number): string {
 /**
  * Feed events arrive oldest-first (audit-log append order, `ts` in epoch
  * seconds); the panel shows newest first.
+ *
+ * Skill loads (`activity-skill-load-v1`) are interleaved by the CLI and stay
+ * exactly where it put them: the merged order is the recorded order, and
+ * re-sorting here would make this panel tell a different story about one run
+ * than the terminal's own `report run` does.
  */
 export function deriveAgentstackActivityRows(
   events: ReadonlyArray<AgentstackActivityEventLike>,
   nowEpochSeconds: number,
 ): AgentstackActivityRow[] {
   return events.toReversed().map((e, i) => {
+    const key = `${e.ts}-${i}`;
+    const age = formatAge(Math.max(0, nowEpochSeconds - e.ts));
+    const run = e.run ? { run: e.run, runShort: e.run.slice(0, 8) } : {};
+    if (e.kind === "skill_load") {
+      return {
+        kind: "load",
+        key,
+        // The skill's name is the whole label: a load has no server and no
+        // tool, and inventing a `server__tool` pair would dress it up as a
+        // call — the one thing this row must never look like.
+        label: sanitizeAgentstackRecordedText(e.name, ACTIVITY_LABEL_MAX),
+        age,
+        ...run,
+        // The agent's own words for why it wanted this skill, which is the
+        // fact that makes the row worth a line. Bounded exactly like a call's
+        // reason: both are text an MCP caller chose.
+        ...(e.reason.trim() !== ""
+          ? { reason: sanitizeAgentstackRecordedText(e.reason, ACTIVITY_REASON_MAX) }
+          : {}),
+      };
+    }
     let label = `${e.server}__${e.tool}`;
     if (label.length > ACTIVITY_LABEL_MAX) {
       label = `${label.slice(0, ACTIVITY_LABEL_MAX - 1)}…`;
     }
     return {
-      key: `${e.ts}-${i}`,
+      kind: "call",
+      key,
       outcome: e.outcome,
       label,
-      age: formatAge(Math.max(0, nowEpochSeconds - e.ts)),
-      ...(e.run ? { run: e.run, runShort: e.run.slice(0, 8) } : {}),
+      age,
+      ...run,
       // The question this feed exists to answer is "why did it fail", so the
       // reason rides on the row rather than waiting behind an expander — but
       // only where there is a failure to explain.
       ...(e.detail && e.outcome !== "ok"
-        ? {
-            reason: clamp(
-              // Control characters first: a filename may legally contain them,
-              // and they survive a whitespace collapse.
-              e.detail
-                // Stripping control characters is the entire point here.
-                // eslint-disable-next-line no-control-regex
-                .replaceAll(/[\u0000-\u001f\u007f]/g, " ")
-                .replace(/\s+/g, " ")
-                .trim(),
-              ACTIVITY_REASON_MAX,
-            ),
-          }
+        ? { reason: sanitizeAgentstackRecordedText(e.detail, ACTIVITY_REASON_MAX) }
         : {}),
       // Sliced, not clamped: an ellipsis would read as part of the digest, and
       // the recorder already emits exactly this many hex chars.
@@ -2425,6 +2498,281 @@ export function deriveTrustSurface(
     serverCount: servers.length,
     summary: servers.length === 0 && parts.length <= 1 ? "nothing declared" : parts.join(" · "),
   };
+}
+
+// ── consent card (trust-card-diff-v1) ────────────────────────────────────────
+// The per-item review the terminal has always printed, as data. Everything
+// here is display derivation: the gate is the CLI's, the digest covers the
+// whole surface, and nothing on this screen may read as a per-item decision.
+
+/** Wire shape: one file inside a pinned item's diff. */
+export interface AgentstackReviewFileLike {
+  readonly path: string;
+  readonly change: "added" | "removed" | "modified";
+  readonly added: number;
+  readonly removed: number;
+  /** Null when the CLI capped the diff, or the file has no body to show. */
+  readonly lines?: ReadonlyArray<string> | null;
+}
+
+/** Wire shape: a pinned item's byte-level story, pin to pin. */
+export interface AgentstackReviewDiffLike {
+  readonly status: "no_snapshot" | "unchanged" | "changed";
+  readonly headline: string | null;
+  readonly files: ReadonlyArray<AgentstackReviewFileLike>;
+  readonly capped: boolean;
+}
+
+/** Wire shape: one capability in the review. */
+export interface AgentstackReviewItemLike {
+  readonly kind: string;
+  readonly name: string;
+  readonly change: "added" | "changed" | "unchanged";
+  readonly identity: string;
+  readonly runs: ReadonlyArray<string>;
+  readonly contacts: ReadonlyArray<string>;
+  readonly may_read: ReadonlyArray<string>;
+  readonly pin: string | null;
+  readonly prior_pin: string | null;
+  readonly recognized_other_projects: number | null;
+  readonly diff: AgentstackReviewDiffLike | null;
+}
+
+/** Wire shape: the whole `review` object on the preview. */
+export interface AgentstackReviewLike {
+  readonly re_review: boolean;
+  readonly prior_recorded: boolean;
+  readonly items: ReadonlyArray<AgentstackReviewItemLike>;
+  readonly removed: ReadonlyArray<{
+    readonly kind: string;
+    readonly name: string;
+    readonly identity: string;
+  }>;
+}
+
+/** One "runs: …" / "contacts: …" / "may read: …" line under an item. */
+export interface AgentstackReviewFact {
+  readonly key: "runs" | "contacts" | "may read";
+  readonly value: string;
+}
+
+export interface AgentstackReviewDiffFileView {
+  readonly key: string;
+  readonly path: string;
+  /** "+1 −1" for a modified file; "added" / "removed" for the others, where
+   *  counts of zero would read as "nothing happened". */
+  readonly counts: string;
+  /** The classified lines, or null when only counts are available. */
+  readonly parsed: AgentstackParsedDiff | null;
+}
+
+export interface AgentstackReviewDiffView {
+  /** `changed` shows what moved; `no_snapshot` is the honest degrade. */
+  readonly kind: "changed" | "no_snapshot";
+  readonly headline: string | null;
+  readonly files: ReadonlyArray<AgentstackReviewDiffFileView>;
+  /** True when no line body is available — the CLI capped it, or the change is
+   *  file-level only. The counts stay exact either way. */
+  readonly countsOnly: boolean;
+  /** The sentence that says what this view is NOT showing. Always paired with
+   *  the terminal-review line the panel keeps at the bottom. */
+  readonly note: string | null;
+  /** The two pin identities, for a degrade that has nothing else to show. */
+  readonly pins: string | null;
+}
+
+export interface AgentstackReviewRow {
+  readonly key: string;
+  /** The CLI's own kind word, bounded. A kind this build has never heard of
+   *  still gets a row: dropping it would understate the surface. */
+  readonly kind: string;
+  /** Empty for kinds that are their own row (`secrets`, `policy`). */
+  readonly name: string;
+  readonly identity: string;
+  /** Null when there is nothing to mark: unchanged, or a first consent, where
+   *  every item is new and "added" on all of them marks nothing. */
+  readonly badge: "added" | "changed" | null;
+  readonly facts: ReadonlyArray<AgentstackReviewFact>;
+  /** The content behind this item is pinned, so a byte change re-opens the
+   *  review rather than sliding in under an old yes. */
+  readonly pinned: boolean;
+  /** Display only, and worded so it can never read as part of the gate. */
+  readonly recognition: string | null;
+  readonly diff: AgentstackReviewDiffView | null;
+}
+
+export interface AgentstackReviewCardView {
+  readonly rows: ReadonlyArray<AgentstackReviewRow>;
+  readonly removed: ReadonlyArray<{
+    readonly key: string;
+    readonly kind: string;
+    readonly name: string;
+    readonly identity: string;
+  }>;
+  /** True when at least one row actually draws a diff — the panel's drift
+   *  paragraph may only promise marks when there are marks. */
+  readonly showsDiff: boolean;
+  /** Rows marked added or changed; zero on a first consent, by construction. */
+  readonly markedCount: number;
+}
+
+/** Item strings are repository content. Bounded like every other one. */
+const REVIEW_TEXT_MAX = 160;
+/** A joined `runs:` line can carry several full command lines. */
+const REVIEW_FACT_MAX = 240;
+/** Per diff line, before the shared line cap applies. */
+const REVIEW_DIFF_LINE_MAX = 200;
+
+function reviewFacts(item: AgentstackReviewItemLike): AgentstackReviewFact[] {
+  const join = (values: ReadonlyArray<string>) =>
+    sanitizeAgentstackRecordedText(
+      values.map((v) => sanitizeAgentstackRecordedText(v, REVIEW_TEXT_MAX)).join(" · "),
+      REVIEW_FACT_MAX,
+    );
+  return (
+    [
+      { key: "runs", values: item.runs },
+      { key: "contacts", values: item.contacts },
+      { key: "may read", values: item.may_read },
+    ] as const
+  )
+    .filter((f) => f.values.length > 0)
+    .map((f) => ({ key: f.key, value: join(f.values) }));
+}
+
+function reviewDiffView(
+  item: AgentstackReviewItemLike,
+  diff: AgentstackReviewDiffLike,
+): AgentstackReviewDiffView | null {
+  if (diff.status === "unchanged") return null;
+  const pins =
+    item.prior_pin !== null && item.pin !== null
+      ? `was ${shortDigest(item.prior_pin)} · now ${shortDigest(item.pin)}`
+      : null;
+  if (diff.status === "no_snapshot") {
+    return {
+      kind: "no_snapshot",
+      headline: null,
+      files: [],
+      countsOnly: true,
+      // Said plainly, because the alternative is a review that shows an empty
+      // diff and lets it read as "nothing changed".
+      note: "The content changed since your last yes, and there's no approved snapshot left to compare it against.",
+      pins,
+    };
+  }
+  const files = diff.files.map((f, i) => ({
+    key: `${i}-${f.path}`,
+    path: sanitizeAgentstackRecordedText(f.path, REVIEW_TEXT_MAX),
+    counts:
+      f.change === "modified"
+        ? `+${f.added} −${f.removed}`
+        : f.change === "added"
+          ? "added"
+          : "removed",
+    parsed:
+      f.lines != null && f.lines.length > 0
+        ? parseAgentstackDiff(
+            f.lines.map((l) => sanitizeAgentstackRecordedText(l, REVIEW_DIFF_LINE_MAX)).join("\n"),
+          )
+        : null,
+  }));
+  const countsOnly = files.every((f) => f.parsed === null);
+  return {
+    kind: "changed",
+    headline:
+      diff.headline === null
+        ? null
+        : sanitizeAgentstackRecordedText(diff.headline, REVIEW_TEXT_MAX),
+    files,
+    countsOnly,
+    // The cap hides detail, never scale — and the terminal review is where the
+    // rest of it is, which the panel says at the bottom of every review.
+    note: countsOnly
+      ? "Too large to show here — the counts above are exact, and the full line-by-line review is in the terminal."
+      : null,
+    pins,
+  };
+}
+
+/**
+ * Turn the CLI's `review` object into rows the card can draw.
+ *
+ * Two rules do the work here, and both come from the CLI's own semantics:
+ *
+ *  1. `change` follows an item's IDENTITY, not its bytes. An inline skill whose
+ *     body was edited still reads `unchanged`, with the byte story in its pins
+ *     and its `diff`. So an item is marked changed when EITHER moved — reading
+ *     `change` alone would show a re-review where nothing appears to have
+ *     changed, which is the exact question the re-review is asking.
+ *  2. `prior_recorded: false` means the marks carry no information: there is no
+ *     recorded surface to compare against, so every item reads `added` and
+ *     marking all of them says nothing. That review is a first consent, and it
+ *     is drawn without marks and without diffs.
+ *
+ * `showDiffs` is the panel's context (a drifted project, or a re-review) — a
+ * never-approved project must never be told its content "changed since your
+ * last yes", because there was no last yes.
+ */
+export function deriveAgentstackReviewCard(
+  review: AgentstackReviewLike,
+  options: { readonly showDiffs: boolean },
+): AgentstackReviewCardView {
+  const marks = review.prior_recorded;
+  const showDiffs = options.showDiffs && review.prior_recorded;
+  const rows = review.items.map((item, i): AgentstackReviewRow => {
+    const bytesMoved = item.diff?.status === "changed";
+    const badge: "added" | "changed" | null = !marks
+      ? null
+      : item.change === "added"
+        ? "added"
+        : item.change === "changed" || bytesMoved
+          ? "changed"
+          : null;
+    const recognized = item.recognized_other_projects;
+    return {
+      key: `${i}-${item.kind}-${item.name}`,
+      kind: sanitizeAgentstackRecordedText(item.kind, REVIEW_TEXT_MAX),
+      name: sanitizeAgentstackRecordedText(item.name, REVIEW_TEXT_MAX),
+      identity: sanitizeAgentstackRecordedText(item.identity, REVIEW_TEXT_MAX),
+      badge,
+      facts: reviewFacts(item),
+      pinned: item.pin !== null,
+      // "already approved", never "safe" and never a count that could be read
+      // as a vote: other projects' decisions do not lower this project's gate.
+      recognition:
+        typeof recognized === "number" && recognized > 0
+          ? `these exact contents are already approved in ${countOf(recognized, "other project")} on this machine`
+          : null,
+      diff: showDiffs && item.diff !== null ? reviewDiffView(item, item.diff) : null,
+    };
+  });
+  return {
+    rows,
+    removed: review.removed.map((r, i) => ({
+      key: `${i}-${r.kind}-${r.name}`,
+      kind: sanitizeAgentstackRecordedText(r.kind, REVIEW_TEXT_MAX),
+      name: sanitizeAgentstackRecordedText(r.name, REVIEW_TEXT_MAX),
+      identity: sanitizeAgentstackRecordedText(r.identity, REVIEW_TEXT_MAX),
+    })),
+    showsDiff: rows.some((r) => r.diff !== null),
+    markedCount: rows.filter((r) => r.badge !== null).length,
+  };
+}
+
+/**
+ * The last sentence of the drifted-project paragraph.
+ *
+ * The terminal review stays authoritative either way — the panel keeps its
+ * `agentstack trust <path>` line at the bottom regardless. What changes is
+ * whether this screen may claim to mark the changes itself: it may only say so
+ * when a diff is actually on screen, which is why the card is derived first and
+ * this sentence is chosen from it.
+ */
+export function describeAgentstackDriftReviewTail(showsDiff: boolean): string {
+  return showsDiff
+    ? "What changed since your last yes is marked below."
+    : "The terminal review marks exactly what changed since your last yes.";
 }
 
 // ── version mismatch ─────────────────────────────────────────────────────────

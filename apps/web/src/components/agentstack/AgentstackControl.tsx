@@ -77,7 +77,9 @@ import {
   deriveAgentstackProbeRows,
   deriveAgentstackShareFacts,
   deriveAgentstackProtectionRows,
+  deriveAgentstackReviewCard,
   deriveAgentstackStatusChip,
+  describeAgentstackDriftReviewTail,
   describeAgentstackDriftStory,
   describeAgentstackFindingSection,
   describeAgentstackProbeSkip,
@@ -115,6 +117,8 @@ import {
   type AgentstackOverviewRow,
   type AgentstackParsedDiff,
   type AgentstackPrimaryConcern,
+  type AgentstackReviewCardView,
+  type AgentstackReviewRow,
   type AgentstackRowLevel,
   type AgentstackToolsetRow,
   type AgentstackUndoLedgerRow,
@@ -204,6 +208,17 @@ const FEATURE_TRUST_SERVER_BLOCKERS = "trust-server-blockers-v1";
  *  executable surface as smaller than it is. Without the name the review
  *  degrades to the pre-card rendering and never sniffs the fields. */
 const FEATURE_TRUST_REVIEW_CARD = "trust-review-card-v1";
+/** The per-item consent card: every declared capability marked against the
+ *  surface the last yes recorded, with the lines that moved for the pinned
+ *  kinds. Without the name the review keeps exactly its pre-card shape and
+ *  points at the terminal for what changed — the `review` object is never
+ *  sniffed off the payload. */
+const FEATURE_TRUST_CARD_DIFF = "trust-card-diff-v1";
+/** Skill loads in the activity feed. The gate decides whether the READ asks
+ *  for them at all: an older binary refuses `--include-loads` with a usage
+ *  error rather than ignoring it, which would turn the whole feed into a read
+ *  failure — so the name is what keeps the flag off the argv. */
+const FEATURE_ACTIVITY_SKILL_LOAD = "activity-skill-load-v1";
 /** `doctor.readiness` — the honest "is this project actually live?" verdict.
  *  `state` answers only "did any check find something to repair?", which reads
  *  "ready" over an untrusted, never-activated project; this panel's Ready chip
@@ -553,6 +568,17 @@ export function AgentstackControl({
   const projectEpoch = useRef(0);
   /** Bounds the prime retries — see the prime effect below. Per project. */
   const primeAttempts = useRef(0);
+  /**
+   * Whether the last status read advertised `activity-skill-load-v1`, and so
+   * whether the next activity read may ask for skill loads.
+   *
+   * A ref rather than derived state because the two reads are issued together:
+   * putting the flag in `refresh`'s dependencies would rebuild the poll
+   * interval on every status update. It starts false, so the first read of a
+   * session is exactly the read this panel has always made, and an older CLI
+   * never sees the flag at all.
+   */
+  const includeLoads = useRef(false);
   /** The project every piece of state above describes. */
   const [stateProjectId, setStateProjectId] = useState(projectId);
   if (stateProjectId !== projectId) {
@@ -567,6 +593,9 @@ export function AgentstackControl({
     setStateProjectId(projectId);
     projectEpoch.current += 1;
     primeAttempts.current = 0;
+    // A switch can land on another environment with an older binary; the next
+    // status read re-establishes it, and one un-merged feed is the safe miss.
+    includeLoads.current = false;
     setOpen(false);
     setHomeView("card");
     setManageTab(null);
@@ -629,14 +658,27 @@ export function AgentstackControl({
     const epoch = projectEpoch.current;
     const [statusResult, activityResult, workflowResult, toolsetsResult] = await Promise.all([
       fetchStatus({ environmentId, input }),
-      fetchActivity({ environmentId, input }),
+      fetchActivity({
+        environmentId,
+        // Asked for only under the advertised contract; the server turns the
+        // boolean into one fixed literal flag. An older CLI would refuse the
+        // unknown flag and the whole feed would read as a failure.
+        input: includeLoads.current ? { ...input, includeLoads: true } : input,
+      }),
       fetchWorkflow({ environmentId, input }),
       fetchToolsets({ environmentId, input }),
     ]);
     // The snapshot is keyed by the project this read was FOR, so it is
     // correct to keep even when the epoch moved on below — it is exactly
     // what the reset block replays when this project comes back.
-    if (statusResult._tag === "Success") statusByProject.set(projectId, statusResult.value);
+    if (statusResult._tag === "Success") {
+      statusByProject.set(projectId, statusResult.value);
+      // Negotiated off the status envelope, for the NEXT activity read.
+      includeLoads.current = hasAgentstackFeature(
+        statusResult.value.features,
+        FEATURE_ACTIVITY_SKILL_LOAD,
+      );
+    }
     // A project switch happened while these were in flight: the results
     // describe the old project and the state now belongs to the new one.
     if (epoch !== projectEpoch.current) return;
@@ -965,6 +1007,9 @@ export function AgentstackControl({
   const canTrustPreview = hasAgentstackFeature(features, FEATURE_TRUST_PREVIEW);
   const canServerBlockers = hasAgentstackFeature(features, FEATURE_TRUST_SERVER_BLOCKERS);
   const canReviewCard = hasAgentstackFeature(features, FEATURE_TRUST_REVIEW_CARD);
+  const canCardDiff = hasAgentstackFeature(features, FEATURE_TRUST_CARD_DIFF);
+  // `activity-skill-load-v1` is gated where the READ is issued, not here: see
+  // the `includeLoads` ref, which the same negotiation feeds.
   const canReadReadiness = hasAgentstackFeature(features, FEATURE_STATUS_HONESTY);
   const canDiff = hasAgentstackFeature(features, FEATURE_DIFF);
   const canDiffOwnership = hasAgentstackFeature(features, FEATURE_DIFF_OWNERSHIP);
@@ -1415,6 +1460,7 @@ export function AgentstackControl({
             canTrustPreview={canTrustPreview}
             canServerBlockers={canServerBlockers}
             canReviewCard={canReviewCard}
+            canCardDiff={canCardDiff}
             canRemoveCapabilities={canRemoveCapabilities}
             previewProfileEdit={previewProfileEdit}
             applyProfileEdit={applyProfileEdit}
@@ -1955,6 +2001,7 @@ function TrustReviewPanel({
   canTrustPreview,
   canServerBlockers,
   canReviewCard,
+  canCardDiff,
   canRemoveCapabilities,
   previewProfileEdit,
   applyProfileEdit,
@@ -1981,6 +2028,11 @@ function TrustReviewPanel({
    *  policy and the machine ceiling ride on the preview. False degrades to
    *  the pre-card rendering and never sniffs the fields. */
   canReviewCard: boolean;
+  /** The CLI advertises `trust-card-diff-v1`: the preview carries a per-item
+   *  `review` marked against the surface the last yes recorded. False renders
+   *  exactly the pre-card review, terminal-pointing sentences included, and
+   *  never reads the field. */
+  canCardDiff: boolean;
   /** The CLI advertises digest-bound project manifest removal. */
   canRemoveCapabilities: boolean;
   previewProfileEdit: (
@@ -2094,6 +2146,17 @@ function TrustReviewPanel({
     settings: canReviewCard ? (preview?.settings?.length ?? preview?.counts.settings ?? 0) : 0,
   });
 
+  // The per-item card. Read only under `trust-card-diff-v1`; diffs are drawn
+  // only where there is a prior yes to compare against, so a never-approved
+  // project is never told its content "changed since your last yes".
+  const review = canCardDiff ? (preview?.review ?? null) : null;
+  const card =
+    review === null
+      ? null
+      : deriveAgentstackReviewCard(review, {
+          showDiffs: state === "drifted" || review.re_review,
+        });
+
   if (removeFlow.phase !== "idle") {
     return (
       <EditFlowCard
@@ -2127,7 +2190,7 @@ function TrustReviewPanel({
             {state === "trusted"
               ? "You approved this project at exactly the contents below. Change what it declares, or what those declarations point at, and the review re-opens."
               : state === "drifted"
-                ? "You approved this project before, but its contents changed since — look over what it asks for now and say yes again. The terminal review marks exactly what changed since your last yes."
+                ? `You approved this project before, but its contents changed since — look over what it asks for now and say yes again. ${describeAgentstackDriftReviewTail(card?.showsDiff === true)}`
                 : "This project is inert until you review it. Look over what it would be allowed to run and contact, then give your yes."}
             {preview.re_trust && state === "untrusted" ? " You approved it before." : ""}
           </p>
@@ -2372,6 +2435,13 @@ function TrustReviewPanel({
             </div>
           ) : null}
 
+          {/* `trust-card-diff-v1` — the same per-item review the terminal
+              prints, marked against the surface the last yes recorded. Drawn
+              below the sections above rather than replacing them: those answer
+              "what is this project allowed to do", this one answers "what is
+              different since I last said yes". */}
+          {card !== null ? <TrustReviewCard card={card} /> : null}
+
           {/* Said here rather than left to be discovered by looking for a
               control that does not exist. Approval is granted over one digest
               of the whole surface, so there is no per-item opt-out to hunt
@@ -2484,6 +2554,140 @@ function TrustReviewPanel({
         </div>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * The per-item consent card (`trust-card-diff-v1`).
+ *
+ * One row per declared capability, in the CLI's own order, marked against the
+ * surface the last yes recorded. Everything drawn here is derived in
+ * `deriveAgentstackReviewCard` — including whether a diff may be shown at all —
+ * so this component only lays out what it is handed.
+ */
+function TrustReviewCard({ card }: { card: AgentstackReviewCardView }) {
+  if (card.rows.length === 0 && card.removed.length === 0) return null;
+  return (
+    <div>
+      <p className="mb-1 text-xs font-semibold text-foreground">Item by item</p>
+      <p className="mb-1.5 text-[10.5px] leading-relaxed text-muted-foreground/70">
+        {card.markedCount > 0
+          ? "Marked against what your last yes covered."
+          : "Everything this project declares, and what each one is allowed to do."}
+      </p>
+      <ul className="flex flex-col gap-1">
+        {card.rows.map((row) => (
+          <TrustReviewCardRow key={row.key} row={row} />
+        ))}
+      </ul>
+      {card.removed.length > 0 ? (
+        <div className="mt-2">
+          <p className="mb-1 text-xs font-semibold text-foreground">No longer declared</p>
+          {/* The reverse state, said out loud: these were covered by the last
+              yes and are not on this surface, so approving drops them. */}
+          <p className="mb-1 text-[10.5px] leading-relaxed text-muted-foreground/70">
+            Your last yes covered these. This project no longer declares them.
+          </p>
+          <ul className="flex flex-col gap-0.5">
+            {card.removed.map((r) => (
+              <li key={r.key} className="text-[11px] leading-relaxed text-muted-foreground">
+                <span className="font-semibold text-foreground">{r.name || r.kind}</span>{" "}
+                <span className="text-muted-foreground/70">{r.kind}</span>{" "}
+                {r.identity !== "" ? (
+                  <code className="break-all font-mono text-[10.5px] text-muted-foreground/80">
+                    {r.identity}
+                  </code>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** One capability's row: what it is, what it may do, and what moved. */
+function TrustReviewCardRow({ row }: { row: AgentstackReviewRow }) {
+  return (
+    <li className="rounded-lg border border-border/50 px-2.5 py-1.5">
+      <div className="flex items-start gap-2">
+        <span className="min-w-0 flex-1 text-[11px] leading-relaxed">
+          <span className="font-semibold text-foreground">{row.name || row.kind}</span>{" "}
+          {row.name !== "" ? <span className="text-muted-foreground/70">{row.kind}</span> : null}
+          {row.identity !== "" ? (
+            <>
+              {" "}
+              <code className="break-all font-mono text-[10.5px] text-muted-foreground/80">
+                {row.identity}
+              </code>
+            </>
+          ) : null}
+        </span>
+        {/* Only a real mark earns a badge: an unchanged item gets none, so the
+            handful that moved are the ones the eye lands on. */}
+        {row.badge !== null ? (
+          <span
+            className={cn(
+              "shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold",
+              row.badge === "changed"
+                ? "bg-warning/10 text-warning-foreground"
+                : "bg-foreground/[0.06] text-muted-foreground",
+            )}
+          >
+            {row.badge}
+          </span>
+        ) : null}
+      </div>
+      {row.facts.length > 0 ? (
+        <ul className="mt-0.5 flex flex-col gap-0.5">
+          {row.facts.map((f) => (
+            <li key={f.key} className="text-[10.5px] leading-relaxed text-muted-foreground">
+              {f.key}:{" "}
+              <code className="break-all font-mono text-muted-foreground/90">{f.value}</code>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {row.pinned || row.recognition !== null ? (
+        <p className="mt-0.5 text-[10.5px] leading-relaxed text-muted-foreground/70">
+          {row.pinned ? "pinned — a byte change re-opens this review" : null}
+          {row.pinned && row.recognition !== null ? " · " : null}
+          {row.recognition}
+        </p>
+      ) : null}
+      {row.diff !== null ? (
+        <div className="mt-1 overflow-hidden rounded border border-border/50">
+          {row.diff.headline !== null || row.diff.pins !== null ? (
+            <p className="bg-foreground/[0.02] px-2 py-1 text-[10.5px] leading-relaxed text-muted-foreground">
+              {row.diff.headline}
+              {row.diff.headline !== null && row.diff.pins !== null ? " · " : null}
+              {row.diff.pins !== null ? (
+                <span className="font-mono text-muted-foreground/70">{row.diff.pins}</span>
+              ) : null}
+            </p>
+          ) : null}
+          {row.diff.files.map((f) => (
+            <div key={f.key}>
+              <p className="flex items-center gap-2 bg-foreground/[0.02] px-2 py-1 text-[10.5px]">
+                <code className="min-w-0 flex-1 break-all font-mono text-muted-foreground">
+                  {f.path}
+                </code>
+                <span className="shrink-0 font-mono text-muted-foreground/70">{f.counts}</span>
+              </p>
+              {f.parsed !== null ? <DiffLines parsed={f.parsed} /> : null}
+            </div>
+          ))}
+          {/* What this view is NOT showing. The terminal review stays
+              authoritative, and the line naming it is right below the card. */}
+          {row.diff.note !== null ? (
+            <p className="border-t border-border/40 px-2 py-1 text-[10.5px] leading-relaxed text-muted-foreground/70">
+              {row.diff.note}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+    </li>
   );
 }
 
@@ -7471,22 +7675,40 @@ function ActivityPanel({ activity }: { activity: AgentstackActivity | null }) {
       {rows.map((row) => (
         <li className="flex flex-col gap-0.5 px-1 text-[11px]" key={row.key}>
           <div className="flex items-center gap-2">
-            <span className={cn("size-1.5 shrink-0 rounded-full", OUTCOME_DOT[row.outcome])} />
+            {/* A load was neither allowed nor denied, so it gets the neutral
+                marker and none of the outcome vocabulary: colouring it green
+                would read as "this was permitted", which nothing decided. */}
+            {row.kind === "load" ? (
+              <ScrollText className="size-3 shrink-0 text-muted-foreground/60" />
+            ) : (
+              <span className={cn("size-1.5 shrink-0 rounded-full", OUTCOME_DOT[row.outcome])} />
+            )}
             <span
               className={cn(
                 "min-w-0 flex-1 truncate font-mono",
-                row.outcome === "denied" ? "text-warning-foreground" : "text-muted-foreground",
+                row.kind === "call" && row.outcome === "denied"
+                  ? "text-warning-foreground"
+                  : "text-muted-foreground",
               )}
               title={row.label}
             >
               {row.label}
             </span>
+            {/* Said in words, because a skill entering the agent's context is a
+                different event from a call and the row must not be read as one. */}
+            {row.kind === "load" ? (
+              <span className="shrink-0 text-muted-foreground/60">skill loaded</span>
+            ) : null}
             {/* A call made inside a workflow run is otherwise indistinguishable
                 from one the user made directly. */}
             {row.runShort ? (
               <span
                 className="shrink-0 rounded bg-foreground/[0.05] px-1 font-mono text-[10px] text-muted-foreground/70"
-                title={`Brokered inside run ${row.run}`}
+                title={
+                  row.kind === "load"
+                    ? `Loaded inside run ${row.run}`
+                    : `Brokered inside run ${row.run}`
+                }
               >
                 run {row.runShort}
               </span>
@@ -7494,7 +7716,7 @@ function ActivityPanel({ activity }: { activity: AgentstackActivity | null }) {
             {/* The digest rides on the same line rather than claiming a second
                 one: it is here so repeated identical calls are recognisable,
                 which does not warrant doubling the height of every row. */}
-            {row.digest ? (
+            {row.kind === "call" && row.digest ? (
               <span
                 className="shrink-0 font-mono text-[10px] text-muted-foreground/45"
                 title="Digest of this call's arguments — the values are never recorded"
@@ -7502,20 +7724,24 @@ function ActivityPanel({ activity }: { activity: AgentstackActivity | null }) {
                 {row.digest}
               </span>
             ) : null}
-            {row.duration ? (
+            {row.kind === "call" && row.duration ? (
               <span className="shrink-0 tabular-nums text-muted-foreground/50">{row.duration}</span>
             ) : null}
             <span className="shrink-0 text-muted-foreground/60">{row.age}</span>
           </div>
           {/* Why it ended that way — the whole reason this feed exists, and the
-              only thing that earns a second line. */}
+              only thing that earns a second line. On a load it is the agent's
+              own words for why it wanted the skill, which is informational and
+              therefore muted rather than coloured. */}
           {row.reason ? (
             <span
               className={cn(
                 "pl-3.5 leading-snug",
-                row.outcome === "denied"
-                  ? "text-warning-foreground/90"
-                  : "text-destructive-foreground/90",
+                row.kind === "load"
+                  ? "text-muted-foreground/80"
+                  : row.outcome === "denied"
+                    ? "text-warning-foreground/90"
+                    : "text-destructive-foreground/90",
               )}
             >
               {row.reason}

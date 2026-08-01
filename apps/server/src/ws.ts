@@ -1442,6 +1442,10 @@ const makeWsRpcLayer = (
                 agentstackCli.activity({
                   workspaceRoot,
                   limit: input.limit ?? AgentstackCli.ACTIVITY_LIMIT_DEFAULT,
+                  // A validated boolean in, one fixed literal flag out. Passed
+                  // through only when true, so the argv for a client that never
+                  // asks stays byte-identical to what it always was.
+                  ...(input.includeLoads === true ? { includeLoads: true } : {}),
                 }),
               ),
             ),

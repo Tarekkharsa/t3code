@@ -1,5 +1,5 @@
 import {
-  AgentstackCallEvent,
+  AgentstackActivityEvent,
   AgentstackDiffReport,
   AgentstackDoctorReport,
   AgentstackLibraryIndex,
@@ -61,6 +61,14 @@ export interface AgentstackStatusRequest {
 export interface AgentstackActivityRequest {
   readonly workspaceRoot: string;
   readonly limit: number;
+  /**
+   * Merge skill loads into the feed (`activity-skill-load-v1`). A boolean, not
+   * a string: all it can ever decide is whether ONE fixed literal flag is in
+   * the argv, so nothing client-supplied reaches the command line. The UI gate
+   * is what keeps it off an older binary, which refuses an unknown flag with a
+   * usage error instead of ignoring it.
+   */
+  readonly includeLoads?: boolean;
 }
 
 /** Server-internal request naming a resolved workspace root; same path rule. */
@@ -398,8 +406,11 @@ export function parseDoctorReport(stdout: string) {
 
 // Only the `events` array matters here; the rest of the report shape may
 // grow without breaking this decoder. Absent/invalid input degrades to [].
-const decodeCallEvents = Schema.decodeUnknownOption(
-  Schema.fromJsonString(Schema.Struct({ events: Schema.Array(AgentstackCallEvent) })),
+// The row schema is the union, so a merged feed (`--include-loads`) decodes
+// without loosening anything: an un-kinded call row is still a call row, and
+// the two members share no shape a row could be read as the wrong one.
+const decodeActivityEvents = Schema.decodeUnknownOption(
+  Schema.fromJsonString(Schema.Struct({ events: Schema.Array(AgentstackActivityEvent) })),
 );
 
 /**
@@ -409,8 +420,8 @@ const decodeCallEvents = Schema.decodeUnknownOption(
  * were brokered" apart from "we could not read the log", because only one of
  * those is a statement about what the agents did.
  */
-export function readCallEvents(stdout: string): ReadonlyArray<AgentstackCallEvent> | null {
-  return Option.getOrNull(decodeCallEvents(stdout))?.events ?? null;
+export function readCallEvents(stdout: string): ReadonlyArray<AgentstackActivityEvent> | null {
+  return Option.getOrNull(decodeActivityEvents(stdout))?.events ?? null;
 }
 
 const decodeWorkflowList = Schema.decodeUnknownOption(
@@ -983,6 +994,10 @@ export const make = Effect.fn("AgentstackCli.make")(function* () {
         String(limit),
         "--project",
         input.workspaceRoot,
+        // The one and only argv this contract adds: a fixed literal, appended
+        // or not. The boolean cannot spell anything else, so the feed stays a
+        // read with a closed command line.
+        ...(input.includeLoads === true ? ["--include-loads"] : []),
       ]).pipe(
         Effect.match({
           onFailure: (error) =>

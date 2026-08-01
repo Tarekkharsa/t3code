@@ -269,8 +269,52 @@ export const AgentstackCallEvent = Schema.Struct({
   run: Schema.optionalKey(Schema.String),
   args_digest: Schema.optionalKey(Schema.String),
   detail: Schema.optionalKey(Schema.String),
+  /**
+   * The row discriminant a CLI advertising `activity-skill-load-v1` stamps on
+   * every row of the merged feed. `optionalKey`, because without
+   * `--include-loads` the feed is byte-identical to the pre-contract one: call
+   * rows carry no `kind` at all, and that older shape must keep decoding.
+   */
+  kind: Schema.optionalKey(Schema.Literal("call")),
 });
 export type AgentstackCallEvent = typeof AgentstackCallEvent.Type;
+
+/**
+ * One skill the agent pulled into its own context through the agentstack MCP
+ * server (`activity-skill-load-v1`), from `~/.agentstack/audit/loads.jsonl`.
+ *
+ * A load is NOT a call: nothing was brokered, nothing was allowed or denied,
+ * and the CLI deliberately keeps loads out of every call count. The row exists
+ * because a skill entering context is a real change to what the agent was told
+ * to do, which the call feed alone never showed.
+ *
+ * `name` and `reason` are supplied by the MCP caller — hostile input, bounded
+ * by the recorder and bounded again before they reach the DOM.
+ */
+export const AgentstackSkillLoadEvent = Schema.Struct({
+  kind: Schema.Literal("skill_load"),
+  ts: Schema.Number,
+  name: Schema.String,
+  /** Why the agent said it needed the skill, in its own words. */
+  reason: Schema.String,
+  run: Schema.optionalKey(Schema.String),
+  /** The resolved `.agentstack` directory, when the load had one — a builtin
+   *  manual load is served with no manifest directory at all. */
+  project: Schema.optionalKey(Schema.String),
+});
+export type AgentstackSkillLoadEvent = typeof AgentstackSkillLoadEvent.Type;
+
+/**
+ * One row of the activity feed. The two members are disjoint by construction —
+ * a load row carries no `server`/`tool`/`outcome`, a call row can never claim
+ * `kind: "skill_load"` — so an older, un-kinded call row still decodes as a
+ * call and no row can be read as the wrong thing.
+ */
+export const AgentstackActivityEvent = Schema.Union([
+  AgentstackCallEvent,
+  AgentstackSkillLoadEvent,
+]);
+export type AgentstackActivityEvent = typeof AgentstackActivityEvent.Type;
 
 export const AgentstackActivityInput = Schema.Struct({
   projectId: ProjectId,
@@ -278,13 +322,21 @@ export const AgentstackActivityInput = Schema.Struct({
   threadId: Schema.optionalKey(ThreadId),
   /** Maximum events to return; the server clamps this. */
   limit: Schema.optionalKey(Schema.Number),
+  /**
+   * Ask for skill loads to be merged into the feed. The server turns this into
+   * one fixed literal flag (`--include-loads`); nothing client-supplied ever
+   * reaches argv. Only set it under `activity-skill-load-v1` — an older binary
+   * rejects the unknown flag outright rather than ignoring it, which would turn
+   * the whole read into a failure.
+   */
+  includeLoads: Schema.optionalKey(Schema.Boolean),
 });
 export type AgentstackActivityInput = typeof AgentstackActivityInput.Type;
 
 export const AgentstackActivity = Schema.Struct({
   installed: Schema.Boolean,
   /** Newest last, matching audit-log append order. */
-  events: Schema.Array(AgentstackCallEvent),
+  events: Schema.Array(AgentstackActivityEvent),
   /**
    * The read itself failed — the CLI is present but `report calls` could not be
    * run or its output could not be parsed.
@@ -502,6 +554,112 @@ export const AgentstackTrustSetting = Schema.Struct({
 });
 export type AgentstackTrustSetting = typeof AgentstackTrustSetting.Type;
 
+// ── consent card (trust-card-diff-v1) ────────────────────────────────────────
+// The per-item review the terminal card has always printed, as data: one row
+// per declared capability, marked added/changed/unchanged against the surface
+// the last yes recorded, and — for the pinned kinds — the actual lines that
+// moved between the two approved snapshots. Read-only and snake_case verbatim.
+
+/** One file inside a pinned item's diff. */
+export const AgentstackReviewFileChange = Schema.Struct({
+  path: Schema.String,
+  change: Schema.Literals(["added", "removed", "modified"]),
+  /** Zero for an added/removed file: there is no body to compare on one side,
+   *  and the fact worth reporting is that the file appeared or disappeared. */
+  added: Schema.Number,
+  removed: Schema.Number,
+  /**
+   * The changed lines, already sanitized by the CLI, in unified-diff marker
+   * form (`+`/`-`/context). `null` when the CLI capped the diff or the file has
+   * no body to show — the counts above stay exact either way, because the cap
+   * hides detail and never scale.
+   */
+  lines: Schema.optionalKey(Schema.NullOr(Schema.Array(Schema.String))),
+});
+export type AgentstackReviewFileChange = typeof AgentstackReviewFileChange.Type;
+
+/**
+ * A pinned item's byte-level story, pin-to-pin (never pin-to-live — locating
+ * live bytes would reach git worktree materialization, and a preview writes
+ * nothing). `no_snapshot` is the honest degrade: the content moved but one of
+ * the two snapshots is gone, so there is nothing to diff against.
+ */
+export const AgentstackReviewDiff = Schema.Struct({
+  status: Schema.Literals(["no_snapshot", "unchanged", "changed"]),
+  /** e.g. "changed 2 lines"; null when there is nothing to headline. */
+  headline: Schema.NullOr(Schema.String),
+  files: Schema.Array(AgentstackReviewFileChange),
+  /** True when the change was too large to carry — `lines` is null throughout
+   *  and the terminal review holds the full text. */
+  capped: Schema.Boolean,
+});
+export type AgentstackReviewDiff = typeof AgentstackReviewDiff.Type;
+
+/**
+ * One capability in the review.
+ *
+ * `change` follows the item's IDENTITY (what it is and what it points at), not
+ * its bytes: an inline skill whose body was edited keeps `identity: "inline"`
+ * and therefore reads `unchanged`, while `pin != prior_pin` and
+ * `diff.status: "changed"` carry the byte story. A consumer that wants "did
+ * anything about this item move" must read BOTH — `change === "changed" ||
+ * diff?.status === "changed"`.
+ *
+ * `kind` stays a plain string: the CLI may add kinds (it already emits server,
+ * secrets, extension, workflow, skill, instruction, hook, settings, policy),
+ * and an unknown kind must decode and render generically rather than vanish.
+ */
+export const AgentstackReviewItem = Schema.Struct({
+  kind: Schema.String,
+  /** Empty for kinds that are their own row (`secrets`, `policy`). */
+  name: Schema.String,
+  change: Schema.Literals(["added", "changed", "unchanged"]),
+  /** What this item IS, in the CLI's own words — the string the grant recorded
+   *  and the preview compares against. Sanitized display text. */
+  identity: Schema.String,
+  /** Commands it runs on this machine. */
+  runs: Schema.Array(Schema.String),
+  /** Hosts it reaches over the network. */
+  contacts: Schema.Array(Schema.String),
+  /** Secret refs it becomes able to read. */
+  may_read: Schema.Array(Schema.String),
+  /** Bare lowercase hex (NOT `sha256:`-prefixed — the recognition index is
+   *  keyed on this exact string), or null for the kinds that are not pinned. */
+  pin: Schema.NullOr(Schema.String),
+  prior_pin: Schema.NullOr(Schema.String),
+  /**
+   * How many OTHER projects on this machine already approved these exact
+   * bytes. Display only: it never changes the gate, and null means the CLI
+   * could not read its recognition index (not "zero").
+   */
+  recognized_other_projects: Schema.NullOr(Schema.Number),
+  /** An object for the pinned kinds (skills, instructions), null otherwise. */
+  diff: Schema.NullOr(AgentstackReviewDiff),
+});
+export type AgentstackReviewItem = typeof AgentstackReviewItem.Type;
+
+/** A capability the last yes covered that this surface no longer declares. */
+export const AgentstackReviewRemoved = Schema.Struct({
+  kind: Schema.String,
+  name: Schema.String,
+  identity: Schema.String,
+});
+export type AgentstackReviewRemoved = typeof AgentstackReviewRemoved.Type;
+
+export const AgentstackTrustReview = Schema.Struct({
+  /** This project was trusted before, so the marks compare against something. */
+  re_review: Schema.Boolean,
+  /**
+   * A prior surface was actually recorded. False makes every item read
+   * `added` — the honest reading for a first consent — and is the flag that
+   * says the marks carry no information rather than claiming "all new".
+   */
+  prior_recorded: Schema.Boolean,
+  items: Schema.Array(AgentstackReviewItem),
+  removed: Schema.Array(AgentstackReviewRemoved),
+});
+export type AgentstackTrustReview = typeof AgentstackTrustReview.Type;
+
 export const AgentstackTrustPreview = Schema.Struct({
   path: Schema.String,
   /** trusted | drifted | untrusted */
@@ -561,6 +719,8 @@ export const AgentstackTrustPreview = Schema.Struct({
    * optional.
    */
   surface_digest: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  /** Present under `trust-card-diff-v1`; absent on older CLIs. */
+  review: Schema.optionalKey(AgentstackTrustReview),
   ...AgentstackEnvelopeFields,
 });
 export type AgentstackTrustPreview = typeof AgentstackTrustPreview.Type;
