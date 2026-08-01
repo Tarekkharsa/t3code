@@ -68,6 +68,7 @@ import { TomlEditor } from "./TomlEditor";
 import {
   AGENTSTACK_ACTION_META as ACTION_META,
   agentstackFeatureKnownMissing,
+  agentstackReadIsStale,
   classifyAgentstackEditPreview,
   deriveAgentstackActivityRows,
   deriveAgentstackFindings,
@@ -566,6 +567,16 @@ export function AgentstackControl({
    * land A's posture in project B's state after a switch.
    */
   const projectEpoch = useRef(0);
+  /**
+   * Monotonic issue counter for `refresh`. The poll and an edit's own refresh
+   * run concurrently with no dedup, and each is seconds of subprocess work, so
+   * a read that STARTED before an edit can COMPLETE after the edit's refresh.
+   * Applied in completion order, that stale read paints the pre-edit toolset
+   * list back over the fresh one — the add appears to do nothing. Each refresh
+   * captures this before it awaits and drops its result if a newer read has
+   * since been issued, so only the most-recent read ever writes state.
+   */
+  const refreshSeq = useRef(0);
   /** Bounds the prime retries — see the prime effect below. Per project. */
   const primeAttempts = useRef(0);
   /**
@@ -655,7 +666,7 @@ export function AgentstackControl({
   );
 
   const refresh = useCallback(async () => {
-    const epoch = projectEpoch.current;
+    const order = { epoch: projectEpoch.current, seq: (refreshSeq.current += 1) };
     const [statusResult, activityResult, workflowResult, toolsetsResult] = await Promise.all([
       fetchStatus({ environmentId, input }),
       fetchActivity({
@@ -679,9 +690,11 @@ export function AgentstackControl({
         FEATURE_ACTIVITY_SKILL_LOAD,
       );
     }
-    // A project switch happened while these were in flight: the results
-    // describe the old project and the state now belongs to the new one.
-    if (epoch !== projectEpoch.current) return;
+    // A newer read has since been issued (a project switch, the poll, or an
+    // edit's own refresh): its answer supersedes this one, so this result must
+    // not land — in completion order it would paint stale data back over fresh.
+    if (agentstackReadIsStale(order, { epoch: projectEpoch.current, seq: refreshSeq.current }))
+      return;
     if (statusResult._tag === "Success") {
       setStatus(statusResult.value);
       setUnreachable(false);
@@ -4456,6 +4469,39 @@ function ToolsetRail({
 }
 
 /**
+ * The one-line "not reviewed yet" note above the library list.
+ *
+ * The load-bearing correction (this is why it is its own component and tested):
+ * a "needs review" user must NOT read this as "editing is off". Adding to and
+ * creating toolsets works right now and is saved immediately — review gates
+ * USING a toolset, not changing one. The earlier line ("added servers stay
+ * inert") read as "your edits won't register", which sent people away believing
+ * the panel was broken. Kept to one line at warning weight — the popover and
+ * Status tab already carry the full treatment — with the precise automatic-surface
+ * detail in the tooltip. Exported for its own render test.
+ */
+export function LibraryDriftNote({ onReviewTrust }: { onReviewTrust: () => void }) {
+  return (
+    <p
+      className="mx-3 mb-2 flex items-center gap-2 text-[10.5px] leading-relaxed text-warning-foreground"
+      title="Adding to and creating toolsets works now and saves right away. What waits for your review is using a toolset — until then AgentStack won't start or contact its servers on its own."
+    >
+      <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-warning" />
+      <span className="min-w-0 flex-1 truncate">
+        Not reviewed yet — you can still edit toolsets; using one waits for your review.
+      </span>
+      <button
+        type="button"
+        onClick={onReviewTrust}
+        className="shrink-0 font-medium text-warning-foreground underline-offset-2 hover:underline"
+      >
+        Review
+      </button>
+    </p>
+  );
+}
+
+/**
  * The right pane: the machine-wide library, with its filter pinned so it never
  * scrolls away from the list it filters.
  */
@@ -4541,33 +4587,7 @@ function LibraryPane({
           className="h-7 min-w-0 flex-1 rounded-lg border border-border/60 bg-background px-2.5 text-[11px] text-foreground placeholder:text-muted-foreground/60"
         />
       </div>
-      {untrusted ? (
-        // One line, not a card: the popover and the Status tab already carry
-        // the full not-reviewed treatment, and repeating it at card weight
-        // here made the same fact a third alarm. The precise version — adding
-        // is an explicit static apply that DOES write the manifest and render
-        // configs today; what stays inert until review is the automatic
-        // surface (auto-mode won't spawn or contact these servers or resolve
-        // their secrets, and declared extensions don't land) — lives in the
-        // tooltip. Saying "nothing renders" would promise a gate the CLI does
-        // not implement.
-        <p
-          className="mx-3 mb-2 flex items-center gap-2 text-[10.5px] leading-relaxed text-warning-foreground"
-          title="Adding still writes the manifest and renders your CLI configs — but until you review the project, auto mode won't run or contact these servers, and declared extensions stay unapplied."
-        >
-          <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-warning" />
-          <span className="min-w-0 flex-1 truncate">
-            Not reviewed yet — added servers stay inert in auto mode.
-          </span>
-          <button
-            type="button"
-            onClick={onReviewTrust}
-            className="shrink-0 font-medium text-warning-foreground underline-offset-2 hover:underline"
-          >
-            Review
-          </button>
-        </p>
-      ) : null}
+      {untrusted ? <LibraryDriftNote onReviewTrust={onReviewTrust} /> : null}
       <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
         {load.phase === "loading" ? (
           <p className="py-2 text-xs text-muted-foreground">Loading library…</p>

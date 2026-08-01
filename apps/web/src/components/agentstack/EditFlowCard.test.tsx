@@ -11,7 +11,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vite-plus/test";
 
-import { EditFlowCard } from "./AgentstackControl";
+import { EditFlowCard, LibraryDriftNote } from "./AgentstackControl";
 
 const CREATE = { kind: "create-profile", name: "web", skills: ["pdf"], servers: [] } as const;
 
@@ -163,6 +163,35 @@ describe("EditFlowCard — preview refusals", () => {
     expect(markup).not.toContain("no digest");
   });
 
+  it("surfaces an apply-time refusal verbatim instead of a bare failure", () => {
+    // The CLI can accept the preview (a digest is issued) and still refuse the
+    // apply — e.g. a live session fences a rename/delete. That refusal comes
+    // back as ok:false with the CLI's own sentence, and the panel must show
+    // THAT sentence (the actionable next step), not swallow it behind a generic
+    // "couldn't apply".
+    const APPLY_REFUSAL =
+      "won't rename 'web' while a session is using it — end the session first, then rename.";
+    const markup = renderToStaticMarkup(
+      <EditFlowCard
+        flow={{
+          phase: "done",
+          ok: false,
+          message: APPLY_REFUSAL,
+          title: 'Rename toolset "web"',
+          edit: { kind: "rename-profile", name: "web", to: "backend" },
+        }}
+        createNeedsActivation={false}
+        onActivate={null}
+        onConfirm={noop}
+        onBack={noop}
+      />,
+    );
+
+    expect(markup).toContain("Couldn&#x27;t apply");
+    expect(markup).toContain("end the session first");
+    expect(markup).not.toContain("The change could not be applied.");
+  });
+
   it("says couldn't-check for a preview that never answered, not old-CLI", () => {
     const markup = renderToStaticMarkup(
       <EditFlowCard
@@ -223,5 +252,26 @@ describe("EditFlowCard — project capability removal", () => {
     expect(markup).toContain("machine-wide library is untouched");
     expect(markup).toContain("re-locks and re-renders");
     expect(markup).not.toContain("library trash");
+  });
+});
+
+describe("LibraryDriftNote — the not-reviewed banner", () => {
+  it("tells a needs-review user their edits still register and only using waits", () => {
+    // The bug this copy fixes: "added servers stay inert" read as "editing is
+    // off", so a "Needs review" user concluded they could not add tools at all
+    // and left. Editing/creating a toolset works and saves now; what waits for
+    // review is USING one. The banner must say so and must not imply otherwise.
+    const markup = renderToStaticMarkup(<LibraryDriftNote onReviewTrust={() => {}} />);
+
+    expect(markup).toContain("you can still edit toolsets");
+    expect(markup).toContain("waits for your review");
+    // The old, misleading claim must be gone.
+    expect(markup).not.toContain("stay inert");
+    // Still an actionable review affordance.
+    expect(markup).toContain("Review");
+    // Primary copy stays in plain user vocabulary — no mechanism nouns.
+    expect(markup).not.toContain("manifest");
+    expect(markup).not.toContain("lock");
+    expect(markup).not.toContain("digest");
   });
 });

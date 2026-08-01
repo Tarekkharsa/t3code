@@ -784,6 +784,40 @@ export function classifyAgentstackEditPreview<
   return { kind: "unsupported" };
 }
 
+// ── read ordering guard ──────────────────────────────────────────────────────
+
+/**
+ * A read's ordering stamp: which project it was issued FOR (`epoch`) and its
+ * position in the issue order (`seq`). Every panel refresh captures one before
+ * it awaits and re-checks it after, so a slow read cannot land its result on
+ * top of a newer one.
+ */
+export interface AgentstackReadOrder {
+  readonly epoch: number;
+  readonly seq: number;
+}
+
+/**
+ * Whether a completed read is stale and must NOT be applied to state.
+ *
+ * The panel polls on a timer AND refreshes the instant an edit lands. Those two
+ * reads run concurrently with no dedup, and each is several seconds of
+ * subprocess work, so a poll that STARTED before an add can COMPLETE after the
+ * edit's own refresh — and, applied in completion order, would paint the
+ * pre-edit toolset list back over the fresh one. From the user's seat the add
+ * "did nothing": the rail count and the library row never move. The fix is to
+ * let only the most-recently-issued read write state. A read is stale when it
+ * was issued for a different project (`epoch` moved) OR a newer read has since
+ * been issued (`seq` moved) — in both cases a better answer is already on its
+ * way or already applied.
+ */
+export function agentstackReadIsStale(
+  issued: AgentstackReadOrder,
+  current: AgentstackReadOrder,
+): boolean {
+  return issued.epoch !== current.epoch || issued.seq !== current.seq;
+}
+
 // ── doctor probe (server startup test) ───────────────────────────────────────
 
 /** One stdio server's `doctor --probe` result, decoupled from the wire type. */

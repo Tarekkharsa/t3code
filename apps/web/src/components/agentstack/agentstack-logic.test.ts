@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   AGENTSTACK_FINDINGS_PREVIEW,
   agentstackFeatureKnownMissing,
+  agentstackReadIsStale,
   deriveAgentstackReviewCard,
   describeAgentstackDriftReviewTail,
   agentstackFindingAction,
@@ -2057,6 +2058,29 @@ describe("classifyAgentstackEditPreview", () => {
     expect(classifyAgentstackEditPreview({ preview: null, refusal: "  " }).kind).toBe(
       "unsupported",
     );
+  });
+});
+
+describe("agentstackReadIsStale", () => {
+  // The regression this guards: a toolset edit lands and refreshes, but a poll
+  // read that STARTED before the edit completes AFTER it and — applied in
+  // completion order — paints the pre-edit list back over the fresh one, so the
+  // add appears to do nothing (the rail count and library row never move). The
+  // guard drops any read a newer one has superseded.
+  it("keeps the read whose stamp is still current", () => {
+    expect(agentstackReadIsStale({ epoch: 3, seq: 7 }, { epoch: 3, seq: 7 })).toBe(false);
+  });
+
+  it("drops a read once a newer one has been issued for the same project", () => {
+    // The edit's own refresh is issued after the in-flight poll, so it holds the
+    // higher seq; when the older poll finally lands, its result is stale.
+    expect(agentstackReadIsStale({ epoch: 3, seq: 7 }, { epoch: 3, seq: 8 })).toBe(true);
+  });
+
+  it("drops a read whose project has since changed", () => {
+    // A switch bumps the epoch, so a read begun under the old project cannot
+    // land its answer in the new project's state even at the same seq.
+    expect(agentstackReadIsStale({ epoch: 3, seq: 7 }, { epoch: 4, seq: 7 })).toBe(true);
   });
 });
 
