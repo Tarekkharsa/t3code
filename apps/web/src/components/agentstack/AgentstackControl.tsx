@@ -2555,13 +2555,17 @@ function TrustReviewPanel({
                     : "Approve this project"}
               </button>
             )}
+            {/* "Done", not "Close": the dialog header already carries an X
+                named Close, and two controls with the same accessible name on
+                one screen is a screen reader announcing the same word twice
+                for two different exits. */}
             <button
               type="button"
               disabled={running}
               onClick={onClose}
               className="inline-flex h-7 items-center rounded-lg px-2.5 text-xs font-medium text-muted-foreground disabled:opacity-60"
             >
-              Close
+              Done
             </button>
           </div>
         </div>
@@ -3029,9 +3033,13 @@ function DriftScopeSection({
               rather than in a modal you dismiss before it takes effect. */}
           <div className="flex flex-col gap-1.5">
             <div className="flex items-baseline gap-2.5">
+              {/* Both scopes can drift at once and both sections carry these
+                  same two words, so the scope the `<h3>` shows visually is
+                  appended to the name assistive tech reads. */}
               <button
                 type="button"
                 disabled={disabled}
+                aria-label={`${edited > 0 ? "Keep edits" : "Keep disk"} — ${where}`}
                 onClick={() => onPick(adopt)}
                 className="inline-flex h-7 w-[6.5rem] shrink-0 items-center justify-center rounded-lg border border-success/40 bg-success/10 px-3 text-xs font-semibold text-success-foreground disabled:opacity-60"
               >
@@ -3046,6 +3054,7 @@ function DriftScopeSection({
               <button
                 type="button"
                 disabled={disabled}
+                aria-label={`Re-render — ${where}`}
                 onClick={() => onPick(apply)}
                 className="inline-flex h-7 w-[6.5rem] shrink-0 items-center justify-center rounded-lg border border-border/60 px-3 text-xs font-semibold text-muted-foreground hover:text-foreground disabled:opacity-60"
               >
@@ -3527,6 +3536,11 @@ function SetupTab(props: ManageProps) {
  * answer, not an error: the CLI will not start servers for a project that is
  * not trusted at its current bytes, and the way forward there is the trust
  * review, never a retry.
+ *
+ * Its exits say "Dismiss", not "Close". This card lives inside the Manage
+ * dialog, whose header already has an X named Close — and unlike that X, these
+ * put away the card, not the screen. Same word for both was one accessible name
+ * covering two different destinations.
  */
 export function StartupTest({
   state,
@@ -3580,7 +3594,7 @@ export function StartupTest({
           onClick={onCancel}
           className="self-start text-[11px] font-medium text-muted-foreground hover:text-foreground"
         >
-          Close
+          Dismiss
         </button>
       </div>
     );
@@ -3597,7 +3611,7 @@ export function StartupTest({
           onClick={onCancel}
           className="self-start text-[11px] font-medium text-muted-foreground hover:text-foreground"
         >
-          Close
+          Dismiss
         </button>
       </div>
     );
@@ -3620,7 +3634,7 @@ export function StartupTest({
             onClick={onCancel}
             className="text-[11px] font-medium text-muted-foreground hover:text-foreground"
           >
-            Close
+            Dismiss
           </button>
         </div>
       </div>
@@ -3650,7 +3664,7 @@ export function StartupTest({
         onClick={onCancel}
         className="self-start pt-1 text-[11px] font-medium text-muted-foreground hover:text-foreground"
       >
-        Close
+        Dismiss
       </button>
     </div>
   );
@@ -4262,24 +4276,18 @@ function ToolsetRail({
             // The row is the destination: selecting it is what makes a tick in
             // the library mean "in THIS toolset", so no row-level verb has to
             // carry the name.
+            // Not a `role="button"`: the row carries real buttons of its own
+            // (Stop/Use/Rename/Delete), and interactive-inside-interactive is
+            // invalid and unreachable by keyboard. The row's own verb lives on
+            // the name below — a native button — and this click is only the
+            // pointer convenience of hitting anywhere in the row.
             <div
               key={row.name}
-              role="button"
-              tabIndex={0}
-              aria-pressed={isSelected}
-              // The row carries its own verbs (Stop/Use/Rename/Delete) and a
-              // rename input; a click that landed on one of those was aimed at
-              // it, not at selecting the row.
+              // A click that landed on one of the row's own verbs or the
+              // rename input was aimed at it, not at selecting the row.
               onClick={(e) => {
                 if ((e.target as HTMLElement).closest("button,input")) return;
                 onSelect(row.name);
-              }}
-              onKeyDown={(e) => {
-                if (e.target !== e.currentTarget) return;
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  onSelect(row.name);
-                }
               }}
               className={cn(
                 "mb-1.5 flex cursor-pointer flex-col gap-1.5 rounded-lg border px-2.5 py-2",
@@ -4314,9 +4322,17 @@ function ToolsetRail({
                     className="h-6 min-w-0 flex-1 rounded-md border border-border/60 bg-background px-1.5 text-[12.5px] font-semibold text-foreground outline-none focus:border-border"
                   />
                 ) : (
-                  <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-foreground">
+                  // The row's selection verb, styled as the title it already
+                  // was — so keyboard users reach it in the same order they
+                  // read it, ahead of the row's Stop/Use/Rename/Delete.
+                  <button
+                    type="button"
+                    aria-pressed={isSelected}
+                    onClick={() => onSelect(row.name)}
+                    className="min-w-0 flex-1 truncate text-left text-[12.5px] font-semibold text-foreground"
+                  >
                     {row.name}
-                  </span>
+                  </button>
                 )}
                 {held && canSessions ? (
                   <Button

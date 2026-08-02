@@ -3,10 +3,22 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as PlatformError from "effect/PlatformError";
 import { ChildProcessSpawner } from "effect/unstable/process";
-import { vi } from "vite-plus/test";
+import { afterEach, beforeEach, vi } from "vite-plus/test";
 
 import * as ProcessRunner from "../processRunner.ts";
 import * as AgentstackCli from "./AgentstackCli.ts";
+
+// These tests assert the spawned command is the plain `agentstack` on PATH, so
+// a `T3CODE_AGENTSTACK_BIN` inherited from the developer's shell would fail
+// them. Empty is read as unset (`.trim()` makes it falsy), and only
+// AgentstackCli.e2e.test.ts opts into a real binary through that variable.
+beforeEach(() => {
+  vi.stubEnv("T3CODE_AGENTSTACK_BIN", "");
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 describe("AgentstackCli", () => {
   it.effect("reports agentstack as not installed when spawning returns ENOENT", () => {

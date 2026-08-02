@@ -135,14 +135,14 @@ function renderBlueprintReviewCard({
   const blueprint = parseWorkflowBlueprint(code);
   if (blueprint === null) return null;
   return (
-    <CodeHighlightErrorBoundary fallback={fallback}>
+    <RenderErrorBoundary fallback={fallback}>
       <BlueprintReviewCard
         blueprint={blueprint}
         theme={theme}
         isStreaming={false}
         onSendUserMessage={onSendUserMessage}
       />
-    </CodeHighlightErrorBoundary>
+    </RenderErrorBoundary>
   );
 }
 
