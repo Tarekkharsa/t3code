@@ -27,6 +27,7 @@ import {
 
 import { cn } from "~/lib/utils";
 import { buttonVariants } from "~/components/ui/button";
+import { NOTIFICATION_LAYER_CLASS } from "~/components/ui/layers";
 import { useComposerDraftStore } from "~/composerDraftStore";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { resolveThreadRouteTarget } from "~/threadRoutes";
@@ -98,6 +99,28 @@ function errorDescriptionClampClass(type: unknown, description: unknown): string
   }
   return "line-clamp-4";
 }
+
+/**
+ * The toast stack's own box: pinned under the header, in the corner named by
+ * `position`.
+ *
+ * Hoisted out of the render and exported so the stacking order can be
+ * asserted. The layer is deliberately *below* popovers and menus — this box
+ * covers the corner the header's own popovers drop into, and when it sat on
+ * top of them a persistent toast quietly ate every click aimed at the panel
+ * beneath it. See `layers.ts`.
+ */
+const TOAST_VIEWPORT_CLASS = cn(
+  NOTIFICATION_LAYER_CLASS,
+  "fixed mx-auto flex w-[calc(100%-var(--toast-inset)*2)] max-w-90 [--toast-header-offset:52px] [--toast-inset:--spacing(4)] sm:[--toast-inset:--spacing(8)]",
+  // Vertical positioning
+  "data-[position*=top]:top-[calc(var(--toast-inset)+var(--toast-header-offset))]",
+  "data-[position*=bottom]:bottom-(--toast-inset)",
+  // Horizontal positioning
+  "data-[position*=left]:left-(--toast-inset)",
+  "data-[position*=right]:right-(--toast-inset)",
+  "data-[position*=center]:-translate-x-1/2 data-[position*=center]:left-1/2",
+);
 
 /** Dismiss-only: circular control overlapping the card corner (iOS notification–style). */
 const toastCornerDismissClass = "absolute z-20 -top-1.5 -right-1.5";
@@ -558,16 +581,7 @@ function Toasts({ position }: { position: ToastPosition }) {
   return (
     <Toast.Portal data-slot="toast-portal">
       <Toast.Viewport
-        className={cn(
-          "fixed z-100 mx-auto flex w-[calc(100%-var(--toast-inset)*2)] max-w-90 [--toast-header-offset:52px] [--toast-inset:--spacing(4)] sm:[--toast-inset:--spacing(8)]",
-          // Vertical positioning
-          "data-[position*=top]:top-[calc(var(--toast-inset)+var(--toast-header-offset))]",
-          "data-[position*=bottom]:bottom-(--toast-inset)",
-          // Horizontal positioning
-          "data-[position*=left]:left-(--toast-inset)",
-          "data-[position*=right]:right-(--toast-inset)",
-          "data-[position*=center]:-translate-x-1/2 data-[position*=center]:left-1/2",
-        )}
+        className={TOAST_VIEWPORT_CLASS}
         data-position={position}
         data-slot="toast-viewport"
         style={
@@ -731,7 +745,10 @@ function AnchoredToasts() {
 
             return (
               <Toast.Positioner
-                className="z-100 max-w-[min(--spacing(64),var(--available-width))]"
+                className={cn(
+                  NOTIFICATION_LAYER_CLASS,
+                  "max-w-[min(--spacing(64),var(--available-width))]",
+                )}
                 data-slot="toast-positioner"
                 key={toast.id}
                 sideOffset={positionerProps.sideOffset ?? 4}
@@ -803,6 +820,7 @@ export { stackedThreadToast } from "./toastHelpers";
 export type { StackedThreadToastOptions } from "./toastHelpers";
 
 export {
+  TOAST_VIEWPORT_CLASS,
   ToastProvider,
   type ToastPosition,
   toastManager,

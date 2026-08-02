@@ -3,6 +3,17 @@
 import { Popover as PopoverPrimitive } from "@base-ui/react/popover";
 
 import { cn } from "~/lib/utils";
+import { POPUP_LAYER_CLASS } from "~/components/ui/layers";
+
+/**
+ * Exported so the layer ordering can be asserted: a popover the user just
+ * opened has to sit above the toast viewport, which floats over the same
+ * top-right corner. See `layers.ts`.
+ */
+const POPOVER_POSITIONER_CLASS = cn(
+  POPUP_LAYER_CLASS,
+  "h-(--positioner-height) w-(--positioner-width) max-w-(--available-width) transition-transform data-instant:transition-none",
+);
 
 const PopoverCreateHandle = PopoverPrimitive.createHandle;
 
@@ -42,7 +53,7 @@ function PopoverPopup({
         align={align}
         alignOffset={alignOffset}
         anchor={anchor}
-        className="z-[60] h-(--positioner-height) w-(--positioner-width) max-w-(--available-width) transition-transform data-instant:transition-none"
+        className={POPOVER_POSITIONER_CLASS}
         data-slot="popover-positioner"
         side={side}
         sideOffset={sideOffset}
@@ -100,6 +111,7 @@ function PopoverDescription({ className, ...props }: PopoverPrimitive.Descriptio
 }
 
 export {
+  POPOVER_POSITIONER_CLASS,
   PopoverCreateHandle,
   Popover,
   PopoverTrigger,

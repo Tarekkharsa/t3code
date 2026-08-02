@@ -5,6 +5,7 @@ import { ChevronRightIcon } from "lucide-react";
 import type * as React from "react";
 
 import { cn } from "~/lib/utils";
+import { POPUP_LAYER_CLASS } from "~/components/ui/layers";
 
 const MenuCreateHandle = MenuPrimitive.createHandle;
 
@@ -42,7 +43,7 @@ function MenuPopup({
         align={align}
         alignOffset={alignOffset}
         anchor={anchor}
-        className="z-[60]"
+        className={POPUP_LAYER_CLASS}
         data-slot="menu-positioner"
         side={side}
         sideOffset={sideOffset}
